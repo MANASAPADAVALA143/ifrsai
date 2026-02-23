@@ -1,0 +1,49 @@
+# IFRS 16 Lease Accounting Automation
+# Python 3.11+ required
+
+# Core AI/ML
+anthropic==0.40.0
+
+# Web Framework
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.0
+pydantic-settings==2.5.0
+
+# Data Processing
+pandas==2.2.3
+numpy==2.1.2
+python-dateutil==2.9.0
+
+# Document Processing
+PyPDF2==3.0.1
+python-docx==1.1.2
+pytesseract==0.3.13
+Pillow==10.4.0
+
+# Excel Export
+openpyxl==3.1.5
+
+# PDF Generation
+reportlab==4.2.5
+
+# Database
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.35
+
+# Environment Management
+python-dotenv==1.0.1
+
+# HTTP Requests
+httpx==0.27.2
+aiofiles==24.1.0
+
+# Utilities
+python-multipart==0.0.12
+
+# RAG (Retrieval-Augmented Generation)
+chromadb==0.5.23
+sentence-transformers==3.3.1
+langchain==0.3.7
+langchain-community==0.3.7
+langchain-anthropic==0.3.0

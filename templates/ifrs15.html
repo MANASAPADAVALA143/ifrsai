@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IFRS 15 - Revenue Recognition</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f7fa;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #27ae60 0%, #229954 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px 10px 0 0;
+            margin-bottom: 0;
+        }
+
+        .header h1 {
+            font-size: 2em;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            opacity: 0.95;
+            font-size: 1.1em;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+        }
+
+        .tabs {
+            display: flex;
+            background: #ecf0f1;
+            padding: 10px 20px;
+            gap: 10px;
+        }
+
+        .tab {
+            padding: 12px 25px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            color: #7f8c8d;
+            border-radius: 8px;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tab.active {
+            background: white;
+            color: #27ae60;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .tab:hover:not(.active) {
+            background: rgba(255,255,255,0.5);
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .form-section {
+            margin-bottom: 40px;
+            padding: 30px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-left: 4px solid #27ae60;
+        }
+
+        .form-section h2 {
+            color: #2c3e50;
+            margin-bottom: 25px;
+            font-size: 1.5em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 25px;
+            margin-bottom: 25px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-group label {
+            color: #2c3e50;
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 0.95em;
+        }
+
+        .form-group label .required {
+            color: #e74c3c;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            padding: 12px 15px;
+            border: 2px solid #e0e6ed;
+            border-radius: 8px;
+            font-size: 1em;
+            transition: all 0.3s;
+            font-family: inherit;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #27ae60;
+            box-shadow: 0 0 0 3px rgba(39, 174, 96, 0.1);
+        }
+
+        .obligation-card {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border: 2px solid #e0e6ed;
+            position: relative;
+        }
+
+        .obligation-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .obligation-title {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .btn-remove {
+            background: #e74c3c;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+
+        .btn-remove:hover {
+            background: #c0392b;
+        }
+
+        .btn-add {
+            background: #27ae60;
+            color: white;
+            padding: 12px 25px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 15px;
+        }
+
+        .btn-add:hover {
+            background: #229954;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #27ae60 0%, #229954 100%);
+            color: white;
+            padding: 15px 40px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            box-shadow: 0 4px 15px rgba(39, 174, 96, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(39, 174, 96, 0.4);
+        }
+
+        .btn-secondary {
+            background: #95a5a6;
+            color: white;
+            padding: 15px 40px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            margin-left: 15px;
+        }
+
+        .btn-secondary:hover {
+            background: #7f8c8d;
+            transform: translateY(-2px);
+        }
+
+        .button-group {
+            display: flex;
+            justify-content: center;
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 2px solid #e0e6ed;
+        }
+
+        .results {
+            display: none;
+            margin-top: 40px;
+            padding: 30px;
+            background: #ecf9f2;
+            border-radius: 10px;
+            border-left: 4px solid #27ae60;
+        }
+
+        .results h3 {
+            color: #27ae60;
+            margin-bottom: 20px;
+            font-size: 1.4em;
+        }
+
+        .back-link {
+            display: inline-block;
+            color: #27ae60;
+            text-decoration: none;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+
+        .back-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-link" style="margin-left: 20px;">← Back to Home</a>
+    
+    <div class="container">
+        <div class="header">
+            <h1>💰 IFRS 15 - Revenue Recognition</h1>
+            <p>International Financial Reporting Standards Calculator</p>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active">📝 Input</button>
+            <button class="tab">✓ Validation</button>
+            <button class="tab">💵 Allocation</button>
+            <button class="tab">📈 Recognition</button>
+            <button class="tab">ℹ️ Disclosure</button>
+        </div>
+
+        <div class="content">
+            <form id="ifrs15Form">
+                <div class="form-section">
+                    <h2>👥 Contract Details</h2>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Contract ID <span class="required">*</span></label>
+                            <input type="text" id="contractId" placeholder="CONTRACT-2024-001" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Customer Name <span class="required">*</span></label>
+                            <input type="text" id="customerName" placeholder="ABC Corporation Ltd" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Effective Date <span class="required">*</span></label>
+                            <input type="date" id="effectiveDate" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Contract Term (Months) <span class="required">*</span></label>
+                            <input type="number" id="contractTerm" min="1" placeholder="12" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Contract Description</label>
+                            <textarea id="contractDesc" rows="3" placeholder="E.g., Software License and Implementation Services"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Industry Sector</label>
+                            <select id="industrySector">
+                                <option value="">Select Sector</option>
+                                <option value="Technology">Technology</option>
+                                <option value="Manufacturing">Manufacturing</option>
+                                <option value="Healthcare">Healthcare</option>
+                                <option value="Finance">Finance</option>
+                                <option value="Retail">Retail</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-section">
+                    <h2>💵 Transaction Price</h2>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Fixed Consideration (₹) <span class="required">*</span></label>
+                            <input type="number" id="fixedConsideration" step="0.01" min="0" placeholder="1000000" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Variable Consideration (₹)</label>
+                            <input type="number" id="variableConsideration" step="0.01" min="0" value="0" placeholder="0">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Discounts (₹)</label>
+                            <input type="number" id="discounts" step="0.01" min="0" value="0" placeholder="0">
+                        </div>
+                        <div class="form-group">
+                            <label>Rebates (₹)</label>
+                            <input type="number" id="rebates" step="0.01" min="0" value="0" placeholder="0">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-section">
+                    <h2>📋 Performance Obligations</h2>
+                    
+                    <div id="obligationsContainer">
+                        <div class="obligation-card" data-obligation="1">
+                            <div class="obligation-header">
+                                <span class="obligation-title">Obligation 1</span>
+                                <button type="button" class="btn-remove" onclick="removeObligation(1)" style="display: none;">✕ Remove</button>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Description <span class="required">*</span></label>
+                                    <input type="text" class="obligation-desc" placeholder="E.g., Software License, Implementation Services" required>
+                                </div>
+                                <div class="form-group">
+                                    <label>Standalone Price (₹) <span class="required">*</span></label>
+                                    <input type="number" class="obligation-ssp" step="0.01" min="0" placeholder="500000" required>
+                                </div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Recognition Method <span class="required">*</span></label>
+                                    <select class="obligation-method" required>
+                                        <option value="Point in Time">Point in Time</option>
+                                        <option value="Over Time">Over Time</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Recognition Period (Months)</label>
+                                    <input type="number" class="obligation-period" min="1" value="12" placeholder="12">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button type="button" class="btn-add" onclick="addObligation()">
+                        ✚ Add Obligation
+                    </button>
+                </div>
+
+                <div class="button-group">
+                    <button type="submit" class="btn-primary">Calculate IFRS 15</button>
+                    <button type="reset" class="btn-secondary">Reset</button>
+                </div>
+
+                <div class="results" id="results">
+                    <h3>✅ Calculation Results</h3>
+                    <div id="resultContent"></div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let obligationCount = 1;
+
+        function addObligation() {
+            obligationCount++;
+            const container = document.getElementById('obligationsContainer');
+            const newObligation = document.createElement('div');
+            newObligation.className = 'obligation-card';
+            newObligation.setAttribute('data-obligation', obligationCount);
+            newObligation.innerHTML = `
+                <div class="obligation-header">
+                    <span class="obligation-title">Obligation ${obligationCount}</span>
+                    <button type="button" class="btn-remove" onclick="removeObligation(${obligationCount})">✕ Remove</button>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Description <span class="required">*</span></label>
+                        <input type="text" class="obligation-desc" placeholder="E.g., Software License, Implementation Services" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Standalone Price (₹) <span class="required">*</span></label>
+                        <input type="number" class="obligation-ssp" step="0.01" min="0" placeholder="500000" required>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Recognition Method <span class="required">*</span></label>
+                        <select class="obligation-method" required>
+                            <option value="Point in Time">Point in Time</option>
+                            <option value="Over Time">Over Time</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Recognition Period (Months)</label>
+                        <input type="number" class="obligation-period" min="1" value="12" placeholder="12">
+                    </div>
+                </div>
+            `;
+            container.appendChild(newObligation);
+            
+            // Show remove button on first obligation if there are now multiple
+            if (obligationCount > 1) {
+                document.querySelector('[data-obligation="1"] .btn-remove').style.display = 'block';
+            }
+        }
+
+        function removeObligation(id) {
+            const card = document.querySelector(`[data-obligation="${id}"]`);
+            if (card) {
+                card.remove();
+                obligationCount--;
+                
+                // Hide remove button on first obligation if only one left
+                if (obligationCount === 1) {
+                    document.querySelector('[data-obligation="1"] .btn-remove').style.display = 'none';
+                }
+            }
+        }
+
+        document.getElementById('ifrs15Form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const results = document.getElementById('results');
+            const resultContent = document.getElementById('resultContent');
+            
+            // Collect performance obligations
+            const obligations = [];
+            document.querySelectorAll('.obligation-card').forEach(card => {
+                obligations.push({
+                    description: card.querySelector('.obligation-desc').value,
+                    standalone_selling_price: parseFloat(card.querySelector('.obligation-ssp').value),
+                    recognition_method: card.querySelector('.obligation-method').value,
+                    recognition_period_months: parseInt(card.querySelector('.obligation-period').value) || 12
+                });
+            });
+
+            const formData = {
+                contract_id: document.getElementById('contractId').value,
+                customer_name: document.getElementById('customerName').value,
+                contract_start_date: document.getElementById('effectiveDate').value,
+                contract_term_months: parseInt(document.getElementById('contractTerm').value),
+                fixed_consideration: parseFloat(document.getElementById('fixedConsideration').value),
+                variable_consideration: parseFloat(document.getElementById('variableConsideration').value) || 0,
+                discounts: parseFloat(document.getElementById('discounts').value) || 0,
+                rebates: parseFloat(document.getElementById('rebates').value) || 0,
+                performance_obligations: obligations,
+                currency: '₹'
+            };
+            
+            resultContent.innerHTML = `
+                <div style="padding: 20px; background: white; border-radius: 8px; margin-top: 20px;">
+                    <h4 style="color: #27ae60; margin-bottom: 15px;">Contract Summary</h4>
+                    <p style="margin-bottom: 10px;"><strong>Contract ID:</strong> ${formData.contract_id}</p>
+                    <p style="margin-bottom: 10px;"><strong>Customer:</strong> ${formData.customer_name}</p>
+                    <p style="margin-bottom: 10px;"><strong>Total Transaction Price:</strong> ₹${(formData.fixed_consideration + formData.variable_consideration - formData.discounts - formData.rebates).toLocaleString('en-IN', {minimumFractionDigits: 2})}</p>
+                    <p style="margin-bottom: 10px;"><strong>Performance Obligations:</strong> ${formData.performance_obligations.length}</p>
+                    <p style="color: #7f8c8d; margin-top: 15px; font-size: 0.9em;">Full IFRS 15 calculation API integration available. This form demonstrates the interface.</p>
+                </div>
+            `;
+            results.style.display = 'block';
+            results.scrollIntoView({ behavior: 'smooth' });
+        });
+    </script>
+</body>
+</html>

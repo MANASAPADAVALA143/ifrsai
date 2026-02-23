@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IFRS AI Automation Platform</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+            padding: 40px 20px;
+        }
+
+        .header h1 {
+            font-size: 3em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.95;
+        }
+
+        .status-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .status-dot {
+            width: 20px;
+            height: 20px;
+            background: #10b981;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .status-text {
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #1f2937;
+        }
+
+        .products-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 25px;
+            margin-bottom: 30px;
+        }
+
+        .product-card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s, box-shadow 0.3s;
+            cursor: pointer;
+        }
+
+        .product-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+        }
+
+        .product-icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+        }
+
+        .product-card h3 {
+            color: #1f2937;
+            font-size: 1.5em;
+            margin-bottom: 10px;
+        }
+
+        .product-card p {
+            color: #6b7280;
+            line-height: 1.6;
+            margin-bottom: 20px;
+        }
+
+        .product-features {
+            list-style: none;
+            margin-bottom: 20px;
+        }
+
+        .product-features li {
+            color: #4b5563;
+            padding: 8px 0;
+            padding-left: 25px;
+            position: relative;
+        }
+
+        .product-features li:before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            color: #10b981;
+            font-weight: bold;
+        }
+
+        .btn {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 30px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: transform 0.2s;
+            border: none;
+            cursor: pointer;
+            font-size: 1em;
+        }
+
+        .btn:hover {
+            transform: scale(1.05);
+        }
+
+        .links-section {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+        }
+
+        .links-section h2 {
+            color: #1f2937;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+        }
+
+        .link-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .link-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 25px;
+            border-radius: 10px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: transform 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .link-btn:hover {
+            transform: translateY(-3px);
+        }
+
+        .api-info {
+            background: #f3f4f6;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+
+        .api-info code {
+            background: #1f2937;
+            color: #10b981;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .footer {
+            text-align: center;
+            color: white;
+            padding: 20px;
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 IFRS AI Automation Platform</h1>
+            <p>Enterprise-Grade IFRS Compliance Powered by AI</p>
+        </div>
+
+        <div class="status-card">
+            <div class="status-indicator">
+                <div class="status-dot"></div>
+                <span class="status-text">Server Online & Ready</span>
+            </div>
+            <p style="color: #6b7280;">All systems operational. API is ready to process your requests.</p>
+        </div>
+
+        <div class="links-section">
+            <h2>🔗 Quick Access</h2>
+            <div class="link-buttons">
+                <a href="/api/docs" class="link-btn">
+                    📚 Interactive API Docs
+                </a>
+                <a href="/api/redoc" class="link-btn">
+                    📖 API Reference
+                </a>
+                <a href="/api/health" class="link-btn">
+                    💚 Health Check
+                </a>
+            </div>
+            <div class="api-info">
+                <p style="margin-bottom: 10px;"><strong>Base URL:</strong> <code>http://127.0.0.1:8000</code></p>
+                <p><strong>API Version:</strong> 1.0.0</p>
+            </div>
+        </div>
+
+        <h2 style="color: white; text-align: center; margin-bottom: 30px; font-size: 2em;">Available Products</h2>
+
+        <div class="products-grid">
+            <div class="product-card">
+                <div class="product-icon">📊</div>
+                <h3>IFRS 16 Lease Accounting</h3>
+                <p>AI-powered lease contract analysis and automated calculations</p>
+                <ul class="product-features">
+                    <li>Present Value Calculations</li>
+                    <li>ROU Asset & Liability Tracking</li>
+                    <li>Amortization Schedules</li>
+                    <li>Journal Entry Generation</li>
+                    <li>Excel Report Export</li>
+                </ul>
+                <a href="/ifrs16" class="btn">Open Calculator</a>
+            </div>
+
+            <div class="product-card">
+                <div class="product-icon">💰</div>
+                <h3>IFRS 15 Revenue Recognition</h3>
+                <p>5-step revenue recognition model automation</p>
+                <ul class="product-features">
+                    <li>Contract Analysis</li>
+                    <li>Performance Obligations</li>
+                    <li>Transaction Price Allocation</li>
+                    <li>SSP Calculation</li>
+                    <li>Revenue Schedules</li>
+                </ul>
+                <a href="/ifrs15" class="btn">Open Calculator</a>
+            </div>
+
+            <div class="product-card">
+                <div class="product-icon">🎯</div>
+                <h3>IFRS 9 ECL Calculator</h3>
+                <p>ML-powered Expected Credit Loss calculations</p>
+                <ul class="product-features">
+                    <li>Loan Staging (1/2/3)</li>
+                    <li>SICR Detection</li>
+                    <li>PD/LGD/EAD Modeling</li>
+                    <li>Scenario Weighting</li>
+                    <li>ECL Reporting</li>
+                </ul>
+                <a href="/api/docs" class="btn">Try It Now</a>
+            </div>
+        </div>
+
+        <div class="links-section">
+            <h2>🔧 Developer Resources</h2>
+            <p style="color: #6b7280; margin-bottom: 20px;">All endpoints are available via REST API. Use the interactive docs to test endpoints directly from your browser.</p>
+            <div class="link-buttons">
+                <a href="/api/docs" class="link-btn">
+                    🧪 Test API Endpoints
+                </a>
+                <a href="https://github.com" class="link-btn">
+                    📦 View on GitHub
+                </a>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>© 2026 IFRS AI Automation Platform | Powered by FastAPI & Claude AI</p>
+            <p style="margin-top: 10px; font-size: 0.9em;">Built with ❤️ for Financial Compliance</p>
+        </div>
+    </div>
+</body>
+</html>

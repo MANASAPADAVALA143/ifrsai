@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IFRS 16 - Lease Accounting</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f7fa;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px 10px 0 0;
+            margin-bottom: 0;
+        }
+
+        .header h1 {
+            font-size: 2em;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            opacity: 0.95;
+            font-size: 1.1em;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .form-section {
+            margin-bottom: 40px;
+            padding: 30px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-left: 4px solid #f39c12;
+        }
+
+        .form-section h2 {
+            color: #2c3e50;
+            margin-bottom: 25px;
+            font-size: 1.5em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 25px;
+            margin-bottom: 25px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-group label {
+            color: #2c3e50;
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 0.95em;
+        }
+
+        .form-group label .required {
+            color: #e74c3c;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            padding: 12px 15px;
+            border: 2px solid #e0e6ed;
+            border-radius: 8px;
+            font-size: 1em;
+            transition: all 0.3s;
+            font-family: inherit;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #f39c12;
+            box-shadow: 0 0 0 3px rgba(243, 156, 18, 0.1);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%);
+            color: white;
+            padding: 15px 40px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            box-shadow: 0 4px 15px rgba(243, 156, 18, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(243, 156, 18, 0.4);
+        }
+
+        .btn-secondary {
+            background: #95a5a6;
+            color: white;
+            padding: 15px 40px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            margin-left: 15px;
+        }
+
+        .btn-secondary:hover {
+            background: #7f8c8d;
+            transform: translateY(-2px);
+        }
+
+        .button-group {
+            display: flex;
+            justify-content: center;
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 2px solid #e0e6ed;
+        }
+
+        .results {
+            display: none;
+            margin-top: 40px;
+            padding: 30px;
+            background: #ecf9f2;
+            border-radius: 10px;
+            border-left: 4px solid #27ae60;
+        }
+
+        .results h3 {
+            color: #27ae60;
+            margin-bottom: 20px;
+            font-size: 1.4em;
+        }
+
+        .result-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid #d1f2e3;
+        }
+
+        .result-label {
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .result-value {
+            color: #27ae60;
+            font-weight: 700;
+            font-size: 1.1em;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #f39c12;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .back-link {
+            display: inline-block;
+            color: #f39c12;
+            text-decoration: none;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+
+        .back-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-link" style="margin-left: 20px;">← Back to Home</a>
+    
+    <div class="container">
+        <div class="header">
+            <h1>📊 IFRS 16 - Lease Accounting</h1>
+            <p>International Financial Reporting Standards Calculator</p>
+        </div>
+
+        <div class="content">
+            <form id="ifrs16Form">
+                <div class="form-section">
+                    <h2>📋 Lease Input Parameters</h2>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Lease Type <span class="required">*</span></label>
+                            <select id="leaseType" required>
+                                <option value="Operating Lease">Operating Lease</option>
+                                <option value="Finance Lease">Finance Lease</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Lease Asset <span class="required">*</span></label>
+                            <input type="text" id="leaseAsset" placeholder="E.g., Office Building, Equipment" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Commencement Date <span class="required">*</span></label>
+                            <input type="date" id="commencementDate" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Lease Term (Months) <span class="required">*</span></label>
+                            <input type="number" id="leaseTerm" min="1" placeholder="36" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Monthly Payment (₹) <span class="required">*</span></label>
+                            <input type="number" id="monthlyPayment" step="0.01" min="0" placeholder="50000" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Incremental Borrowing Rate (% p.a.) <span class="required">*</span></label>
+                            <input type="number" id="borrowingRate" step="0.01" min="0" placeholder="8.5" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Initial Direct Costs (₹)</label>
+                            <input type="number" id="initialCosts" step="0.01" min="0" value="0" placeholder="0">
+                        </div>
+                        <div class="form-group">
+                            <label>Escalation Rate (% p.a.)</label>
+                            <input type="number" id="escalationRate" step="0.01" min="0" value="0" placeholder="0">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Lease ID <span class="required">*</span></label>
+                            <input type="text" id="leaseId" placeholder="LEASE-2026-001" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Lessee Name</label>
+                            <input type="text" id="lesseeName" placeholder="Company Name">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="button-group">
+                    <button type="submit" class="btn-primary">Calculate IFRS 16</button>
+                    <button type="reset" class="btn-secondary">Reset</button>
+                </div>
+
+                <div class="loading" id="loading">
+                    <div class="spinner"></div>
+                    <p style="margin-top: 15px; color: #7f8c8d;">Calculating...</p>
+                </div>
+
+                <div class="results" id="results">
+                    <h3>✅ Calculation Results</h3>
+                    <div id="resultContent"></div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('ifrs16Form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const loading = document.getElementById('loading');
+            const results = document.getElementById('results');
+            const resultContent = document.getElementById('resultContent');
+            
+            loading.style.display = 'block';
+            results.style.display = 'none';
+            
+            const formData = {
+                lease_id: document.getElementById('leaseId').value,
+                asset_description: document.getElementById('leaseAsset').value,
+                lessee_name: document.getElementById('lesseeName').value || '',
+                lease_term_months: parseInt(document.getElementById('leaseTerm').value),
+                monthly_payment: parseFloat(document.getElementById('monthlyPayment').value),
+                commencement_date: document.getElementById('commencementDate').value,
+                annual_discount_rate: parseFloat(document.getElementById('borrowingRate').value),
+                initial_direct_costs: parseFloat(document.getElementById('initialCosts').value) || 0,
+                escalation_rate: parseFloat(document.getElementById('escalationRate').value) || 0,
+                currency: '₹'
+            };
+            
+            try {
+                const response = await fetch('/api/calculate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(formData)
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    const summary = data.results.summary;
+                    resultContent.innerHTML = `
+                        <div class="result-item">
+                            <span class="result-label">Present Value of Lease Payments:</span>
+                            <span class="result-value">₹${summary.present_value.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Right-of-Use Asset:</span>
+                            <span class="result-value">₹${summary.rou_asset.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Initial Lease Liability:</span>
+                            <span class="result-value">₹${summary.initial_lease_liability.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Total Interest Expense:</span>
+                            <span class="result-value">₹${summary.total_interest_expense.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Total Depreciation:</span>
+                            <span class="result-value">₹${summary.total_depreciation.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Total Payments:</span>
+                            <span class="result-value">₹${summary.total_payments.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span>
+                        </div>
+                    `;
+                    results.style.display = 'block';
+                } else {
+                    alert('Error: ' + (data.detail || 'Calculation failed'));
+                }
+            } catch (error) {
+                alert('Error connecting to server: ' + error.message);
+            } finally {
+                loading.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
