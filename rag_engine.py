@@ -73,7 +73,7 @@ class IFRSRagEngine:
     
     def _dict_to_text_chunks(
         self,
-        content: Dict[str, Any],
+        content: dict,
         chunk_size: int = 500,
         overlap: int = 50
     ) -> List[str]:
@@ -135,9 +135,9 @@ class IFRSRagEngine:
         self,
         company_id: str,
         document_type: str,
-        content: Dict[str, Any],
+        content: dict,
         document_id: str
-    ) -> Dict[str, Any]:
+    ) -> dict:
         """
         Embed content and store in ChromaDB with company isolation
         
@@ -211,7 +211,7 @@ class IFRSRagEngine:
         query: str,
         document_type: Optional[str] = None,
         top_k: int = 5
-    ) -> List[Dict[str, Any]]:
+    ) -> List[dict]:
         """
         Retrieve relevant context filtered by company_id
         
@@ -268,7 +268,7 @@ class IFRSRagEngine:
         question: str,
         document_type: Optional[str] = None,
         top_k: int = 5
-    ) -> Dict[str, Any]:
+    ) -> dict:
         """
         Answer question using Claude API with retrieved context
         
@@ -363,7 +363,7 @@ Answer:"""
                 "error": str(e)
             }
     
-    def get_company_stats(self, company_id: str) -> Dict[str, Any]:
+    def get_company_stats(self, company_id: str) -> dict:
         """
         Get statistics about stored documents for a company
         
@@ -408,7 +408,7 @@ Answer:"""
                 "error": str(e)
             }
     
-    def delete_document(self, company_id: str, document_id: str) -> Dict[str, Any]:
+    def delete_document(self, company_id: str, document_id: str) -> dict:
         """
         Delete a document and all its chunks
         
@@ -501,3 +501,4 @@ if __name__ == "__main__":
     # Get company stats
     stats = rag.get_company_stats("COMP-ABC-001")
     print(f"\n📊 Company stats: {stats}")
+

@@ -545,3 +545,4 @@ if __name__ == "__main__":
             dr_str = f"${entry['dr']:,.2f}" if entry['dr'] > 0 else ""
             cr_str = f"${entry['cr']:,.2f}" if entry['cr'] > 0 else ""
             print(f"   {entry['account']:<40} Dr: {dr_str:>15} Cr: {cr_str:>15}")
+

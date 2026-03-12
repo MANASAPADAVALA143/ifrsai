@@ -1,0 +1,23 @@
+========================================
+  IFRS AI - HOW TO RUN THE APP
+========================================
+
+ONE-WINDOW (easiest):
+  1. Double-click:  START_ONE_WINDOW.bat
+  2. Keep that window OPEN.
+  3. Browser will open to http://localhost:3004
+     (If not, open that URL yourself.)
+
+TWO-WINDOW:
+  1. Double-click:  START_BOTH.bat
+  2. Keep BOTH CMD windows open.
+  3. Go to: http://localhost:3004 (or 3003 if you used dev:localhost)
+
+If you see "Backend Offline" or "Cannot connect to backend":
+  - You closed the backend or never started it.
+  - Run START_ONE_WINDOW.bat (or START_BOTH.bat) again and keep the window(s) open.
+
+========================================
+  App URL:  http://localhost:3004  (3003 if another app uses 3004)
+  API:      http://localhost:9000
+========================================

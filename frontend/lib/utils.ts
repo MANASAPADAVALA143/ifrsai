@@ -19,6 +19,17 @@ export function formatIndianCurrencyWithDecimals(amount: number, decimals: numbe
   return formatter.format(amount);
 }
 
+// Format number with currency (INR, USD, etc.)
+export function formatCurrency(amount: number, currency: string = 'INR', decimals: number = 0): string {
+  const formatter = new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: currency || 'INR',
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+  return formatter.format(amount);
+}
+
 // Format number without currency symbol
 export function formatIndianNumber(num: number): string {
   return new Intl.NumberFormat('en-IN').format(num);

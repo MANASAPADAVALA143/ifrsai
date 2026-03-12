@@ -346,3 +346,4 @@ if __name__ == "__main__":
         print(f"{stage}:")
         print(f"  Loans: {data['loan_count']} ({data['pct_of_loans']:.1f}%)")
         print(f"  Exposure: ${data['total_exposure']:,.2f} ({data['pct_of_exposure']:.1f}%)")
+

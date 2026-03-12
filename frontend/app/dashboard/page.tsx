@@ -3,7 +3,7 @@
 import { DashboardLayout } from '@/components/DashboardLayout';
 import { KPICard } from '@/components/KPICard';
 import { FileText, TrendingUp, Calendar, AlertCircle, Download } from 'lucide-react';
-import { LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from '@/components/Charts';
 import { formatIndianCurrency, formatCrores, getGreeting, formatDate } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
 

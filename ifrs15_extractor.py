@@ -282,6 +282,23 @@ Begin extraction:"""
             except ImportError:
                 raise ImportError("python-docx not installed. Run: pip install python-docx")
         
+        elif file_path.suffix.lower() in ['.xlsx', '.xls']:
+            try:
+                import pandas as pd
+                excel_file = pd.ExcelFile(str(file_path))
+                contract_text = ""
+                for sheet_name in excel_file.sheet_names:
+                    contract_text += f"\n=== Sheet: {sheet_name} ===\n"
+                    df = pd.read_excel(excel_file, sheet_name=sheet_name)
+                    contract_text += " | ".join(str(col) for col in df.columns) + "\n"
+                    contract_text += "-" * 80 + "\n"
+                    for _, row in df.iterrows():
+                        row_text = " | ".join(str(val) if pd.notna(val) else "" for val in row.values)
+                        contract_text += row_text + "\n"
+                    contract_text += "\n"
+            except ImportError:
+                raise ImportError("pandas and openpyxl not installed. Run: pip install pandas openpyxl")
+        
         else:
             raise ValueError(f"Unsupported file type: {file_path.suffix}")
         
@@ -377,3 +394,4 @@ if __name__ == "__main__":
         
     except Exception as e:
         print(f"\nError: {e}")
+

@@ -542,3 +542,4 @@ if __name__ == "__main__":
     print("  exporter.export_ifrs16_workbook(results, 'output.xlsx')")
     print()
     print("See example_usage.py for a complete working example.")
+

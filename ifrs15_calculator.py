@@ -546,3 +546,4 @@ if __name__ == "__main__":
         print(f"     Allocated: ${item['allocated_amount']:,.2f}")
         print(f"     Recognized: ${item['revenue_recognized']:,.2f}")
         print(f"     Remaining: ${item['remaining']:,.2f}")
+

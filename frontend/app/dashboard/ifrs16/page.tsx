@@ -1,436 +1,379 @@
 'use client';
 
-import { useState } from 'react';
-import { DashboardLayout } from '@/components/DashboardLayout';
+import { useState, useEffect, useCallback } from 'react';
+import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
-import { Upload, FileText, Calculator, Download, ChevronRight } from 'lucide-react';
+import { Plus, Upload, FileBarChart, Eye, Calculator, Download, Building2, Car, Warehouse, Landmark, Store } from 'lucide-react';
+import { getLeaseRepository } from '@/lib/lease-repository';
+import { formatIndianCurrency } from '@/lib/utils';
 import { ifrs16Api } from '@/lib/api';
-import { useAuth } from '@/hooks/useAuth';
+import Link from 'next/link';
 import toast from 'react-hot-toast';
-import { formatIndianCurrency, formatIndianCurrencyWithDecimals } from '@/lib/utils';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import {
+  AreaChart,
+  Area,
+  BarChart,
+  Bar,
+  PieChart,
+  Pie,
+  Cell,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from '@/components/Charts';
 
-export default function IFRS16Page() {
-  const [activeTab, setActiveTab] = useState<'upload' | 'manual'>('upload');
-  const [file, setFile] = useState<File | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
-  const [isCalculating, setIsCalculating] = useState(false);
-  const [extractedData, setExtractedData] = useState<any>(null);
-  const [results, setResults] = useState<any>(null);
-  const [fileId, setFileId] = useState<string | null>(null);
-  const { getCompanyId } = useAuth();
+const ORANGE_SHADES = ['#f97316', '#fb923c', '#fed7aa', '#ef4444', '#fbbf24', '#f59e0b'];
 
-  // Form state for manual entry
-  const [formData, setFormData] = useState({
-    lease_id: '',
-    company_id: '',
-    asset_description: '',
-    lessee_name: '',
-    lessor_name: '',
-    commencement_date: '',
-    lease_term_months: '',
-    monthly_payment: '',
-    annual_discount_rate: '',
-    initial_direct_costs: '0',
-    currency: 'INR',
+function getStatus(endDate: string): { label: string; className: string } {
+  const end = new Date(endDate);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  end.setHours(0, 0, 0, 0);
+  const diffDays = Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (diffDays < 0) return { label: 'Expired', className: 'bg-red-100 text-red-700' };
+  if (diffDays <= 30) return { label: 'Expiring Soon', className: 'bg-amber-100 text-amber-700' };
+  return { label: 'Active', className: 'bg-green-100 text-green-700' };
+}
+
+function inferAssetType(asset: string): string {
+  const a = (asset || '').toLowerCase();
+  if (a.includes('office')) return 'Office';
+  if (a.includes('vehicle') || a.includes('car') || a.includes('auto')) return 'Vehicle';
+  if (a.includes('equipment') || a.includes('machine')) return 'Equipment';
+  if (a.includes('land')) return 'Land';
+  if (a.includes('retail') || a.includes('store')) return 'Retail';
+  if (a.includes('building') || a.includes('site')) return 'Building';
+  return 'Other';
+}
+
+function getAssetTypeIcon(type: string) {
+  switch (type) {
+    case 'Office': return Building2;
+    case 'Vehicle': return Car;
+    case 'Equipment': return Warehouse;
+    case 'Land': return Landmark;
+    case 'Retail': return Store;
+    default: return Building2;
+  }
+}
+
+export default function IFRS16DashboardPage() {
+  const [leases, setLeases] = useState<any[]>([]);
+
+  const load = useCallback(() => {
+    setLeases(getLeaseRepository());
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const totalActive = leases.filter((l) => {
+    if (l.status === 'Active') return true;
+    const end = new Date(l.end_date || l.dates?.end || '9999-12-31');
+    return end >= today && l.status !== 'Expired' && l.status !== 'Draft';
+  }).length;
+
+  const expiring30 = leases.filter((l) => {
+    const end = new Date(l.end_date || l.dates?.end || '9999-12-31');
+    const diff = Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    return diff >= 0 && diff <= 30;
   });
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0];
-    if (!selectedFile) return;
+  const expiring90 = leases.filter((l) => {
+    const end = new Date(l.end_date || l.dates?.end || '9999-12-31');
+    const diff = Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    return diff >= 0 && diff <= 90;
+  });
 
-    if (!selectedFile.name.match(/\.(pdf|docx|txt)$/i)) {
-      toast.error('Please upload a PDF, DOCX, or TXT file');
+  const expiring365 = leases.filter((l) => {
+    const end = new Date(l.end_date || l.dates?.end || '9999-12-31');
+    const diff = Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    return diff >= 0 && diff <= 365;
+  });
+
+  const totalContractedValue = leases.reduce((s, l) => {
+    const m = l.monthly_payment ?? l.payments?.monthly ?? 0;
+    const t = l.dates?.term_months || 12;
+    return s + m * t;
+  }, 0);
+
+  const totalLeaseLiability = leases.reduce((s, l) => s + (Number(l.liability) ?? Number((l.results as any)?.lease_liability) ?? 0), 0);
+  const pendingCalc = leases.filter((l) => l.results == null || (l.liability == null && (l.results as any)?.lease_liability == null)).length;
+
+  const averageLeaseValue = totalActive > 0 ? totalContractedValue / totalActive : 0;
+
+  const typeCounts: Record<string, number> = {};
+  leases.forEach((l) => {
+    const t = (l.lease_type || inferAssetType(l.asset || '') || 'Other').trim() || 'Other';
+    typeCounts[t] = (typeCounts[t] || 0) + 1;
+  });
+  const pieData = Object.entries(typeCounts).map(([name, value]) => ({ name, value }));
+
+  const scheduleByMonth: Record<string, number> = {};
+  leases.forEach((l) => {
+    const schedule = (l.results?.amortization_schedule || []) as any[];
+    schedule.forEach((row: any) => {
+      const dateStr = row.payment_date ?? row.Date;
+      if (!dateStr) return;
+      const d = new Date(dateStr);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const closing = row.closing_balance ?? row.Closing_Balance ?? 0;
+      scheduleByMonth[key] = (scheduleByMonth[key] || 0) + Number(closing);
+    });
+  });
+
+  const liabilityByMonth = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + i);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    return {
+      month: d.toLocaleString('default', { month: 'short' }) + ' ' + d.getFullYear(),
+      liability: scheduleByMonth[key] ?? 0,
+    };
+  });
+
+  const paymentTimeline = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + i);
+    const monthStart = new Date(d.getFullYear(), d.getMonth(), 1);
+    let total = 0;
+    leases.forEach((l) => {
+      const end = new Date(l.dates?.end || '9999-12-31');
+      const start = new Date(l.dates?.commencement || '2020-01-01');
+      if (monthStart >= start && monthStart <= end) {
+        total += l.payments?.monthly || 0;
+      }
+    });
+    return {
+      month: monthStart.toLocaleString('default', { month: 'short' }),
+      payment: total,
+    };
+  });
+
+  const handleDownload = (entry: any) => {
+    const fid = entry.excel_file_id;
+    if (!fid) {
+      toast.error('No Excel file for this lease');
       return;
     }
-
-    setFile(selectedFile);
-    setIsUploading(true);
-
-    try {
-      const { data, error } = await ifrs16Api.uploadContract(selectedFile);
-      if (error) throw new Error(error);
-
-      setExtractedData(data?.extracted_data);
-      toast.success('Contract extracted successfully! Please review the data.');
-    } catch (error) {
-      toast.error('Failed to extract contract');
-      console.error(error);
-    } finally {
-      setIsUploading(false);
-    }
+    window.open(ifrs16Api.downloadReport(fid), '_blank');
+    toast.success('Download started');
   };
 
-  const handleManualCalculate = async () => {
-    setIsCalculating(true);
-
-    try {
-      const leaseData = {
-        ...formData,
-        company_id: getCompanyId(),
-        lease_term_months: parseInt(formData.lease_term_months),
-        monthly_payment: parseFloat(formData.monthly_payment),
-        annual_discount_rate: parseFloat(formData.annual_discount_rate),
-        initial_direct_costs: parseFloat(formData.initial_direct_costs),
-      };
-
-      const { data, error } = await ifrs16Api.calculate(leaseData);
-      if (error) throw new Error(error);
-
-      setResults(data?.results);
-      setFileId(data?.excel_file_id || null);
-      toast.success('Calculation completed successfully!');
-    } catch (error) {
-      toast.error('Failed to calculate lease');
-      console.error(error);
-    } finally {
-      setIsCalculating(false);
-    }
-  };
-
-  const prepareChartData = () => {
-    if (!results?.amortization_schedule) return [];
-    
-    return results.amortization_schedule.slice(0, 24).map((row: any, index: number) => ({
-      month: `M${index + 1}`,
-      liability: parseFloat(row.closing_balance || 0),
-      interest: parseFloat(row.cumulative_interest || row.interest || 0),
-    }));
-  };
+  const recentLeases = [...leases].slice(0, 10);
 
   return (
-    <DashboardLayout>
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-2 text-sm text-gray-600 mb-6">
-        <span>Dashboard</span>
-        <ChevronRight className="w-4 h-4" />
-        <span className="text-primary font-medium">IFRS 16</span>
-      </div>
-
-      {/* Page Header */}
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-primary mb-2">IFRS 16 — Lease Accounting</h1>
-        <p className="text-gray-600">Calculate lease liability, ROU asset, and generate audit-ready reports</p>
-      </div>
-
-      {/* Tabs */}
-      <div className="mb-6 border-b border-gray-200">
-        <div className="flex gap-4">
-          <button
-            onClick={() => setActiveTab('upload')}
-            className={`px-4 py-2 font-medium transition-colors border-b-2 ${
-              activeTab === 'upload'
-                ? 'border-accent text-accent'
-                : 'border-transparent text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <Upload className="w-4 h-4" />
-              Upload Contract
-            </div>
-          </button>
-          <button
-            onClick={() => setActiveTab('manual')}
-            className={`px-4 py-2 font-medium transition-colors border-b-2 ${
-              activeTab === 'manual'
-                ? 'border-accent text-accent'
-                : 'border-transparent text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <FileText className="w-4 h-4" />
-              Manual Entry
-            </div>
-          </button>
-        </div>
-      </div>
-
-      {/* Upload Tab */}
-      {activeTab === 'upload' && (
-        <div className="bg-white rounded-lg p-8 shadow-sm border border-gray-100 mb-8">
-          <div className="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center hover:border-accent transition-colors">
-            <Upload className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-            <h3 className="text-lg font-semibold mb-2">Drop your lease PDF here</h3>
-            <p className="text-gray-600 mb-4">or click to browse</p>
-            <p className="text-sm text-gray-500 mb-6">Supports PDF, DOCX, TXT</p>
-            <input
-              type="file"
-              onChange={handleFileSelect}
-              accept=".pdf,.docx,.txt"
-              className="hidden"
-              id="file-upload"
-            />
-            <label htmlFor="file-upload">
-              <Button variant="primary" size="md" isLoading={isUploading} as="span">
-                {isUploading ? 'Extracting...' : 'Select File'}
-              </Button>
-            </label>
-          </div>
-
-          {extractedData && (
-            <div className="mt-8 p-6 bg-success/10 border border-success/20 rounded-lg">
-              <h4 className="font-semibold text-success mb-3">✓ Extraction Complete</h4>
-              <p className="text-sm text-gray-600">
-                Please review the extracted data and proceed to calculation.
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Manual Entry Tab */}
-      {activeTab === 'manual' && (
-        <div className="bg-white rounded-lg p-8 shadow-sm border border-gray-100 mb-8">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Lease ID <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={formData.lease_id}
-                onChange={(e) => setFormData({ ...formData, lease_id: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-                placeholder="LEASE-2024-001"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Asset Description <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={formData.asset_description}
-                onChange={(e) => setFormData({ ...formData, asset_description: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-                placeholder="Office Space - 5,000 sq ft"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Lessee Name
-              </label>
-              <input
-                type="text"
-                value={formData.lessee_name}
-                onChange={(e) => setFormData({ ...formData, lessee_name: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-                placeholder="Your Company Name"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Lessor Name
-              </label>
-              <input
-                type="text"
-                value={formData.lessor_name}
-                onChange={(e) => setFormData({ ...formData, lessor_name: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-                placeholder="Landlord/Lessor Name"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Lease Start Date <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="date"
-                value={formData.commencement_date}
-                onChange={(e) => setFormData({ ...formData, commencement_date: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Lease Term (months) <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="number"
-                value={formData.lease_term_months}
-                onChange={(e) => setFormData({ ...formData, lease_term_months: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-                placeholder="36"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Monthly Payment (₹) <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="number"
-                value={formData.monthly_payment}
-                onChange={(e) => setFormData({ ...formData, monthly_payment: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-                placeholder="50000"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Discount Rate (%) <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="number"
-                step="0.001"
-                value={formData.annual_discount_rate}
-                onChange={(e) => setFormData({ ...formData, annual_discount_rate: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-                placeholder="8.5"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Initial Direct Costs (₹)
-              </label>
-              <input
-                type="number"
-                value={formData.initial_direct_costs}
-                onChange={(e) => setFormData({ ...formData, initial_direct_costs: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-                placeholder="0"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Currency
-              </label>
-              <select
-                value={formData.currency}
-                onChange={(e) => setFormData({ ...formData, currency: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent"
-              >
-                <option value="INR">INR (₹)</option>
-                <option value="USD">USD ($)</option>
-                <option value="EUR">EUR (€)</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="mt-8">
-            <Button
-              variant="primary"
-              size="lg"
-              isLoading={isCalculating}
-              onClick={handleManualCalculate}
-              className="w-full"
-            >
-              <Calculator className="w-5 h-5" />
-              Calculate IFRS 16
+    <SidebarLayout
+      pageTitle="IFRS 16 Overview"
+      pageSubtitle="Lease portfolio KPIs and analytics"
+    >
+      <div className="space-y-6">
+        {/* Quick Actions */}
+        <div className="flex flex-wrap gap-3">
+          <Link href="/dashboard/ifrs16/leases/new">
+            <Button variant="primary" className="bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white">
+              <Plus className="w-4 h-4 mr-2" />
+              Add New Lease
             </Button>
+          </Link>
+          <Link href="/dashboard/ifrs16/upload">
+            <Button variant="secondary" className="border-border-default">
+              <Upload className="w-4 h-4 mr-2" />
+              Bulk Upload
+            </Button>
+          </Link>
+          <Link href="/dashboard/reports">
+            <Button variant="secondary" className="border-border-default">
+              <FileBarChart className="w-4 h-4 mr-2" />
+              Generate Reports
+            </Button>
+          </Link>
+        </div>
+
+        {/* KPI Row */}
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+            <p className="text-xs font-medium text-[#64748b] mb-1">Total Active Leases</p>
+            <p className="text-2xl font-bold text-[#1e293b] font-mono">{totalActive}</p>
+          </div>
+          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+            <p className="text-xs font-medium text-[#64748b] mb-1">Total Contracted Value</p>
+            <p className="text-xl font-bold text-[#1e293b] font-mono">{formatIndianCurrency(totalContractedValue)}</p>
+          </div>
+          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+            <p className="text-xs font-medium text-[#64748b] mb-1">Average Lease Value</p>
+            <p className="text-xl font-bold text-[#1e293b] font-mono">{formatIndianCurrency(averageLeaseValue)}</p>
+          </div>
+          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+            <p className="text-xs font-medium text-[#64748b] mb-1">Total Lease Liability</p>
+            <p className="text-xl font-bold text-[#f97316] font-mono">{formatIndianCurrency(totalLeaseLiability)}</p>
+          </div>
+          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+            <p className="text-xs font-medium text-[#64748b] mb-1">Leases Expiring</p>
+            <p className="text-xl font-bold text-[#1e293b] font-mono">{expiring30.length} / {expiring90.length} / {expiring365.length}</p>
+            <p className="text-xs text-[#64748b] mt-1">30 / 90 / 365 days</p>
+          </div>
+          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+            <p className="text-xs font-medium text-[#64748b] mb-1">Pending Calculations</p>
+            <p className="text-2xl font-bold text-[#1e293b] font-mono">{pendingCalc}</p>
           </div>
         </div>
-      )}
 
-      {/* Results Section */}
-      {results && (
-        <div className="space-y-8">
-          {/* Result Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-100">
-              <h4 className="text-sm font-medium text-gray-600 mb-2">Lease Liability</h4>
-              <p className="text-2xl font-bold text-primary">
-                {formatIndianCurrency(results.lease_liability)}
-              </p>
-              <p className="text-xs text-gray-500 mt-1">Present Value</p>
-            </div>
-
-            <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-100">
-              <h4 className="text-sm font-medium text-gray-600 mb-2">ROU Asset</h4>
-              <p className="text-2xl font-bold text-primary">
-                {formatIndianCurrency(results.rou_asset)}
-              </p>
-              <p className="text-xs text-gray-500 mt-1">At Recognition</p>
-            </div>
-
-            <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-100">
-              <h4 className="text-sm font-medium text-gray-600 mb-2">Monthly Interest</h4>
-              <p className="text-2xl font-bold text-primary">
-                {formatIndianCurrencyWithDecimals(results.year_1_impact?.interest_expense / 12 || 0, 0)}
-              </p>
-              <p className="text-xs text-gray-500 mt-1">Avg Year 1</p>
-            </div>
-
-            <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-100">
-              <h4 className="text-sm font-medium text-gray-600 mb-2">Monthly Depreciation</h4>
-              <p className="text-2xl font-bold text-primary">
-                {formatIndianCurrencyWithDecimals(results.monthly_depreciation, 0)}
-              </p>
-              <p className="text-xs text-gray-500 mt-1">Straight-line</p>
-            </div>
-          </div>
-
-          {/* Amortization Chart */}
-          <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-100">
-            <h3 className="text-lg font-bold text-primary mb-4">Amortization Schedule (First 24 Months)</h3>
-            <ResponsiveContainer width="100%" height={300}>
-              <AreaChart data={prepareChartData()}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis dataKey="month" stroke="#666" style={{ fontSize: '12px' }} />
-                <YAxis stroke="#666" style={{ fontSize: '12px' }} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#fff',
-                    border: '1px solid #ddd',
-                    borderRadius: '8px',
-                  }}
-                  formatter={(value: any) => [formatIndianCurrency(value), '']}
-                />
-                <Legend />
-                <Area
-                  type="monotone"
-                  dataKey="liability"
-                  stackId="1"
-                  stroke="#6366F1"
-                  fill="#6366F1"
-                  name="Lease Liability"
-                />
-                <Area
-                  type="monotone"
-                  dataKey="interest"
-                  stackId="2"
-                  stroke="#10B981"
-                  fill="#10B981"
-                  name="Cumulative Interest"
-                />
+        {/* Charts Row */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="bg-white rounded-[14px] p-6 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] lg:col-span-2">
+            <h4 className="text-sm font-semibold text-[#1e293b] mb-4">Lease Liability by Month</h4>
+            <ResponsiveContainer width="100%" height={240}>
+              <AreaChart data={liabilityByMonth}>
+                <defs>
+                  <linearGradient id="liabilityGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#f97316" stopOpacity={0.4} />
+                    <stop offset="100%" stopColor="#f97316" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="month" tick={{ fontSize: 11 }} stroke="#64748b" />
+                <YAxis tick={{ fontSize: 11 }} stroke="#64748b" tickFormatter={(v) => `${(v / 1e6).toFixed(1)}M`} />
+                <Tooltip formatter={(v: number) => [formatIndianCurrency(v), 'Liability']} />
+                <Area type="monotone" dataKey="liability" stroke="#f97316" fill="url(#liabilityGrad)" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
-
-          {/* Download Section */}
-          {fileId && (
-            <div className="bg-gradient-to-r from-accent to-accent/80 rounded-lg p-8 text-white">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-2">Your audit-ready Excel report is ready</h3>
-                  <p className="text-white/90">
-                    Includes: Summary | Amortization | Journal Entries | Maturity Analysis | Disclosure Notes
-                  </p>
-                </div>
-                <a
-                  href={ifrs16Api.downloadReport(fileId)}
-                  download
-                  target="_blank"
-                  rel="noopener noreferrer"
+          <div className="bg-white rounded-[14px] p-6 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+            <h4 className="text-sm font-semibold text-[#1e293b] mb-4">Lease Type Distribution</h4>
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie
+                  data={pieData.length ? pieData : [{ name: 'No data', value: 1 }]}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={50}
+                  outerRadius={80}
+                  paddingAngle={2}
+                  dataKey="value"
+                  nameKey="name"
                 >
-                  <Button variant="secondary" size="lg">
-                    <Download className="w-5 h-5" />
-                    Download Excel Report
-                  </Button>
-                </a>
-              </div>
-            </div>
-          )}
+                  {pieData.map((_, i) => (
+                    <Cell key={i} fill={ORANGE_SHADES[i % ORANGE_SHADES.length]} />
+                  ))}
+                </Pie>
+                <Tooltip formatter={(v: number, n: string) => [v, n]} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
         </div>
-      )}
-    </DashboardLayout>
+
+        <div className="bg-white rounded-[14px] p-6 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+          <h4 className="text-sm font-semibold text-[#1e293b] mb-4">Payment Timeline (Next 12 Months)</h4>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={paymentTimeline}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="month" tick={{ fontSize: 11 }} stroke="#64748b" />
+              <YAxis tick={{ fontSize: 11 }} stroke="#64748b" tickFormatter={(v) => `${(v / 1e5).toFixed(1)}L`} />
+              <Tooltip formatter={(v: number) => [formatIndianCurrency(v), 'Payment']} />
+              <Bar dataKey="payment" fill="#f97316" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Recent Leases Table */}
+        <div className="bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] overflow-hidden">
+          <div className="px-6 py-4 border-b border-[#e2e8f0] flex justify-between items-center">
+            <h4 className="text-sm font-semibold text-[#1e293b]">Recent Leases</h4>
+            <Link href="/dashboard/ifrs16/repository">
+              <Button variant="secondary" size="sm">View All</Button>
+            </Link>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-[#f8fafc] border-b border-[#e2e8f0]">
+                  <th className="text-left py-3 px-4 font-medium text-[#64748b]">Lease ID</th>
+                  <th className="text-left py-3 px-4 font-medium text-[#64748b]">Title</th>
+                  <th className="text-left py-3 px-4 font-medium text-[#64748b]">Type</th>
+                  <th className="text-left py-3 px-4 font-medium text-[#64748b]">Start</th>
+                  <th className="text-left py-3 px-4 font-medium text-[#64748b]">End</th>
+                  <th className="text-right py-3 px-4 font-medium text-[#64748b]">Monthly</th>
+                  <th className="text-right py-3 px-4 font-medium text-[#64748b]">Liability</th>
+                  <th className="text-center py-3 px-4 font-medium text-[#64748b]">Status</th>
+                  <th className="text-center py-3 px-4 font-medium text-[#64748b]">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentLeases.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="py-12 text-center text-[#64748b]">
+                      No leases yet. Add a new lease to get started.
+                    </td>
+                  </tr>
+                ) : (
+                  recentLeases.map((l) => {
+                    const status = getStatus(l.dates?.end || '9999-12-31');
+                    const assetType = inferAssetType(l.asset || '');
+                    const Icon = getAssetTypeIcon(assetType);
+                    const end = new Date(l.dates?.end || '9999-12-31');
+                    const diffDays = Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 24));
+                    const rowBg = status.label === 'Expired' ? 'bg-red-50' : status.label === 'Expiring Soon' ? 'bg-amber-50' : '';
+                    const lid = l.id || l.lease_id;
+                    return (
+                      <tr
+                        key={lid}
+                        className={`border-b border-[#e2e8f0] hover:bg-[#f8fafc] cursor-pointer ${rowBg}`}
+                        onClick={() => window.location.href = `/dashboard/ifrs16/leases/${lid}`}
+                      >
+                        <td className="py-3 px-4 font-mono text-[#f97316] hover:underline">
+                          <Link href={`/dashboard/ifrs16/leases/${lid}`} onClick={(e) => e.stopPropagation()}>
+                            {lid}
+                          </Link>
+                        </td>
+                        <td className="py-3 px-4 text-[#1e293b]">{l.title || l.asset || '—'}</td>
+                        <td className="py-3 px-4">
+                          <span className="inline-flex items-center gap-1 text-[#64748b]">
+                            <Icon className="w-4 h-4" />
+                            {l.lease_type || assetType}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-[#64748b]">{l.start_date || l.dates?.commencement || '—'}</td>
+                        <td className="py-3 px-4 text-[#64748b]">{l.end_date || l.dates?.end || '—'}</td>
+                        <td className="py-3 px-4 text-right font-mono text-[#1e293b]">{formatIndianCurrency(l.monthly_payment ?? l.payments?.monthly ?? 0)}</td>
+                        <td className="py-3 px-4 text-right font-mono text-[#1e293b]">{formatIndianCurrency(l.liability ?? 0)}</td>
+                        <td className="py-3 px-4 text-center">
+                          <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${status.className}`}>
+                            {status.label}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center justify-center gap-1">
+                            <Link href={`/dashboard/ifrs16/leases/${lid}`}>
+                              <button className="p-1.5 rounded hover:bg-orange-100 text-[#64748b] hover:text-orange-600" title="View">
+                                <Eye className="w-4 h-4" />
+                              </button>
+                            </Link>
+                            <Link href={`/dashboard/ifrs16/leases/${lid}`}>
+                              <button className="p-1.5 rounded hover:bg-orange-100 text-[#64748b] hover:text-orange-600" title="Recalculate">
+                                <Calculator className="w-4 h-4" />
+                              </button>
+                            </Link>
+                            <button onClick={() => handleDownload(l)} className="p-1.5 rounded hover:bg-orange-100 text-[#64748b] hover:text-orange-600" title="Download">
+                              <Download className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </SidebarLayout>
   );
 }

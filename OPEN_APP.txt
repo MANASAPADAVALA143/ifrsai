@@ -1,0 +1,15 @@
+========================================
+  IFRS AI - HOW TO OPEN THE APP
+========================================
+
+1. Double-click:  RUN_APP.bat
+
+2. Wait. Two black windows will open.
+   Keep BOTH windows open.
+
+3. Your browser will open to the app.
+   If not, go to: http://localhost:3003
+
+That's it. Do not close the two black windows.
+
+========================================

@@ -524,3 +524,5 @@ if __name__ == "__main__":
         calc.export_to_json(results, "ifrs16_results.json")
     except Exception as e:
         print(f"\nNote: Could not export JSON: {e}")
+
+

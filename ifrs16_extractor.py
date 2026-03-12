@@ -6,7 +6,7 @@ Extracts lease terms from contracts with confidence scoring
 import anthropic
 import json
 from datetime import datetime
-from typing import Dict, Optional, List
+from typing import Optional, List, Dict, Any
 from decimal import Decimal
 import os
 from pathlib import Path
@@ -367,7 +367,7 @@ Begin extraction:"""
     
     def extract_from_file(self, file_path: str) -> Dict:
         """
-        Extract lease terms from a file (PDF, DOCX, or TXT)
+        Extract lease terms from a file (PDF, DOCX, TXT, or Excel)
         
         Args:
             file_path: Path to the lease contract file
@@ -402,6 +402,33 @@ Begin extraction:"""
                 contract_text = "\n".join([para.text for para in doc.paragraphs])
             except ImportError:
                 raise ImportError("python-docx not installed. Run: pip install python-docx")
+        
+        elif file_path.suffix.lower() in ['.xlsx', '.xls']:
+            try:
+                import pandas as pd
+                # Read all sheets from Excel file
+                excel_file = pd.ExcelFile(str(file_path))
+                contract_text = ""
+                
+                # Process each sheet
+                for sheet_name in excel_file.sheet_names:
+                    contract_text += f"\n=== Sheet: {sheet_name} ===\n"
+                    df = pd.read_excel(excel_file, sheet_name=sheet_name)
+                    
+                    # Convert DataFrame to readable text format
+                    # Include column headers
+                    contract_text += " | ".join(str(col) for col in df.columns) + "\n"
+                    contract_text += "-" * 80 + "\n"
+                    
+                    # Include all rows
+                    for _, row in df.iterrows():
+                        row_text = " | ".join(str(val) if pd.notna(val) else "" for val in row.values)
+                        contract_text += row_text + "\n"
+                    
+                    contract_text += "\n"
+                
+            except ImportError:
+                raise ImportError("pandas and openpyxl not installed. Run: pip install pandas openpyxl")
         
         else:
             raise ValueError(f"Unsupported file type: {file_path.suffix}")
@@ -513,3 +540,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n❌ Error: {e}")
         print("\nNote: This example requires a valid ANTHROPIC_API_KEY")
+
+
+
