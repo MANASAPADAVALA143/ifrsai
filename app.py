@@ -18,12 +18,13 @@ from pathlib import Path
 import shutil
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+import gc
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Heavy imports (pandas, numpy, anthropic, openpyxl) moved into route handlers
-# to reduce startup memory; RAG import deferred in lifespan
+# RAG engine loads on first use, not at startup
 
 # Configuration
 UPLOAD_DIR = Path("uploads")
@@ -36,29 +37,30 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 # Public API URL for links (Render sets RENDER_EXTERNAL_URL automatically)
 PUBLIC_API_URL = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_API_URL", "http://127.0.0.1:9000")
 
-# Global RAG engine instance
+# Global RAG engine instance (lazy-loaded on first use)
 rag_engine = None
 
-def _init_rag_in_background():
-    """Initialize RAG in background thread (ChromaDB + SentenceTransformer can hang ~30s+)."""
+def get_rag_engine():
+    """Initialize RAG engine on first call. Loads ChromaDB + SentenceTransformer (~400MB)."""
     global rag_engine
+    if rag_engine is not None:
+        return rag_engine
     import traceback
     try:
         from rag_engine import IFRSRagEngine
         rag_engine = IFRSRagEngine(anthropic_api_key=ANTHROPIC_API_KEY)
         print("✅ RAG engine initialized successfully")
         gc.collect()
+        return rag_engine
     except Exception as e:
         print(f"⚠️  RAG engine failed: {e}")
         traceback.print_exc()
-        rag_engine = None
+        return None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan: startup then yield (shutdown runs after yield)."""
-    global rag_engine
-    import threading
     print("="*70)
     print("IFRS AI AUTOMATION API - SERVER STARTED")
     print("="*70)
@@ -66,10 +68,8 @@ async def lifespan(app: FastAPI):
     print(f"ReDoc: {PUBLIC_API_URL.rstrip('/')}/api/redoc")
     print(f"Health Check: {PUBLIC_API_URL.rstrip('/')}/health")
     print(f"Claude API: {'Configured' if ANTHROPIC_API_KEY else 'Not configured'}")
-    print("Initializing RAG in background (ChromaDB + SentenceTransformer)...")
+    print("RAG engine: loads on first /api/chat or embed request")
     print("="*70)
-    t = threading.Thread(target=_init_rag_in_background, daemon=True)
-    t.start()
     yield
 
 
@@ -467,7 +467,8 @@ async def calculate_lease(request: LeaseRequest):
         exporter.export_ifrs16_workbook(results, str(excel_filename))
         
         # Auto-trigger RAG embedding if company_id provided and RAG engine available
-        if request.company_id and rag_engine:
+        engine = get_rag_engine()
+        if request.company_id and engine:
             try:
                 # Prepare content for embedding (use original results with DataFrames converted)
                 embed_content = {
@@ -489,7 +490,7 @@ async def calculate_lease(request: LeaseRequest):
                 }
                 
                 # Store in RAG engine
-                rag_result = rag_engine.embed_and_store(
+                rag_result = engine.embed_and_store(
                     company_id=request.company_id,
                     document_type="lease",
                     content=embed_content,
@@ -875,7 +876,8 @@ async def chat_with_rag(request: ChatRequest):
     
     CRITICAL: Data is filtered by company_id to ensure isolation
     """
-    if not rag_engine:
+    engine = get_rag_engine()
+    if not engine:
         raise HTTPException(
             status_code=503,
             detail="RAG engine not initialized. Check server logs."
@@ -883,7 +885,7 @@ async def chat_with_rag(request: ChatRequest):
     
     try:
         # Ask question with context
-        result = rag_engine.ask_with_context(
+        result = engine.ask_with_context(
             company_id=request.company_id,
             question=request.question,
             document_type=request.document_type,
@@ -920,14 +922,15 @@ async def get_rag_stats(company_id: str):
     - Document counts by type
     - Total chunks stored
     """
-    if not rag_engine:
+    engine = get_rag_engine()
+    if not engine:
         raise HTTPException(
             status_code=503,
             detail="RAG engine not initialized"
         )
     
     try:
-        stats = rag_engine.get_company_stats(company_id)
+        stats = engine.get_company_stats(company_id)
         return {
             "status": "success",
             "stats": stats
@@ -1227,14 +1230,15 @@ async def delete_rag_document(company_id: str, document_id: str):
         company_id: Company identifier
         document_id: Document identifier to delete
     """
-    if not rag_engine:
+    engine = get_rag_engine()
+    if not engine:
         raise HTTPException(
             status_code=503,
             detail="RAG engine not initialized"
         )
     
     try:
-        result = rag_engine.delete_document(company_id, document_id)
+        result = engine.delete_document(company_id, document_id)
         if result['status'] == 'error':
             raise HTTPException(status_code=500, detail=result.get('error'))
         return result
