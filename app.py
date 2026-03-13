@@ -97,22 +97,21 @@ def health():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://ifrsai.vercel.app",
+        "https://ifrs-ai.vercel.app",
+        "https://ifrs-ai-frontend.onrender.com",
+        "http://localhost:3000",
         "http://localhost:3003",
         "http://localhost:3004",
-        "http://localhost:3000",
+        "http://localhost:3005",
+        "http://127.0.0.1:3000",
         "http://127.0.0.1:3003",
         "http://127.0.0.1:3004",
-        "http://localhost:9000",
-        "http://127.0.0.1:9000",
-        "http://127.0.0.1:3000",
-        "https://ifrs-ai.vercel.app",
-        "https://ifrsai.vercel.app",
-        "https://ifrs-ai-frontend.onrender.com",
+        "http://127.0.0.1:3005",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 # Pydantic Models
