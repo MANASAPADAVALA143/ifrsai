@@ -196,7 +196,7 @@ export const ifrs15Api = {
   },
 
   calculate: async (contractData: any) => {
-    return apiCall('/api/ifrs15/calculate', {
+    return apiCall<{ results?: Record<string, unknown>; excel_file_id?: string; contract_id?: string }>('/api/ifrs15/calculate', {
       method: 'POST',
       body: JSON.stringify(contractData),
     });
