@@ -47,6 +47,7 @@ def _init_rag_in_background():
         from rag_engine import IFRSRagEngine
         rag_engine = IFRSRagEngine(anthropic_api_key=ANTHROPIC_API_KEY)
         print("✅ RAG engine initialized successfully")
+        gc.collect()
     except Exception as e:
         print(f"⚠️  RAG engine failed: {e}")
         traceback.print_exc()
@@ -392,6 +393,7 @@ Return ONLY valid JSON in this exact format:
         elif "```" in text:
             text = text.split("```")[1].split("```")[0].strip()
         data = json.loads(text)
+        gc.collect()
         return {"status": "success", "validation": data}
     except json.JSONDecodeError as e:
         return {"status": "error", "validation": {"pass": False, "issues": [f"Parse error: {e}"], "confidence": 0}}
@@ -499,6 +501,7 @@ async def calculate_lease(request: LeaseRequest):
                 print(f"⚠️  RAG embedding failed (non-critical): {rag_error}")
                 # Don't fail the request if RAG embedding fails
         
+        gc.collect()
         return CalculationResponse(
             status="success",
             lease_id=request.lease_id,
@@ -543,6 +546,7 @@ async def extract_contract(request: ExtractionRequest):
         extraction_file = OUTPUT_DIR / f"extraction_{extraction_id}.json"
         extractor.save_extraction(extracted_data, str(extraction_file))
         
+        gc.collect()
         return ExtractionResponse(
             status="success",
             extraction_id=extraction_id,
@@ -617,6 +621,7 @@ async def upload_contract(file: UploadFile = File(...)):
         extractor.save_extraction(extracted_data, str(extraction_file))
         
         print(f"✅ Extraction complete: {file.filename}")
+        gc.collect()
         return {
             "status": "success",
             "file_id": file_id,
@@ -713,6 +718,7 @@ async def batch_calculate(leases: List[LeaseRequest]):
                 "error": str(e)
             })
     
+    gc.collect()
     return {
         "status": "completed",
         "total_leases": len(leases),
@@ -738,6 +744,7 @@ async def ifrs15_extract(request: IFRS15ExtractRequest):
         extractor = IFRS15ContractExtractor(api_key=ANTHROPIC_API_KEY)
         extracted_data = extractor.extract_contract_terms(request.contract_text)
         validation = extractor.validate_ifrs15_extraction(extracted_data)
+        gc.collect()
         return {"status": "success", "extracted_data": extracted_data, "validation": validation}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -768,6 +775,7 @@ async def ifrs15_upload_contract(file: UploadFile = File(...)):
         validation = extractor.validate_ifrs15_extraction(extracted_data)
         extraction_file = OUTPUT_DIR / f"ifrs15_extraction_{file_id}.json"
         extractor.save_extraction(extracted_data, str(extraction_file))
+        gc.collect()
         return {
             "status": "success",
             "file_id": file_id,
@@ -830,6 +838,7 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
             df.to_excel(str(excel_path), index=False, sheet_name='Revenue Schedule')
         except Exception:
             pass
+        gc.collect()
         return {
             "status": "success",
             "contract_id": request.contract_id,
@@ -887,6 +896,7 @@ async def chat_with_rag(request: ChatRequest):
                 detail=f"RAG query failed: {result.get('error', 'Unknown error')}"
             )
         
+        gc.collect()
         return ChatResponse(
             status="success",
             answer=result['answer'],
@@ -1076,6 +1086,7 @@ async def upload_portfolio(file: UploadFile = File(...)):
             "columns": list(df.columns),
             "row_count": len(df),
         }
+        gc.collect()
         return {"status": "success", "filename": file.filename, "extracted_data": extracted}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload error: {str(e)}")
@@ -1192,6 +1203,7 @@ async def download_ecl_report(data: dict):
                 pd.DataFrame(data["bucket_results"]).to_excel(w, sheet_name="Provision Matrix", index=False)
             if data.get("journal_entries"):
                 pd.DataFrame(data["journal_entries"]).to_excel(w, sheet_name="Journal Entries", index=False)
+        gc.collect()
         return {"file_id": file_id, "filename": path.name}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
