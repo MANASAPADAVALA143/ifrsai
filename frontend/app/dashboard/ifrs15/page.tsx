@@ -116,9 +116,10 @@ export default function IFRS15Page() {
     }
     setIsCalculating(true);
     try {
-      const { data, error } = await ifrs15Api.calculate(payload) as { data: any; error: any };
+      const response = await ifrs15Api.calculate(payload) as any;
+      const { data, error } = response;
       if (error) throw new Error(error);
-      setResults((data as any)?.results);
+      setResults(data?.results);
       setFileId(data?.excel_file_id || null);
       setLastContractInfo({
         contract_id: payload.contract_id,
