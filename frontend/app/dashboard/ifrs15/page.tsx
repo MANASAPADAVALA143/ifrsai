@@ -96,7 +96,8 @@ export default function IFRS15Page() {
     setIsUploading(true);
     setExtractedData(null);
     try {
-      const { data, error } = await ifrs15Api.uploadContract(selectedFile);
+      const response = await ifrs15Api.uploadContract(selectedFile) as any;
+      const { data, error } = response;
       if (error) throw new Error(error);
       setExtractedData(data?.extracted_data);
       toast.success('Contract extracted successfully!');
@@ -566,7 +567,8 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     }
                     setIsUploading(true);
                     try {
-                      const { data, error } = await ifrs15Api.extract(contractText);
+                      const response = await ifrs15Api.extract(contractText) as any;
+                      const { data, error } = response;
                       if (error) throw new Error(error);
                       setExtractedData(data?.extracted_data);
                       toast.success('Contract extracted successfully!');
