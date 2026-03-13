@@ -523,3 +523,4 @@ This software is provided for informational and automation purposes. Always cons
 
 © 2024 IFRS AI. All rights reserved.
 
+
