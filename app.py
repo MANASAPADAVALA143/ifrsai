@@ -37,6 +37,8 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Initialize services
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# Public API URL for links (Render sets RENDER_EXTERNAL_URL automatically)
+PUBLIC_API_URL = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_API_URL", "http://127.0.0.1:9000")
 
 # Global RAG engine instance
 rag_engine = None
@@ -63,9 +65,9 @@ async def lifespan(app: FastAPI):
     print("="*70)
     print("IFRS AI AUTOMATION API - SERVER STARTED")
     print("="*70)
-    print(f"API Documentation: http://127.0.0.1:9000/api/docs")
-    print(f"ReDoc: http://127.0.0.1:9000/api/redoc")
-    print(f"Health Check: http://127.0.0.1:9000/api/health")
+    print(f"API Documentation: {PUBLIC_API_URL.rstrip('/')}/api/docs")
+    print(f"ReDoc: {PUBLIC_API_URL.rstrip('/')}/api/redoc")
+    print(f"Health Check: {PUBLIC_API_URL.rstrip('/')}/health")
     print(f"Claude API: {'Configured' if ANTHROPIC_API_KEY else 'Not configured'}")
     print("Initializing RAG in background (ChromaDB + SentenceTransformer)...")
     print("="*70)
@@ -103,6 +105,7 @@ app.add_middleware(
         "http://127.0.0.1:9000",
         "http://127.0.0.1:3000",
         "https://ifrs-ai.vercel.app",
+        "https://ifrsai.vercel.app",
         "https://ifrs-ai-frontend.onrender.com",
     ],
     allow_credentials=True,
@@ -558,7 +561,7 @@ async def upload_contract_get():
         status_code=200,
         content={
             "message": "This endpoint accepts POST only. Upload a file from the app or use the API docs.",
-            "docs": "http://127.0.0.1:9000/api/docs",
+            "docs": f"{PUBLIC_API_URL.rstrip('/')}/api/docs",
             "method": "POST",
         },
     )
