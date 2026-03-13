@@ -522,3 +522,4 @@ This software is provided for informational and automation purposes. Always cons
 **Made with ❤️ for Finance Teams**
 
 © 2024 IFRS AI. All rights reserved.
+
