@@ -22,12 +22,8 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-from ifrs16_extractor import IFRS16LeaseExtractor
-from ifrs16_calculator import IFRS16Calculator, LeaseInput
-from ifrs16_excel_export import IFRS16ExcelExporter
-from ifrs15_extractor import IFRS15ContractExtractor
-from ifrs15_calculator import IFRS15Calculator, IFRS15Input, PerformanceObligation
-# RAG import deferred - loads ChromaDB + SentenceTransformer which can hang on startup
+# Heavy imports (pandas, numpy, anthropic, openpyxl) moved into route handlers
+# to reduce startup memory; RAG import deferred in lifespan
 
 # Configuration
 UPLOAD_DIR = Path("uploads")
@@ -223,8 +219,9 @@ class IFRS15CalculateRequest(BaseModel):
 
 
 # Helper Functions
-def convert_lease_request_to_input(request: LeaseRequest) -> LeaseInput:
+def convert_lease_request_to_input(request: LeaseRequest):
     """Convert API request to LeaseInput dataclass"""
+    from ifrs16_calculator import LeaseInput
     return LeaseInput(
         lease_id=request.lease_id,
         asset_description=request.asset_description,
@@ -446,6 +443,8 @@ async def calculate_lease(request: LeaseRequest):
     - P&L impact
     """
     try:
+        from ifrs16_calculator import IFRS16Calculator
+        from ifrs16_excel_export import IFRS16ExcelExporter
         # Convert request to LeaseInput
         lease_input = convert_lease_request_to_input(request)
         
@@ -530,6 +529,7 @@ async def extract_contract(request: ExtractionRequest):
         )
     
     try:
+        from ifrs16_extractor import IFRS16LeaseExtractor
         extractor = IFRS16LeaseExtractor(api_key=ANTHROPIC_API_KEY)
         
         # Extract lease terms
@@ -605,6 +605,7 @@ async def upload_contract(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
         
         # Extract from file
+        from ifrs16_extractor import IFRS16LeaseExtractor
         extractor = IFRS16LeaseExtractor(api_key=ANTHROPIC_API_KEY)
         extracted_data = extractor.extract_from_file(str(upload_path))
         
@@ -685,6 +686,7 @@ async def batch_calculate(leases: List[LeaseRequest]):
     
     Calculates IFRS 16 metrics for multiple leases in one request
     """
+    from ifrs16_calculator import IFRS16Calculator
     results = []
     
     for lease in leases:
@@ -732,6 +734,7 @@ async def ifrs15_extract(request: IFRS15ExtractRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="Claude API not configured.")
     try:
+        from ifrs15_extractor import IFRS15ContractExtractor
         extractor = IFRS15ContractExtractor(api_key=ANTHROPIC_API_KEY)
         extracted_data = extractor.extract_contract_terms(request.contract_text)
         validation = extractor.validate_ifrs15_extraction(extracted_data)
@@ -759,6 +762,7 @@ async def ifrs15_upload_contract(file: UploadFile = File(...)):
         upload_path = UPLOAD_DIR / f"ifrs15_{file_id}_{file.filename}"
         with open(upload_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        from ifrs15_extractor import IFRS15ContractExtractor
         extractor = IFRS15ContractExtractor(api_key=ANTHROPIC_API_KEY)
         extracted_data = extractor.extract_from_file(str(upload_path))
         validation = extractor.validate_ifrs15_extraction(extracted_data)
@@ -781,6 +785,7 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
     Calculate IFRS 15 revenue recognition
     """
     try:
+        from ifrs15_calculator import IFRS15Calculator, IFRS15Input, PerformanceObligation
         obligations = []
         for ob in request.performance_obligations:
             transfer_dt = None
