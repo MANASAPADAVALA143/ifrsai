@@ -21,7 +21,11 @@ from dotenv import load_dotenv
 import gc
 
 # Load environment variables from .env file
-load_dotenv()
+# Always load from project root so .env is found regardless of cwd
+_project_root = Path(__file__).resolve().parent
+load_dotenv(_project_root / ".env")
+if not os.getenv("ANTHROPIC_API_KEY"):
+    load_dotenv(_project_root / "frontend" / ".env")  # fallback if key is in frontend/.env
 
 # Heavy imports (pandas, numpy, anthropic, openpyxl) moved into route handlers
 # RAG engine loads on first use, not at startup
