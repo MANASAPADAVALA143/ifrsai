@@ -263,12 +263,11 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
           </div>
           <div className="flex items-center gap-3">
             {backendLive === false ? (
-              <div className="flex items-center gap-2" title="Start both: run START_BOTH.bat from project root, or run python app.py in one terminal and npm run dev:localhost in frontend folder">
+              <div className="flex items-center gap-2" title="Service temporarily unavailable">
                 <div className="flex items-center gap-2 px-3 py-1 bg-red-50 border border-red-200 rounded-full cursor-help">
                   <Circle className="w-2 h-2 fill-red-500 text-red-500" />
-                  <span className="text-xs font-medium text-red-700">Backend Offline</span>
+                  <span className="text-xs font-medium text-red-700">Service temporarily unavailable. Please try again shortly.</span>
                 </div>
-                <span className="text-xs text-red-600 hidden sm:inline">Run: START_BOTH.bat or python app.py</span>
               </div>
             ) : (
               <div className="flex items-center gap-2 px-3 py-1 bg-green-50 border border-green-200 rounded-full">

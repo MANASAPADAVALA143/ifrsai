@@ -1,7 +1,7 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000'; // Backend runs on 9000
 
 function getConnectionErrorMessage(): string {
-  return `Cannot connect to backend at ${API_URL}. Start the backend: from the project root run START_BOTH.bat (starts backend + frontend), or run "python app.py" in a terminal and keep that window open.`;
+  return 'Service temporarily unavailable. Please try again shortly.';
 }
 
 interface ApiResponse<T> {
