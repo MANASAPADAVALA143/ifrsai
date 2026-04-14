@@ -1,0 +1,1 @@
+﻿Sample lease text for testing extraction minimum length thirty chars.

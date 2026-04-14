@@ -118,7 +118,7 @@ Loading embedding model: sentence-transformers/all-MiniLM-L6-v2...
 ### 3. Calculate with Auto-Embedding
 
 ```bash
-curl -X POST "http://localhost:8000/api/calculate" \
+curl -X POST "http://localhost:9000/api/calculate" \
   -H "Content-Type: application/json" \
   -d '{
     "lease_id": "LEASE-2024-001",
@@ -136,7 +136,7 @@ curl -X POST "http://localhost:8000/api/calculate" \
 ### 4. Ask Questions
 
 ```bash
-curl -X POST "http://localhost:8000/api/chat" \
+curl -X POST "http://localhost:9000/api/chat" \
   -H "Content-Type: application/json" \
   -d '{
     "company_id": "COMPANY-ABC-001",
@@ -286,7 +286,7 @@ Demonstrates:
 python app.py
 
 # Terminal 2: Test endpoints
-curl -X POST "http://localhost:8000/api/chat" -H "Content-Type: application/json" -d '{"company_id": "TEST", "question": "Hello", "document_type": "lease"}'
+curl -X POST "http://localhost:9000/api/chat" -H "Content-Type: application/json" -d '{"company_id": "TEST", "question": "Hello", "document_type": "lease"}'
 ```
 
 ---
@@ -452,7 +452,7 @@ Annual savings: **₹97.5 Lakhs per team**
 ### Documentation
 
 - **RAG Guide**: [RAG_README.md](RAG_README.md)
-- **API Docs**: http://localhost:8000/api/docs
+- **API Docs**: http://localhost:9000/api/docs
 - **Examples**: `example_rag_usage.py`
 
 ### Testing

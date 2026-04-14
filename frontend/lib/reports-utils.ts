@@ -139,5 +139,27 @@ export function getYearMonth(dateStr: string): { year: number; month: number } {
   return { year: d.getFullYear(), month: d.getMonth() + 1 };
 }
 
+/** Get schedule row for a specific YYYY-MM period (for ERP period-specific amounts) */
+export function getScheduleRowForPeriod(lease: LeaseRepositoryEntry, period: string): {
+  period: number;
+  date: string;
+  opening: number;
+  payment: number;
+  interest: number;
+  principal: number;
+  closing: number;
+} | null {
+  const schedule = getSchedule(lease);
+  const [py, pm] = period.split('-').map(Number);
+  for (const row of schedule) {
+    const r = scheduleRow(row);
+    const d = r.date ? new Date(String(r.date).slice(0, 10)) : null;
+    if (d && d.getFullYear() === py && d.getMonth() + 1 === pm) {
+      return r;
+    }
+  }
+  return null;
+}
+
 /** Default page size for reports */
 export const REPORT_PAGE_SIZE = 25;

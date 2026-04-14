@@ -19,11 +19,42 @@ export function formatIndianCurrencyWithDecimals(amount: number, decimals: numbe
   return formatter.format(amount);
 }
 
+/** ISO 4217 codes accepted by Intl.NumberFormat — invalid values (e.g. "N/A") would throw RangeError. */
+const VALID_CURRENCIES_FOR_FORMAT = [
+  'INR',
+  'USD',
+  'GBP',
+  'EUR',
+  'AUD',
+  'SGD',
+  'CAD',
+  'JPY',
+] as const;
+
+/**
+ * Returns a safe currency code for Intl or falls back (default INR except callers may pass 'USD' for IFRS 15).
+ */
+export function sanitizeCurrencyCode(
+  currency: string | null | undefined,
+  fallback: string = 'INR'
+): string {
+  const raw = String(currency ?? '')
+    .trim()
+    .toUpperCase();
+  if (!raw || raw === 'N/A' || raw === 'NA' || raw === '—' || raw === '-') {
+    return fallback;
+  }
+  return VALID_CURRENCIES_FOR_FORMAT.includes(raw as (typeof VALID_CURRENCIES_FOR_FORMAT)[number])
+    ? raw
+    : fallback;
+}
+
 // Format number with currency (INR, USD, etc.)
 export function formatCurrency(amount: number, currency: string = 'INR', decimals: number = 0): string {
-  const formatter = new Intl.NumberFormat('en-IN', {
+  const safeCurrency = sanitizeCurrencyCode(currency || 'INR', 'INR');
+  const formatter = new Intl.NumberFormat(safeCurrency === 'INR' ? 'en-IN' : 'en-US', {
     style: 'currency',
-    currency: currency || 'INR',
+    currency: safeCurrency,
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });

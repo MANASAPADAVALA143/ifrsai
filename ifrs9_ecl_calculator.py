@@ -11,6 +11,7 @@ from typing import Dict, List
 import json
 
 from ifrs9_staging import IFRS9StagingEngine, LoanStage
+from macro_sensitivity_config import get_sensitivity
 
 
 class IFRS9ECLCalculator:
@@ -29,6 +30,29 @@ class IFRS9ECLCalculator:
     def __init__(self):
         self.precision = Decimal('0.01')
         self.staging_engine = IFRS9StagingEngine()
+
+    def apply_macro_overlay(
+        self,
+        base_pd: Decimal,
+        gdp_growth: float = 0.0,
+        unemployment: float = 0.0,
+        interest_rate: float = 0.0,
+    ) -> Decimal:
+        """
+        Apply a simple forward-looking macro overlay to PD.
+        - Each 1% GDP drop increases PD by ~15%
+        - Each 1% unemployment adds ~8%
+        - Each 1% interest-rate adds ~3%
+        """
+        # Keep multipliers bounded to avoid unstable outputs.
+        gdp_s = Decimal(str(get_sensitivity("gdp_sensitivity")))
+        unemp_s = Decimal(str(get_sensitivity("unemployment_sensitivity")))
+        rate_s = Decimal(str(get_sensitivity("interest_rate_sensitivity")))
+        gdp_adjustment = max(Decimal('0.20'), Decimal('1') + (Decimal(str(-gdp_growth)) * gdp_s))
+        unemployment_adjustment = max(Decimal('0.20'), Decimal('1') + (Decimal(str(unemployment)) * unemp_s))
+        interest_adjustment = max(Decimal('0.20'), Decimal('1') + (Decimal(str(interest_rate)) * rate_s))
+        adjusted = base_pd * gdp_adjustment * unemployment_adjustment * interest_adjustment
+        return min(Decimal('1'), max(Decimal('0'), adjusted))
     
     def calculate_ecl_single_loan(
         self,
@@ -65,7 +89,8 @@ class IFRS9ECLCalculator:
     def calculate_stage1_ecl(
         self,
         loan: Dict,
-        discount_rate: Decimal = Decimal('0.08')
+        discount_rate: Decimal = Decimal('0.08'),
+        macro: Dict = None
     ) -> Decimal:
         """
         Calculate 12-month ECL for Stage 1 loan
@@ -82,6 +107,13 @@ class IFRS9ECLCalculator:
         
         exposure = Decimal(str(loan.get('outstanding_balance', 0)))
         pd_12m = Decimal(str(loan.get('pd_12m', loan.get('current_pd', 0.01))))
+        if macro:
+            pd_12m = self.apply_macro_overlay(
+                pd_12m,
+                float(macro.get('gdp_growth', 0) or 0),
+                float(macro.get('unemployment', 0) or 0),
+                float(macro.get('interest_rate', 0) or 0),
+            )
         lgd = Decimal(str(loan.get('lgd', 0.45)))  # Default 45%
         
         return self.calculate_ecl_single_loan(
@@ -91,7 +123,8 @@ class IFRS9ECLCalculator:
     def calculate_stage2_ecl(
         self,
         loan: Dict,
-        discount_rate: Decimal = Decimal('0.08')
+        discount_rate: Decimal = Decimal('0.08'),
+        macro: Dict = None
     ) -> Decimal:
         """
         Calculate lifetime ECL for Stage 2 loan
@@ -109,6 +142,13 @@ class IFRS9ECLCalculator:
         
         exposure = Decimal(str(loan.get('outstanding_balance', 0)))
         pd_lifetime = Decimal(str(loan.get('pd_lifetime', loan.get('current_pd', 0.05))))
+        if macro:
+            pd_lifetime = self.apply_macro_overlay(
+                pd_lifetime,
+                float(macro.get('gdp_growth', 0) or 0),
+                float(macro.get('unemployment', 0) or 0),
+                float(macro.get('interest_rate', 0) or 0),
+            )
         lgd = Decimal(str(loan.get('lgd', 0.45)))
         
         # Approximate lifetime as remaining term (or use weighted average life)
@@ -121,7 +161,8 @@ class IFRS9ECLCalculator:
     def calculate_stage3_ecl(
         self,
         loan: Dict,
-        discount_rate: Decimal = Decimal('0.08')
+        discount_rate: Decimal = Decimal('0.08'),
+        macro: Dict = None
     ) -> Decimal:
         """
         Calculate lifetime ECL for Stage 3 loan (credit-impaired)
@@ -139,6 +180,13 @@ class IFRS9ECLCalculator:
         exposure = Decimal(str(loan.get('outstanding_balance', 0)))
         # Stage 3 typically has very high PD
         pd_lifetime = Decimal(str(loan.get('pd_lifetime', 0.90)))
+        if macro:
+            pd_lifetime = self.apply_macro_overlay(
+                pd_lifetime,
+                float(macro.get('gdp_growth', 0) or 0),
+                float(macro.get('unemployment', 0) or 0),
+                float(macro.get('interest_rate', 0) or 0),
+            )
         lgd = Decimal(str(loan.get('lgd', 0.45)))
         
         remaining_term_years = loan.get('remaining_term_years', 3)
@@ -150,7 +198,8 @@ class IFRS9ECLCalculator:
     def calculate_portfolio_ecl(
         self,
         portfolio_df: pd.DataFrame,
-        discount_rate: float = 0.08
+        discount_rate: float = 0.08,
+        macro: Dict = None
     ) -> pd.DataFrame:
         """
         Calculate ECL for entire loan portfolio
@@ -175,11 +224,11 @@ class IFRS9ECLCalculator:
             stage = row['stage']
             
             if stage == 'Stage 1':
-                return float(self.calculate_stage1_ecl(loan_dict, discount_decimal))
+                return float(self.calculate_stage1_ecl(loan_dict, discount_decimal, macro))
             elif stage == 'Stage 2':
-                return float(self.calculate_stage2_ecl(loan_dict, discount_decimal))
+                return float(self.calculate_stage2_ecl(loan_dict, discount_decimal, macro))
             elif stage == 'Stage 3':
-                return float(self.calculate_stage3_ecl(loan_dict, discount_decimal))
+                return float(self.calculate_stage3_ecl(loan_dict, discount_decimal, macro))
             else:
                 return 0.0
         

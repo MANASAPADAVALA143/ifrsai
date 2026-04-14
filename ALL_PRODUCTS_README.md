@@ -230,7 +230,7 @@ Start server:
 python app.py
 ```
 
-Visit: **http://localhost:8000/api/docs**
+Visit: **http://localhost:9000/api/docs**
 
 ### Available Endpoints (IFRS 16)
 
@@ -439,7 +439,7 @@ See [DEPLOYMENT.md](DEPLOYMENT.md)
 
 - **Quick Start:** [QUICKSTART.md](QUICKSTART.md)
 - **Full Docs:** [README.md](README.md)
-- **API Docs:** http://localhost:8000/api/docs
+- **API Docs:** http://localhost:9000/api/docs
 - **Deployment:** [DEPLOYMENT.md](DEPLOYMENT.md)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
 

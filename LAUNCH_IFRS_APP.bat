@@ -22,9 +22,7 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :3004 ^| findstr LISTENING 2^
   echo   Killed process on 3004
 )
 
-REM Kill stuck Node (frontend lock)
-taskkill /F /IM node.exe 2>nul
-REM Remove Next.js dev lock so npm run dev doesn't fail
+REM Remove Next.js dev lock so npm run dev doesn't fail (does not kill unrelated Node apps)
 if exist "frontend\.next\dev\lock" del /f "frontend\.next\dev\lock" 2>nul
 
 echo.
@@ -34,14 +32,14 @@ echo.
 
 REM Start Backend (new window)
 echo [1/2] Starting Backend on port 9000...
-start "IFRS AI Backend (9000)" cmd /k "cd /d "%~dp0" && python app.py"
+start "IFRS AI Backend (9000)" cmd /k "cd /d %~dp0 && python app.py"
 
 echo Waiting for backend (10 seconds)...
 timeout /t 10 /nobreak >nul
 
 REM Start Frontend (new window)
 echo [2/2] Starting Frontend on port 3004...
-start "IFRS AI Frontend (3004)" cmd /k "cd /d "%~dp0frontend" && npm run dev"
+start "IFRS AI Frontend (3004)" cmd /k "cd /d %~dp0frontend && npm run dev"
 
 echo Waiting for frontend (20 seconds)...
 timeout /t 20 /nobreak >nul

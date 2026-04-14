@@ -103,7 +103,7 @@ All components of the IFRS 16 Lease Accounting Automation platform have been suc
 - File upload/download
 - Background tasks
 
-**Interactive Docs:** http://localhost:8000/api/docs
+**Interactive Docs:** http://localhost:9000/api/docs
 
 **Lines of Code:** ~450
 
@@ -328,7 +328,7 @@ exporter.export_ifrs16_workbook(results, "report.xlsx")
 python app.py
 
 # Call API
-curl -X POST "http://localhost:8000/api/calculate" \
+curl -X POST "http://localhost:9000/api/calculate" \
   -H "Content-Type: application/json" \
   -d '{"lease_id":"LEASE-001",...}'
 ```
@@ -492,8 +492,8 @@ For a company with 50 leases:
 - 📊 `ifrs16_excel_export.py` - Excel generation
 
 ### API
-- 🌐 http://localhost:8000/api/docs - Interactive docs
-- 📚 http://localhost:8000/api/redoc - ReDoc
+- 🌐 http://localhost:9000/api/docs - Interactive docs
+- 📚 http://localhost:9000/api/redoc - ReDoc
 
 ### Contact
 - 📧 support@ifrsai.com

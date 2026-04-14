@@ -115,8 +115,8 @@ uvicorn app:app --reload --port 8000
 ```
 
 Then visit:
-- **API Docs**: http://localhost:8000/api/docs
-- **ReDoc**: http://localhost:8000/api/redoc
+- **API Docs**: http://localhost:9000/api/docs
+- **ReDoc**: http://localhost:9000/api/redoc
 
 ---
 
@@ -161,7 +161,7 @@ exporter.export_ifrs16_workbook(results, "lease_report.xlsx")
 **Calculate Lease:**
 
 ```bash
-curl -X POST "http://localhost:8000/api/calculate" \
+curl -X POST "http://localhost:9000/api/calculate" \
   -H "Content-Type: application/json" \
   -d '{
     "lease_id": "LEASE-2024-001",
@@ -178,14 +178,14 @@ curl -X POST "http://localhost:8000/api/calculate" \
 **Extract from Contract:**
 
 ```bash
-curl -X POST "http://localhost:8000/api/extract" \
+curl -X POST "http://localhost:9000/api/extract" \
   -F "contract_text=<lease_contract.txt>"
 ```
 
 **Upload Contract File:**
 
 ```bash
-curl -X POST "http://localhost:8000/api/upload-contract" \
+curl -X POST "http://localhost:9000/api/upload-contract" \
   -F "file=@lease_agreement.pdf"
 ```
 

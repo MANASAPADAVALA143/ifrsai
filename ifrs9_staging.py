@@ -124,7 +124,8 @@ class IFRS9StagingEngine:
             return True
         
         # PD increase (relative change)
-        current_pd = loan.get('current_pd', 0)
+        # If a macro-adjusted PD is provided, prefer it for SICR assessment.
+        current_pd = loan.get('macro_adjusted_pd', loan.get('current_pd', 0))
         origination_pd = loan.get('origination_pd', 0)
         if origination_pd > 0 and current_pd >= (origination_pd * self.pd_increase_threshold):
             return True

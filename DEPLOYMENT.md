@@ -31,7 +31,7 @@ python app.py
 uvicorn app:app --reload --port 8000
 ```
 
-Access at: http://localhost:8000/api/docs
+Access at: http://localhost:9000/api/docs
 
 ---
 

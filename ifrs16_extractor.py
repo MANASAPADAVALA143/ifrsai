@@ -278,30 +278,50 @@ CRITICAL INSTRUCTIONS:
 
 Begin extraction:"""
 
-        message = self.client.messages.create(
-            model=self.model,
-            max_tokens=4000,
-            temperature=0,  # Deterministic
-            messages=[{"role": "user", "content": prompt}]
-        )
+        try:
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=4000,
+                temperature=0,  # Deterministic
+                messages=[{"role": "user", "content": prompt}]
+            )
+        except Exception as e:
+            raise RuntimeError(f"Claude API request failed: {getattr(e, 'message', str(e))}") from e
         
-        response_text = message.content[0].text
+        # Get text from first content block (safe)
+        if not message.content or len(message.content) == 0:
+            raise ValueError("Claude returned empty response")
+        first_block = message.content[0]
+        response_text = getattr(first_block, "text", None)
+        if response_text is None:
+            response_text = str(first_block) if first_block else ""
         
         # Parse JSON
         json_text = response_text.strip()
         if json_text.startswith("```json"):
             json_text = json_text[7:]
+        if json_text.startswith("```"):
+            json_text = json_text.split("\n", 1)[-1]
         if json_text.endswith("```"):
             json_text = json_text[:-3]
+        json_text = json_text.strip()
         
-        data = json.loads(json_text.strip())
+        try:
+            data = json.loads(json_text)
+        except json.JSONDecodeError as je:
+            raise ValueError(f"AI returned invalid JSON (try again or use a clearer contract): {je.msg}") from je
+        
+        if not isinstance(data, dict):
+            raise ValueError("AI extraction must return a JSON object")
         
         # Add metadata
+        usage = getattr(message, "usage", None)
+        tokens_used = (usage.input_tokens + usage.output_tokens) if usage else 0
         data['extraction_metadata'] = {
             'timestamp': datetime.now().isoformat(),
             'model': self.model,
             'api_version': 'v1',
-            'tokens_used': message.usage.input_tokens + message.usage.output_tokens
+            'tokens_used': tokens_used
         }
         
         return data
@@ -335,15 +355,15 @@ Begin extraction:"""
         
         # Check confidence scores
         low_conf_fields = []
-        for section_name, section_data in data.items():
+        for section_name, section_data in (data or {}).items():
             if section_name == 'extraction_metadata':
                 continue
-                
-            if isinstance(section_data, dict):
-                for field_name, field_data in section_data.items():
-                    if isinstance(field_data, dict) and 'confidence' in field_data:
-                        if field_data['confidence'] < 70:
-                            low_conf_fields.append(f"{section_name}.{field_name}")
+            if not isinstance(section_data, dict):
+                continue
+            for field_name, field_data in section_data.items():
+                if isinstance(field_data, dict) and isinstance(field_data.get('confidence'), (int, float)):
+                    if field_data['confidence'] < 70:
+                        low_conf_fields.append(f"{section_name}.{field_name}")
         
         if low_conf_fields:
             warnings.append(f"Low confidence fields: {', '.join(low_conf_fields)}")
@@ -391,10 +411,13 @@ Begin extraction:"""
                 reader = PdfReader(str(file_path))
                 contract_text = ""
                 for page in reader.pages:
-                    contract_text += page.extract_text() + "\n"
+                    raw = page.extract_text()
+                    contract_text += (raw if raw is not None else "") + "\n"
             except ImportError:
                 raise ImportError("PyPDF2 not installed. Run: pip install PyPDF2")
-        
+            except Exception as e:
+                raise RuntimeError(f"Could not read PDF (encrypted, corrupt, or unsupported): {e}") from e
+
         elif file_path.suffix.lower() in ['.docx', '.doc']:
             try:
                 from docx import Document
@@ -402,37 +425,42 @@ Begin extraction:"""
                 contract_text = "\n".join([para.text for para in doc.paragraphs])
             except ImportError:
                 raise ImportError("python-docx not installed. Run: pip install python-docx")
-        
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not read Word file. Use .docx (not old .doc) or PDF/TXT: {e}"
+                ) from e
+
         elif file_path.suffix.lower() in ['.xlsx', '.xls']:
             try:
                 import pandas as pd
-                # Read all sheets from Excel file
                 excel_file = pd.ExcelFile(str(file_path))
                 contract_text = ""
-                
-                # Process each sheet
+
                 for sheet_name in excel_file.sheet_names:
                     contract_text += f"\n=== Sheet: {sheet_name} ===\n"
                     df = pd.read_excel(excel_file, sheet_name=sheet_name)
-                    
-                    # Convert DataFrame to readable text format
-                    # Include column headers
                     contract_text += " | ".join(str(col) for col in df.columns) + "\n"
                     contract_text += "-" * 80 + "\n"
-                    
-                    # Include all rows
                     for _, row in df.iterrows():
                         row_text = " | ".join(str(val) if pd.notna(val) else "" for val in row.values)
                         contract_text += row_text + "\n"
-                    
                     contract_text += "\n"
-                
+
             except ImportError:
                 raise ImportError("pandas and openpyxl not installed. Run: pip install pandas openpyxl")
+            except Exception as e:
+                raise RuntimeError(f"Could not read Excel file (corrupt or wrong format): {e}") from e
         
         else:
             raise ValueError(f"Unsupported file type: {file_path.suffix}")
-        
+
+        contract_text = (contract_text or "").strip()
+        if len(contract_text) < 30:
+            raise ValueError(
+                "No readable text was extracted from this file. "
+                "Scanned PDFs need OCR, or try DOCX/TXT, or a text-based PDF."
+            )
+
         return self.extract_lease_terms(contract_text)
     
     def save_extraction(self, data: Dict, output_path: str):

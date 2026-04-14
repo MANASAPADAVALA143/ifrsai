@@ -40,7 +40,7 @@ Create `.env.local` file in `frontend/` directory:
 ```env
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
-NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_API_URL=http://localhost:9000
 ```
 
 **How to get Supabase credentials:**
@@ -71,7 +71,7 @@ cd C:\Users\HCSUSER\OneDrive\Desktop\IFRSAI
 python app.py
 ```
 
-Backend runs at: [http://localhost:8000](http://localhost:8000)
+Backend runs at: [http://localhost:9000](http://localhost:9000)
 
 ---
 

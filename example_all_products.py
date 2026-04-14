@@ -351,7 +351,7 @@ def main():
         
         print("\n2. Start API server:")
         print("   - python app.py")
-        print("   - Visit: http://localhost:8000/api/docs")
+        print("   - Visit: http://localhost:9000/api/docs")
         
         print("\n3. Deploy to production:")
         print("   - See DEPLOYMENT.md for cloud deployment")

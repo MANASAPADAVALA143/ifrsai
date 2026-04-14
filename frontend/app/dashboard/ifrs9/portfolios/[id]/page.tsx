@@ -160,6 +160,21 @@ export default function PortfolioDetailPage() {
               base_ecl: portfolio.scenarios.base?.ecl,
               optimistic_ecl: portfolio.scenarios.optimistic?.ecl,
               pessimistic_ecl: portfolio.scenarios.pessimistic?.ecl,
+              base_macro: {
+                gdp_growth: portfolio.scenarios.base?.gdp,
+                unemployment: portfolio.scenarios.base?.unemployment,
+                interest_rate: portfolio.scenarios.base?.interestRate,
+              },
+              optimistic_macro: {
+                gdp_growth: portfolio.scenarios.optimistic?.gdp,
+                unemployment: portfolio.scenarios.optimistic?.unemployment,
+                interest_rate: portfolio.scenarios.optimistic?.interestRate,
+              },
+              pessimistic_macro: {
+                gdp_growth: portfolio.scenarios.pessimistic?.gdp,
+                unemployment: portfolio.scenarios.pessimistic?.unemployment,
+                interest_rate: portfolio.scenarios.pessimistic?.interestRate,
+              },
             }
           : undefined,
       };

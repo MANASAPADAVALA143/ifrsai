@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3004 -H 0.0.0.0",
+    "dev": "node --max-old-space-size=8192 node_modules/next/dist/bin/next dev -p 3004 -H 0.0.0.0 --webpack",
     "dev:localhost": "next dev -p 3003 -H 127.0.0.1",
     "dev:3000": "next dev -p 3000 -H 0.0.0.0",
     "dev:3002": "next dev -p 3002",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.97.0",
+    "acorn": "^8.16.0",
     "date-fns": "^4.1.0",
     "lucide-react": "^0.575.0",
     "next": "16.1.6",
@@ -21,7 +22,8 @@
     "react-hot-toast": "^2.6.0",
     "react-is": "^19.2.4",
     "recharts": "^3.7.0",
-    "tailwindcss": "^3.4.1"
+    "tailwindcss": "^3.4.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^20",

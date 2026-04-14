@@ -20,7 +20,7 @@ python app.py
 ### Calculate Lease (Auto-embeds in RAG)
 
 ```bash
-curl -X POST "http://localhost:8000/api/calculate" \
+curl -X POST "http://localhost:9000/api/calculate" \
   -H "Content-Type: application/json" \
   -d '{
     "lease_id": "LEASE-2024-001",
@@ -36,7 +36,7 @@ curl -X POST "http://localhost:8000/api/calculate" \
 ### Ask Question
 
 ```bash
-curl -X POST "http://localhost:8000/api/chat" \
+curl -X POST "http://localhost:9000/api/chat" \
   -H "Content-Type: application/json" \
   -d '{
     "company_id": "COMPANY-ABC-001",
@@ -48,7 +48,7 @@ curl -X POST "http://localhost:8000/api/chat" \
 ### Get Stats
 
 ```bash
-curl "http://localhost:8000/api/rag/stats/COMPANY-ABC-001"
+curl "http://localhost:9000/api/rag/stats/COMPANY-ABC-001"
 ```
 
 ---
@@ -119,7 +119,7 @@ python test_rag_isolation.py
 python example_rag_usage.py
 
 # API docs
-# http://localhost:8000/api/docs
+# http://localhost:9000/api/docs
 ```
 
 ---
@@ -159,7 +159,7 @@ python app.py
 
 - [RAG_README.md](RAG_README.md) - Complete guide
 - [RAG_IMPLEMENTATION_COMPLETE.md](RAG_IMPLEMENTATION_COMPLETE.md) - Implementation details
-- API Docs: http://localhost:8000/api/docs
+- API Docs: http://localhost:9000/api/docs
 
 ---
 

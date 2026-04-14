@@ -31,7 +31,7 @@ call npm install
 echo.
 echo Starting server...
 echo.
-echo Once you see "Ready", open: http://localhost:3003
+echo Once you see "Ready", open: http://localhost:3004
 echo.
 call npm run dev
 

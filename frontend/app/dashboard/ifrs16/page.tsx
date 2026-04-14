@@ -103,7 +103,12 @@ export default function IFRS16DashboardPage() {
     return s + m * t;
   }, 0);
 
-  const totalLeaseLiability = leases.reduce((s, l) => s + (Number(l.liability) ?? Number((l.results as any)?.lease_liability) ?? 0), 0);
+  const totalLeaseLiability = leases.reduce((s, l) => {
+    const direct = Number(l.liability);
+    const fromResults = Number((l.results as any)?.lease_liability);
+    const safe = Number.isFinite(direct) ? direct : Number.isFinite(fromResults) ? fromResults : 0;
+    return s + safe;
+  }, 0);
   const pendingCalc = leases.filter((l) => l.results == null || (l.liability == null && (l.results as any)?.lease_liability == null)).length;
 
   const averageLeaseValue = totalActive > 0 ? totalContractedValue / totalActive : 0;

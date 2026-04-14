@@ -34,7 +34,7 @@ echo.
 echo [4/4] Starting development server...
 echo.
 echo ========================================
-echo Server starting on http://localhost:3003
+echo Server starting on http://localhost:3004
 echo ========================================
 echo.
 echo Keep this window open while working.

@@ -207,7 +207,7 @@ def example_api_usage():
     
     print("\n1. Calculate lease (auto-embeds in RAG):")
     print("""
-curl -X POST "http://localhost:8000/api/calculate" \\
+curl -X POST "http://localhost:9000/api/calculate" \\
   -H "Content-Type: application/json" \\
   -d '{
     "lease_id": "LEASE-2024-001",
@@ -223,7 +223,7 @@ curl -X POST "http://localhost:8000/api/calculate" \\
     
     print("\n2. Chat with RAG:")
     print("""
-curl -X POST "http://localhost:8000/api/chat" \\
+curl -X POST "http://localhost:9000/api/chat" \\
   -H "Content-Type: application/json" \\
   -d '{
     "company_id": "COMPANY-ABC-001",
@@ -235,12 +235,12 @@ curl -X POST "http://localhost:8000/api/chat" \\
     
     print("\n3. Get company stats:")
     print("""
-curl -X GET "http://localhost:8000/api/rag/stats/COMPANY-ABC-001"
+curl -X GET "http://localhost:9000/api/rag/stats/COMPANY-ABC-001"
 """)
     
     print("\n4. Delete document from RAG:")
     print("""
-curl -X DELETE "http://localhost:8000/api/rag/document/COMPANY-ABC-001/LEASE-2024-001"
+curl -X DELETE "http://localhost:9000/api/rag/document/COMPANY-ABC-001/LEASE-2024-001"
 """)
 
 

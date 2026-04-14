@@ -21,7 +21,7 @@ if exist ".next" (
 
 echo.
 echo Starting development server...
-echo Server will be available at: http://localhost:3003
+echo Server will be available at: http://localhost:3004
 echo.
 echo Press Ctrl+C to stop the server
 echo ========================================

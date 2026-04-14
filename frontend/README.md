@@ -17,7 +17,7 @@ Create a `.env.local` file in the frontend directory:
 ```env
 NEXT_PUBLIC_SUPABASE_URL=your-supabase-project-url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
-NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_API_URL=http://localhost:9000
 ```
 
 **Get Supabase Credentials:**
@@ -43,7 +43,7 @@ cd ../
 python app.py
 ```
 
-Backend runs at [http://localhost:8000](http://localhost:8000)
+Backend runs at [http://localhost:9000](http://localhost:9000)
 
 ---
 
@@ -140,7 +140,7 @@ frontend/
 
 ## 🔌 API Integration
 
-All API calls connect to FastAPI backend at `localhost:8000`:
+All API calls connect to FastAPI backend at `localhost:9000`:
 
 ### Endpoints Used:
 
@@ -367,7 +367,7 @@ npm start
 ### Issue: API calls failing
 
 **Solution**: 
-1. Check backend is running at `localhost:8000`
+1. Check backend is running at `localhost:9000`
 2. Check `NEXT_PUBLIC_API_URL` in `.env.local`
 3. Open browser console for detailed errors
 

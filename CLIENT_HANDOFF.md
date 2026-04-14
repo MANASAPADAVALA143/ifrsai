@@ -43,7 +43,7 @@ You have two main options.
    - Backend: open CMD in project root → `pip install -r requirements.txt`
    - Frontend: open CMD in `frontend` → `npm install`
 3. To use the app: double‑click **`START_BOTH.bat`** and keep both windows open.
-4. Open browser to **http://localhost:3003**.
+4. Open browser to **http://localhost:3004**.
 
 You can copy this into a short “Quick start” doc or email for the client.
 
@@ -78,5 +78,5 @@ Then the client only opens a link in the browser; you don’t send them the code
 ## Summary
 
 - **“Backend Offline” every time** = backend process is not running. Use **`START_BOTH.bat`** and keep both windows open.
-- **Send to client (their PC):** Send project + **`START_BOTH.bat`** + the short “run both, then open http://localhost:3003” instructions above.
+- **Send to client (their PC):** Send project + **`START_BOTH.bat`** + the short “run both, then open http://localhost:3004” instructions above.
 - **Send to client (just a link):** Deploy backend and frontend, set `NEXT_PUBLIC_API_URL`, then give the client only the frontend URL.

@@ -8,7 +8,7 @@ cd /d %~dp0\frontend
 echo.
 echo Current directory: %CD%
 echo.
-echo Starting Next.js on port 3002...
+echo Starting Next.js (package.json default: port 3004)...
 echo.
 npm run dev
 pause

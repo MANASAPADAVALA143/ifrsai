@@ -33,7 +33,7 @@ For the backend, first go to project root: `cd ..` then `python app.py`.
 ## 2. Open the app
 
 - **Frontend:** http://localhost:3003  
-- **Backend API docs:** http://localhost:8000/api/docs  
+- **Backend API docs:** http://localhost:9000/api/docs  
 
 ## 3. If upload fails with "Failed to fetch"
 
@@ -44,4 +44,4 @@ For the backend, first go to project root: `cd ..` then `python app.py`.
 ## 4. Environment setup
 
 - Copy `.env.example` to `.env` and add your `ANTHROPIC_API_KEY` for AI extraction.
-- Frontend uses `NEXT_PUBLIC_API_URL=http://localhost:8000` (set in `frontend/.env.local` if needed).
+- Frontend uses `NEXT_PUBLIC_API_URL=http://localhost:9000` (set in `frontend/.env.local` if needed).

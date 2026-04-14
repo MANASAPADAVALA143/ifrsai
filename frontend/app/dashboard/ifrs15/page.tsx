@@ -6,14 +6,16 @@ import { Button } from '@/components/Button';
 import { Upload, FileText, Calculator, Download, Loader2, CheckCircle2, Clock, ArrowRight, Copy } from 'lucide-react';
 import { ifrs15Api } from '@/lib/api';
 import toast from 'react-hot-toast';
-import { formatCurrency } from '@/lib/utils';
+import { formatCurrency, sanitizeCurrencyCode } from '@/lib/utils';
 
 // Map extraction to calculate request
 function mapExtractionToContract(extracted: any): any {
   const step1 = extracted?.step1_identify_contract?.contract_details || {};
-  const obligations = extracted?.step2_performance_obligations?.identified_obligations || [];
+  const rawObligations = extracted?.step2_performance_obligations?.identified_obligations;
+  const obligations = Array.isArray(rawObligations) ? rawObligations : [];
   const step3 = extracted?.step3_transaction_price || {};
-  const step5 = extracted?.step5_recognition?.obligations_recognition_timing || [];
+  const rawStep5 = extracted?.step5_recognition?.obligations_recognition_timing;
+  const step5 = Array.isArray(rawStep5) ? rawStep5 : [];
 
   const recognitionMap: Record<string, any> = {};
   step5.forEach((r: any) => { recognitionMap[r.obligation_id] = r; });
@@ -43,10 +45,26 @@ function mapExtractionToContract(extracted: any): any {
     contract_term_months: step1.contract_term_months ?? 12,
     fixed_consideration: typeof fixed === 'number' ? fixed : parseFloat(String(fixed)) || 0,
     variable_consideration: typeof variable === 'number' ? variable : parseFloat(String(variable)) || 0,
+    variable_consideration_constrained: varCons.variable_consideration_constrained ?? 0,
+    constraint_percentage: varCons.constraint_percentage ?? 100,
+    constraint_method: varCons.constraint_method ?? 'percentage',
     discounts: varCons.discounts ?? 0,
     rebates: varCons.rebates ?? 0,
     financing_adjustment: step3.significant_financing_component?.adjustment_amount ?? 0,
-    currency: step1.currency || 'USD',
+    currency: sanitizeCurrencyCode(step1.currency, 'USD'),
+    contract_type: 'fixed_price',
+    hourly_rate: 0,
+    hours_worked: 0,
+    tm_cap: 0,
+    cumulative_billed: 0,
+    total_estimated_cost: 0,
+    actual_cost_to_date: 0,
+    prior_revenue_recognised: 0,
+    maintenance_term_months: 0,
+    volume_slabs: [],
+    estimated_annual_volume: 0,
+    can_estimate_volume: true,
+    sla_items: [],
     cash_received: 0,
     performance_obligations: perfObs.length ? perfObs : [{
       obligation_id: 'PO-1',
@@ -69,10 +87,47 @@ export default function IFRS15Page() {
   const [fileId, setFileId] = useState<string | null>(null);
   const [activeModule, setActiveModule] = useState<string | null>(null);
   const [contractText, setContractText] = useState('');
+  const [vcConstraint, setVcConstraint] = useState({
+    constraint_method: 'percentage',
+    constraint_percentage: 100,
+    variable_consideration_constrained: 0,
+  });
   const [lastContractInfo, setLastContractInfo] = useState<{ contract_id?: string; customer_name?: string; effective_date?: string; contract_term_months?: number; currency?: string }>({});
   const [scheduleViewAll, setScheduleViewAll] = useState(false);
+  const [showSLA, setShowSLA] = useState(false);
+  const [showVolumeDiscount, setShowVolumeDiscount] = useState(false);
+  const [slaItems, setSlaItems] = useState<any[]>([]);
+  const [volumeSlabs, setVolumeSlabs] = useState<any[]>([]);
+  const [step3, setStep3] = useState<any>({
+    contract_type: 'fixed_price',
+    hourly_rate: '',
+    hours_worked: '',
+    tm_cap: '',
+    cumulative_billed: '',
+    total_estimated_cost: '',
+    actual_cost_to_date: '',
+    prior_revenue_recognised: '',
+    maintenance_term_months: '',
+    estimated_annual_volume: '',
+    can_estimate_volume: true,
+  });
+  const updateStep3 = (patch: Record<string, any>) => {
+    setStep3((prev: any) => ({ ...prev, ...patch }));
+  };
+  const addSLAItem = () => {
+    setSlaItems((prev) => [...prev, { name: '', target: '', actual: '', monthly_fee: '', penalty_multiplier: 1 }]);
+  };
+  const addVolumeSlab = () => {
+    setVolumeSlabs((prev) => [...prev, { min_volume: '', max_volume: '', discount_pct: '' }]);
+  };
 
   const step1 = extractedData?.step1_identify_contract?.contract_details || {};
+  const extractedVarCons = extractedData?.step3_transaction_price?.variable_consideration || {};
+  const extractedVariableAmount =
+    (Number(extractedVarCons.performance_bonuses ?? 0) + Number(extractedVarCons.volume_discounts ?? 0))
+    - Number(extractedVarCons.discounts ?? 0)
+    - Number(extractedVarCons.rebates ?? 0)
+    - Number(extractedVarCons.penalties ?? 0);
   const stepStatus = {
     step1: !!extractedData?.step1_identify_contract,
     step2: !!(extractedData?.step2_performance_obligations?.identified_obligations?.length),
@@ -100,6 +155,12 @@ export default function IFRS15Page() {
       const { data, error } = response;
       if (error) throw new Error(error);
       setExtractedData(data?.extracted_data);
+      const vc = data?.extracted_data?.step3_transaction_price?.variable_consideration || {};
+      setVcConstraint({
+        constraint_method: vc.constraint_method ?? 'percentage',
+        constraint_percentage: Number(vc.constraint_percentage ?? 100),
+        variable_consideration_constrained: Number(vc.variable_consideration_constrained ?? 0),
+      });
       toast.success('Contract extracted successfully!');
     } catch (error: any) {
       toast.error(error?.message || 'Failed to extract contract');
@@ -110,7 +171,38 @@ export default function IFRS15Page() {
   };
 
   const handleCalculate = async (contractData?: any) => {
-    const payload = contractData || (extractedData ? mapExtractionToContract(extractedData) : null);
+    const basePayload = contractData || (extractedData ? mapExtractionToContract(extractedData) : null);
+    const payload = basePayload
+      ? {
+          ...basePayload,
+          constraint_method: vcConstraint.constraint_method,
+          constraint_percentage: vcConstraint.constraint_percentage,
+          variable_consideration_constrained: vcConstraint.variable_consideration_constrained,
+          contract_type: step3.contract_type || 'fixed_price',
+          hourly_rate: Number(step3.hourly_rate || 0),
+          hours_worked: Number(step3.hours_worked || 0),
+          tm_cap: Number(step3.tm_cap || 0),
+          cumulative_billed: Number(step3.cumulative_billed || 0),
+          total_estimated_cost: Number(step3.total_estimated_cost || 0),
+          actual_cost_to_date: Number(step3.actual_cost_to_date || 0),
+          prior_revenue_recognised: Number(step3.prior_revenue_recognised || 0),
+          maintenance_term_months: Number(step3.maintenance_term_months || 0),
+          volume_slabs: volumeSlabs.map((s) => ({
+            min_volume: Number(s.min_volume || 0),
+            max_volume: Number(s.max_volume || 0),
+            discount_pct: Number(s.discount_pct || 0),
+          })),
+          estimated_annual_volume: Number(step3.estimated_annual_volume || 0),
+          can_estimate_volume: Boolean(step3.can_estimate_volume),
+          sla_items: slaItems.map((s) => ({
+            name: s.name || '',
+            target: Number(s.target || 0),
+            actual: Number(s.actual || 0),
+            monthly_fee: Number(s.monthly_fee || 0),
+            penalty_multiplier: Number(s.penalty_multiplier || 1),
+          })),
+        }
+      : null;
     if (!payload || !payload.performance_obligations?.length) {
       toast.error('No contract data. Upload a contract or enter manually.');
       return;
@@ -127,7 +219,7 @@ export default function IFRS15Page() {
         customer_name: payload.customer_name,
         effective_date: payload.effective_date,
         contract_term_months: payload.contract_term_months,
-        currency: payload.currency || 'USD',
+        currency: sanitizeCurrencyCode(payload.currency, 'USD'),
       });
       toast.success('Calculation completed!');
     } catch (error: any) {
@@ -149,17 +241,25 @@ export default function IFRS15Page() {
 
   const disclosureData = results?.disclosure_data || {};
   const contractDetails = disclosureData?.contract_details || {};
-  const currency = contractDetails.currency || lastContractInfo.currency || step1.currency || 'USD';
+  const currency = sanitizeCurrencyCode(
+    contractDetails.currency || lastContractInfo.currency || step1.currency,
+    'USD'
+  );
   const balances = results?.contract_balances || {};
-  const schedule = results?.recognition_schedule || [];
-  const allocations = results?.allocations || {};
+  const schedule = Array.isArray(results?.recognition_schedule) ? results.recognition_schedule : [];
+  const rawAllocations = results?.allocations;
+  const allocations =
+    rawAllocations && typeof rawAllocations === 'object' && !Array.isArray(rawAllocations)
+      ? rawAllocations
+      : {};
   const journalEntries = results?.journal_entries || {};
 
   const contractId = contractDetails.contract_id || lastContractInfo.contract_id || step1.contract_id || '—';
   const customerName = contractDetails.customer || lastContractInfo.customer_name || step1.customer_name || '—';
   const contractDate = contractDetails.effective_date || lastContractInfo.effective_date || step1.effective_date || '—';
   const contractTerm = contractDetails.term_months ?? lastContractInfo.contract_term_months ?? step1.contract_term_months ?? '—';
-  const perfObs = disclosureData?.performance_obligations || [];
+  const rawPerfObs = disclosureData?.performance_obligations;
+  const perfObs = Array.isArray(rawPerfObs) ? rawPerfObs : [];
   const tp = results?.transaction_price || 0;
   const rec = balances.revenue_recognized_to_date || 0;
   const def = balances.contract_liability_amount || 0;
@@ -168,8 +268,8 @@ export default function IFRS15Page() {
 
   const generateDisclosureText = () => {
     if (!results) return '';
-    const c = disclosureData.contract_details?.currency || currency;
-    const sym = c === 'INR' ? '₹' : c === 'USD' ? '$' : c;
+    const c = sanitizeCurrencyCode(disclosureData.contract_details?.currency || currency, 'USD');
+    const sym = c === 'INR' ? '₹' : c === 'USD' ? '$' : c === 'GBP' ? '£' : c === 'EUR' ? '€' : c;
     const pointInTime = perfObs.filter((p: any) => p.recognition_method === 'point_in_time').reduce((s: number, p: any) => s + (p.revenue_recognized || 0), 0);
     const overTime = perfObs.filter((p: any) => p.recognition_method === 'over_time').reduce((s: number, p: any) => s + (p.revenue_recognized || 0), 0);
     return `IFRS 15 DISCLOSURE NOTES
@@ -245,7 +345,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                 <div><span className="text-xs text-text-muted">Customer Name</span><p className="text-sm font-medium text-text-primary mt-1">{customerName}</p></div>
                 <div><span className="text-xs text-text-muted">Contract Date</span><p className="text-sm font-medium text-text-primary mt-1">{contractDate}</p></div>
                 <div><span className="text-xs text-text-muted">Contract Term / Duration</span><p className="text-sm font-medium text-text-primary mt-1">{contractTerm === '—' ? '—' : `${contractTerm} months`}</p></div>
-                <div><span className="text-xs text-text-muted">Transaction Price / Contract Value</span><p className="text-sm font-medium text-text-primary mt-1">{results ? formatCurrency(tp, currency, 0) : (step1.total_contract_value ? formatCurrency(Number(step1.total_contract_value), step1.currency || 'USD', 0) : '—')}</p></div>
+                <div><span className="text-xs text-text-muted">Transaction Price / Contract Value</span><p className="text-sm font-medium text-text-primary mt-1">{results ? formatCurrency(tp, currency, 0) : (step1.total_contract_value ? formatCurrency(Number(step1.total_contract_value), sanitizeCurrencyCode(step1.currency, 'USD'), 0) : '—')}</p></div>
               </div>
             </>
           )}
@@ -571,6 +671,12 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       const { data, error } = response;
                       if (error) throw new Error(error);
                       setExtractedData(data?.extracted_data);
+                      const vc = data?.extracted_data?.step3_transaction_price?.variable_consideration || {};
+                      setVcConstraint({
+                        constraint_method: vc.constraint_method ?? 'percentage',
+                        constraint_percentage: Number(vc.constraint_percentage ?? 100),
+                        variable_consideration_constrained: Number(vc.variable_consideration_constrained ?? 0),
+                      });
                       toast.success('Contract extracted successfully!');
                     } catch (e: any) {
                       toast.error(e?.message || 'Extraction failed');
@@ -583,6 +689,140 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                 >
                 Analyze Contract
               </Button>
+
+              <div className="mb-6 mt-6 p-4 bg-blue-50 border border-blue-200 rounded-xl">
+                <label className="font-semibold text-gray-800 mb-3 block">
+                  Contract Type
+                  <span className="ml-2 text-xs text-blue-500">IFRS 15 §31-38</span>
+                </label>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[
+                    { key: 'time_and_material', label: '⏱ Time & Material', desc: 'Hours × Rate' },
+                    { key: 'fixed_price', label: '📋 Fixed Price (POC)', desc: 'Cost-to-cost method' },
+                    { key: 'capped_tm', label: '🔒 Capped T&M', desc: 'T&M with maximum cap' },
+                    { key: 'maintenance', label: '🔧 Maintenance', desc: 'Straight-line' },
+                  ].map((ct) => (
+                    <button
+                      key={ct.key}
+                      onClick={() => updateStep3({ contract_type: ct.key })}
+                      type="button"
+                      className={`p-3 rounded-lg border-2 text-left transition-all ${
+                        step3.contract_type === ct.key
+                          ? 'border-orange-500 bg-orange-50'
+                          : 'border-gray-200 bg-white hover:border-orange-300'
+                      }`}
+                    >
+                      <div className="font-semibold text-sm">{ct.label}</div>
+                      <div className="text-xs text-gray-500 mt-1">{ct.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {step3.contract_type === 'time_and_material' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm text-text-primary mb-1">Hours Worked</label>
+                    <input type="number" value={step3.hours_worked} onChange={(e) => updateStep3({ hours_worked: e.target.value })} className="w-full px-3 py-2 border border-border-default rounded-lg" />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-text-primary mb-1">Hourly Rate ($)</label>
+                    <input type="number" value={step3.hourly_rate} onChange={(e) => updateStep3({ hourly_rate: e.target.value })} className="w-full px-3 py-2 border border-border-default rounded-lg" />
+                  </div>
+                </div>
+              )}
+
+              {(step3.contract_type === 'fixed_price' || step3.contract_type === 'capped_tm') && (
+                <div className="grid grid-cols-3 gap-4 mt-4">
+                  <div>
+                    <label className="block text-sm text-text-primary mb-1">Total Estimated Cost</label>
+                    <input type="number" value={step3.total_estimated_cost} onChange={(e) => updateStep3({ total_estimated_cost: e.target.value })} className="w-full px-3 py-2 border border-border-default rounded-lg" />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-text-primary mb-1">Actual Cost to Date</label>
+                    <input type="number" value={step3.actual_cost_to_date} onChange={(e) => updateStep3({ actual_cost_to_date: e.target.value })} className="w-full px-3 py-2 border border-border-default rounded-lg" />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-text-primary mb-1">Prior Revenue Recognised</label>
+                    <input type="number" value={step3.prior_revenue_recognised} onChange={(e) => updateStep3({ prior_revenue_recognised: e.target.value })} className="w-full px-3 py-2 border border-border-default rounded-lg" />
+                  </div>
+                </div>
+              )}
+
+              {step3.contract_type === 'capped_tm' && (
+                <div className="grid grid-cols-2 gap-4 mt-4">
+                  <div>
+                    <label className="block text-sm text-text-primary mb-1">T&M Cap Amount</label>
+                    <input type="number" value={step3.tm_cap} onChange={(e) => updateStep3({ tm_cap: e.target.value })} className="w-full px-3 py-2 border border-border-default rounded-lg" />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-text-primary mb-1">Cumulative Billed to Date</label>
+                    <input type="number" value={step3.cumulative_billed} onChange={(e) => updateStep3({ cumulative_billed: e.target.value })} className="w-full px-3 py-2 border border-border-default rounded-lg" />
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-6">
+                <button onClick={() => setShowSLA(!showSLA)} className="text-sm font-semibold text-blue-600 flex items-center gap-2" type="button">
+                  {showSLA ? '▲' : '▼'}
+                  SLA Penalties / Credits (optional)
+                  <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded">Reduces Revenue</span>
+                </button>
+
+                {showSLA && (
+                  <div className="mt-3 space-y-3">
+                    {slaItems.map((sla, i) => (
+                      <div key={i} className="grid grid-cols-4 gap-3 p-3 bg-red-50 rounded-lg">
+                        <input placeholder="SLA Name" value={sla.name} onChange={(e) => setSlaItems((prev) => prev.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))} className="px-2 py-1 border rounded" />
+                        <input placeholder="Target %" type="number" value={sla.target} onChange={(e) => setSlaItems((prev) => prev.map((x, idx) => idx === i ? { ...x, target: e.target.value } : x))} className="px-2 py-1 border rounded" />
+                        <input placeholder="Actual %" type="number" value={sla.actual} onChange={(e) => setSlaItems((prev) => prev.map((x, idx) => idx === i ? { ...x, actual: e.target.value } : x))} className="px-2 py-1 border rounded" />
+                        <input placeholder="Monthly Fee" type="number" value={sla.monthly_fee} onChange={(e) => setSlaItems((prev) => prev.map((x, idx) => idx === i ? { ...x, monthly_fee: e.target.value } : x))} className="px-2 py-1 border rounded" />
+                      </div>
+                    ))}
+                    <button onClick={addSLAItem} className="text-sm text-blue-600" type="button">
+                      + Add SLA
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-6">
+                <button onClick={() => setShowVolumeDiscount(!showVolumeDiscount)} className="text-sm font-semibold text-blue-600 flex items-center gap-2" type="button">
+                  {showVolumeDiscount ? '▲' : '▼'}
+                  Volume Discounts (optional)
+                  <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded">Variable Consideration</span>
+                </button>
+
+                {showVolumeDiscount && (
+                  <div className="mt-3 space-y-3">
+                    {volumeSlabs.map((slab, i) => (
+                      <div key={i} className="grid grid-cols-3 gap-3 p-3 bg-amber-50 rounded-lg">
+                        <input placeholder="Min Volume $" type="number" value={slab.min_volume} onChange={(e) => setVolumeSlabs((prev) => prev.map((x, idx) => idx === i ? { ...x, min_volume: e.target.value } : x))} className="px-2 py-1 border rounded" />
+                        <input placeholder="Max Volume $" type="number" value={slab.max_volume} onChange={(e) => setVolumeSlabs((prev) => prev.map((x, idx) => idx === i ? { ...x, max_volume: e.target.value } : x))} className="px-2 py-1 border rounded" />
+                        <input placeholder="Discount %" type="number" value={slab.discount_pct} onChange={(e) => setVolumeSlabs((prev) => prev.map((x, idx) => idx === i ? { ...x, discount_pct: e.target.value } : x))} className="px-2 py-1 border rounded" />
+                      </div>
+                    ))}
+                    <button onClick={addVolumeSlab} className="text-sm text-blue-600" type="button">
+                      + Add Slab
+                    </button>
+
+                    <div className="flex items-center gap-3">
+                      <input type="checkbox" checked={step3.can_estimate_volume} onChange={(e) => updateStep3({ can_estimate_volume: e.target.checked })} />
+                      <label className="text-sm">I can estimate annual volume</label>
+                    </div>
+
+                    {step3.can_estimate_volume && (
+                      <input placeholder="Estimated annual volume $" type="number" value={step3.estimated_annual_volume} onChange={(e) => updateStep3({ estimated_annual_volume: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+                    )}
+
+                    {!step3.can_estimate_volume && (
+                      <p className="text-xs text-amber-700">
+                        ⚠ Maximum discount will be applied (conservative — IFRS 15 §56)
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
             )}
 
@@ -592,10 +832,64 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                 <div className="grid grid-cols-2 gap-3 text-sm mb-4">
                   <div><span className="text-text-muted">Customer Name:</span> {step1.customer_name || '—'}</div>
                   <div><span className="text-text-muted">Contract Date:</span> {step1.effective_date || '—'}</div>
-                  <div><span className="text-text-muted">Contract Value:</span> {formatCurrency(step1.total_contract_value ?? extractedData?.step3_transaction_price?.total_transaction_price ?? 0, step1.currency || 'USD', 0)}</div>
+                  <div>
+                    <span className="text-text-muted">Contract Value:</span>{' '}
+                    {formatCurrency(
+                      step1.total_contract_value ?? extractedData?.step3_transaction_price?.total_transaction_price ?? 0,
+                      sanitizeCurrencyCode(step1.currency, 'USD'),
+                      0
+                    )}
+                  </div>
                   <div><span className="text-text-muted"># POBs:</span> {extractedData?.step2_performance_obligations?.total_obligations_count ?? 0}</div>
                   <div><span className="text-text-muted">Payment Terms:</span> {extractedData?.step3_transaction_price?.significant_financing_component?.payment_terms_exceed_one_year ? 'Exceeds 1 year' : (extractedData?.step3_transaction_price ? 'Per contract' : '—')}</div>
                   <div><span className="text-text-muted">Duration:</span> {step1.contract_term_months ?? '—'} months</div>
+                </div>
+                <div className="p-3 bg-white rounded border border-green-200 mb-4">
+                  <p className="text-sm font-medium text-text-primary mb-2">Variable Consideration Constraint (IFRS 15 §56-58)</p>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-xs text-text-muted">Constraint Method</label>
+                      <select
+                        className="w-full border rounded px-2 py-1 text-sm"
+                        value={vcConstraint.constraint_method}
+                        onChange={(e) => setVcConstraint((p) => ({ ...p, constraint_method: e.target.value }))}
+                      >
+                        <option value="percentage">% Highly Probable</option>
+                        <option value="amount">Fixed Amount</option>
+                      </select>
+                    </div>
+                    {vcConstraint.constraint_method === 'percentage' ? (
+                      <div>
+                        <label className="text-xs text-text-muted">Highly Probable %</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          step={1}
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          value={vcConstraint.constraint_percentage}
+                          onChange={(e) => setVcConstraint((p) => ({ ...p, constraint_percentage: parseFloat(e.target.value) || 100 }))}
+                        />
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="text-xs text-text-muted">Constrained Amount</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step={0.01}
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          value={vcConstraint.variable_consideration_constrained}
+                          onChange={(e) => setVcConstraint((p) => ({ ...p, variable_consideration_constrained: parseFloat(e.target.value) || 0 }))}
+                        />
+                      </div>
+                    )}
+                  </div>
+                  {vcConstraint.constraint_method === 'percentage' && vcConstraint.constraint_percentage < 100 && (
+                    <p className="text-xs text-amber-600 mt-2">
+                      VC constrained to {vcConstraint.constraint_percentage}% - {((extractedVariableAmount || 0) * (vcConstraint.constraint_percentage / 100)).toFixed(2)} included, {((extractedVariableAmount || 0) * (1 - vcConstraint.constraint_percentage / 100)).toFixed(2)} excluded.
+                    </p>
+                  )}
                 </div>
                 <Button variant="primary" size="md" onClick={() => handleCalculate()} isLoading={isCalculating}>
                   <Calculator className="w-4 h-4" /> Calculate with Extracted Data
@@ -664,6 +958,89 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
           {/* Results - same level of detail as IFRS 16 */}
           {results && (
             <>
+              {results?.revenue_engine_result && (
+                <div className="p-5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl mb-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-bold text-blue-900">Revenue Engine Result</h3>
+                    <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded font-medium">
+                      {results?.revenue_engine_result?.method}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-4">
+                    <div>
+                      <div className="text-xs text-gray-500">Revenue This Period</div>
+                      <div className="text-2xl font-bold text-blue-700">
+                        ${results?.revenue_engine_result?.revenue_this_period?.toLocaleString?.()}
+                      </div>
+                    </div>
+
+                    {results?.revenue_engine_result?.poc_percentage != null && (
+                      <div>
+                        <div className="text-xs text-gray-500">POC %</div>
+                        <div className="text-2xl font-bold text-green-700">
+                          {results?.revenue_engine_result?.poc_percentage}%
+                        </div>
+                        <div className="mt-1 h-2 bg-gray-200 rounded-full">
+                          <div
+                            className="h-2 bg-green-500 rounded-full"
+                            style={{ width: `${results?.revenue_engine_result?.poc_percentage}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {results?.revenue_engine_result?.remaining_revenue != null && (
+                      <div>
+                        <div className="text-xs text-gray-500">Remaining Revenue</div>
+                        <div className="text-2xl font-bold text-orange-600">
+                          ${results?.revenue_engine_result?.remaining_revenue?.toLocaleString?.()}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {results?.revenue_engine_result?.formula && (
+                    <div className="mt-3 p-2 bg-blue-900 rounded text-xs text-white font-mono text-center">
+                      📐 {results?.revenue_engine_result?.formula}
+                    </div>
+                  )}
+
+                  {results?.onerous_check?.is_onerous && (
+                    <div className="mt-3 p-3 bg-red-50 border border-red-300 rounded-lg">
+                      <div className="font-bold text-red-700">⚠ ONEROUS CONTRACT DETECTED</div>
+                      <div className="text-sm text-red-600 mt-1">
+                        Expected loss: ${results?.onerous_check?.expected_loss?.toLocaleString?.()} — Provision required immediately (IAS 37)
+                      </div>
+                    </div>
+                  )}
+
+                  {results?.revenue_engine_result?.switched_to_poc && (
+                    <div className="mt-3 p-2 bg-amber-50 border border-amber-300 rounded text-sm text-amber-700">
+                      🔒 Cap exceeded by ${results?.revenue_engine_result?.cap_exceeded_by?.toLocaleString?.()} — Switched from T&M to POC method
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {results?.sla_result?.total_penalty > 0 && (
+                <div className="p-4 bg-red-50 border border-red-200 rounded-xl mb-4">
+                  <h3 className="font-bold text-red-800 mb-2">SLA Penalties — Negative Revenue</h3>
+                  <div className="text-2xl font-bold text-red-700 mb-2">
+                    −${results?.sla_result?.total_penalty?.toLocaleString?.()}
+                  </div>
+                  <div className="space-y-1">
+                    {results?.sla_result?.sla_details
+                      ?.filter((s: any) => s?.breach)
+                      ?.map((s: any, i: number) => (
+                        <div key={i} className="text-sm text-red-600">
+                          • {s?.sla_name}: target {s?.target}%, actual {s?.actual}% → penalty ${s?.penalty?.toFixed?.(0)}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+
               <div className="bg-white rounded-card p-6 border border-border-default shadow-card">
                 <div className="border-b border-border-default pb-4 mb-6">
                   <h3 className="text-base font-bold text-text-primary">Calculation Results</h3>

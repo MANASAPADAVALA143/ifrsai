@@ -31,7 +31,7 @@ export interface LeaseRepositoryEntry {
   end_date?: string;
   monthly_payment?: number;
   discount_rate?: number;
-  status?: 'Active' | 'Draft' | 'Expiring Soon' | 'Expired' | 'Under Review' | 'Terminated';
+  status?: 'Active' | 'Calculated' | 'Draft' | 'Expiring Soon' | 'Expired' | 'Under Review' | 'Terminated';
   version?: string;
   cost_centers?: { name: string; percent: number }[];
   /** Tabbed form extensions (optional) */
@@ -95,7 +95,13 @@ export interface LeaseRepositoryEntry {
   cpi_adjustments?: boolean;
   base_index_value?: number;
   current_index_value?: number;
+  cpi_adjustment_frequency_months?: number;
   last_adjustment_date?: string;
+  non_lease_component?: number;
+  non_lease_description?: string;
+  practical_expedient_elected?: boolean;
+  /** Full IFRS 16 extractor JSON from upload-contract (for modification advisor, etc.) */
+  contract_data?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -204,7 +210,8 @@ export function buildLeaseEntryFromForm(
   form: Record<string, any>,
   existing?: LeaseRepositoryEntry | null,
   results?: Record<string, unknown> | null,
-  excelFileId?: string
+  excelFileId?: string,
+  contractData?: Record<string, unknown> | null
 ): LeaseRepositoryEntry {
   const id = form.leaseId || form.lease_id || existing?.id || existing?.lease_id || `LEASE-2026-${String(Date.now()).slice(-6)}`;
   const start = form.startDate || form.effectiveDate || existing?.dates?.commencement || existing?.start_date || '';
@@ -269,8 +276,21 @@ export function buildLeaseEntryFromForm(
     payment_type: form.paymentType ?? existing?.payment_type,
     exchange_rate: form.exchangeRate ?? existing?.exchange_rate,
     extended_base_rent: form.extendedBaseRentAmount != null && form.extendedBaseRentAmount !== '' ? parseFloat(String(form.extendedBaseRentAmount)) : existing?.extended_base_rent,
-    initial_direct_costs: form.initialDirectCosts != null && form.initialDirectCosts !== '' ? parseFloat(String(form.initialDirectCosts)) : existing?.initial_direct_costs,
+    initial_direct_costs: (form.legalFees != null && form.legalFees !== '' ? parseFloat(String(form.legalFees)) : 0) + (form.brokerageFees != null && form.brokerageFees !== '' ? parseFloat(String(form.brokerageFees)) : 0) + (form.otherInitialDirectCosts != null && form.otherInitialDirectCosts !== '' ? parseFloat(String(form.otherInitialDirectCosts)) : 0) || (form.initialDirectCosts != null && form.initialDirectCosts !== '' ? parseFloat(String(form.initialDirectCosts)) : existing?.initial_direct_costs ?? 0),
+    legal_fees: form.legalFees != null && form.legalFees !== '' ? parseFloat(String(form.legalFees)) : (existing as any)?.legal_fees,
+    brokerage_fees: form.brokerageFees != null && form.brokerageFees !== '' ? parseFloat(String(form.brokerageFees)) : (existing as any)?.brokerage_fees,
+    other_initial_direct_costs: form.otherInitialDirectCosts != null && form.otherInitialDirectCosts !== '' ? parseFloat(String(form.otherInitialDirectCosts)) : (existing as any)?.other_initial_direct_costs,
+    initial_direct_costs_description: form.initialDirectCostsDescription ?? (existing as any)?.initial_direct_costs_description ?? '',
     lease_incentives: form.leaseIncentives != null && form.leaseIncentives !== '' ? parseFloat(String(form.leaseIncentives)) : existing?.lease_incentives,
+    rent_free_months: form.rentFreeMonths ?? (existing as any)?.rent_free_months ?? 0,
+    cash_incentive: form.cashIncentive != null && form.cashIncentive !== '' ? parseFloat(String(form.cashIncentive)) : (existing as any)?.cash_incentive ?? (form.leaseIncentives != null && form.leaseIncentives !== '' ? parseFloat(String(form.leaseIncentives)) : 0),
+    lease_incentive_description: form.leaseIncentiveDescription ?? (existing as any)?.lease_incentive_description ?? '',
+    non_lease_component: form.nonLeaseComponent != null && form.nonLeaseComponent !== '' ? parseFloat(String(form.nonLeaseComponent)) : (existing as any)?.non_lease_component ?? 0,
+    non_lease_description: form.nonLeaseDescription ?? (existing as any)?.non_lease_description ?? '',
+    practical_expedient_elected: Boolean(form.practicalExpedientElected ?? (existing as any)?.practical_expedient_elected ?? false),
+    rvg_amount: form.rvgAmount != null && form.rvgAmount !== '' ? parseFloat(String(form.rvgAmount)) : (existing as any)?.rvg_amount,
+    rvg_guaranteed_by: form.rvgGuaranteedBy ?? (existing as any)?.rvg_guaranteed_by ?? 'None',
+    rvg_expected_payment: form.rvgExpectedPayment != null && form.rvgExpectedPayment !== '' ? parseFloat(String(form.rvgExpectedPayment)) : (existing as any)?.rvg_expected_payment ?? 0,
     escalation_type: form.escalationType ?? existing?.escalation_type,
     escalation_value: form.escalationValue != null && form.escalationValue !== '' ? parseFloat(String(form.escalationValue)) : existing?.escalation_value,
     escalation_start_date: form.escalationStartDate ?? existing?.escalation_start_date,
@@ -296,9 +316,17 @@ export function buildLeaseEntryFromForm(
     cpi_adjustments: form.cpiAdjustments ?? existing?.cpi_adjustments,
     base_index_value: form.baseIndexValue != null ? parseFloat(String(form.baseIndexValue)) : existing?.base_index_value,
     current_index_value: form.currentIndexValue != null ? parseFloat(String(form.currentIndexValue)) : existing?.current_index_value,
+    cpi_adjustment_frequency_months:
+      form.cpiAdjustmentFrequencyMonths != null && form.cpiAdjustmentFrequencyMonths !== ''
+        ? parseInt(String(form.cpiAdjustmentFrequencyMonths), 10)
+        : existing?.cpi_adjustment_frequency_months,
     last_adjustment_date: form.lastAdjustmentDate ?? existing?.last_adjustment_date,
     functional_currency: (form as any).functionalCurrency ?? existing?.functional_currency ?? 'INR',
     restoration_cost: (form as any).restorationCost != null && (form as any).restorationCost !== '' ? parseFloat(String((form as any).restorationCost)) : existing?.restoration_cost,
+    contract_data:
+      contractData != null && Object.keys(contractData).length > 0
+        ? contractData
+        : (existing as { contract_data?: Record<string, unknown> })?.contract_data,
   };
   return entry;
 }

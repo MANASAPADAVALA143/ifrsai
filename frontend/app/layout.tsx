@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
+import { ToasterClient } from "@/components/ToasterClient";
 import "./globals.css";
-import { Toaster } from "react-hot-toast";
 
 export const metadata: Metadata = {
   title: "IFRS.ai - IFRS Compliance Automated by AI",
@@ -14,9 +14,14 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>
+      <body className="min-h-screen antialiased">
+        <noscript>
+          <div className="p-4 bg-amber-100 text-amber-950 text-sm">
+            JavaScript is required to run IFRS.ai. Enable it in your browser and reload.
+          </div>
+        </noscript>
         {children}
-        <Toaster position="top-right" />
+        <ToasterClient />
       </body>
     </html>
   );

@@ -83,7 +83,7 @@ When you calculate a lease with `company_id`, it's automatically indexed:
 ```python
 import requests
 
-response = requests.post("http://localhost:8000/api/calculate", json={
+response = requests.post("http://localhost:9000/api/calculate", json={
     "lease_id": "LEASE-2024-001",
     "company_id": "COMPANY-ABC-001",  # REQUIRED for RAG
     "asset_description": "Office Space",
@@ -123,7 +123,7 @@ rag.embed_and_store(
 ### 1. Ask Questions via API
 
 ```bash
-curl -X POST "http://localhost:8000/api/chat" \
+curl -X POST "http://localhost:9000/api/chat" \
   -H "Content-Type: application/json" \
   -d '{
     "company_id": "COMPANY-ABC-001",
@@ -365,7 +365,7 @@ Complete workflow demonstration.
 python app.py
 
 # In another terminal
-curl -X POST "http://localhost:8000/api/chat" \
+curl -X POST "http://localhost:9000/api/chat" \
   -H "Content-Type: application/json" \
   -d '{"company_id": "TEST", "question": "Hello"}'
 ```

@@ -25,7 +25,12 @@ export function useAuth() {
       // Demo mode: Check localStorage for demo session
       const demoUser = localStorage.getItem('demo_user');
       if (demoUser) {
-        setUser(JSON.parse(demoUser));
+        try {
+          setUser(JSON.parse(demoUser) as User | DemoUser);
+        } catch {
+          localStorage.removeItem('demo_user');
+          setUser(null);
+        }
       }
       setLoading(false);
       return;
@@ -37,10 +42,16 @@ export function useAuth() {
     }
 
     // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      setLoading(false);
-    });
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        setUser(session?.user ?? null);
+        setLoading(false);
+      })
+      .catch(() => {
+        setUser(null);
+        setLoading(false);
+      });
 
     // Listen for auth changes
     const {

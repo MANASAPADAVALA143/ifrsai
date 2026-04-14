@@ -1,102 +1,67 @@
-# 🌐 IFRS.ai Localhost URLs
+# IFRS.ai Localhost URLs
 
-## ✅ Main Application
+## Main application
 
-**Frontend (Next.js):**
+**Frontend (Next.js)** — default `npm run dev` in `frontend` uses **port 3004**:
+
 ```
-http://localhost:3003
+http://localhost:3004
 ```
 
-This is your main IFRS.ai landing page with the new premium design.
+**Alternate:** `npm run dev:localhost` uses port **3003**; `npm run dev:3002` uses **3002**.
 
 ---
 
-## 🔧 Backend Services
+## Backend
 
-**Backend API (FastAPI):**
-```
-http://localhost:8000
-```
+**API (FastAPI):**
 
-**Interactive API Documentation:**
 ```
-http://localhost:8000/api/docs
+http://localhost:9000
 ```
 
-**Health Check:**
-```
-http://localhost:8000/api/health
-```
+**Docs:** http://localhost:9000/api/docs  
+
+**Health:** http://localhost:9000/api/health  
+
+If 9000 is busy, `python app.py` picks the next free port and writes `api_dev_port.txt` in the project root; the Next.js dev proxy reads that file.
 
 ---
 
-## 🚀 How to Start
+## How to start (recommended Windows)
 
-### Start Frontend:
+Double-click **`START_LOCALHOST.bat`** or **`START_BOTH.bat`** — opens **backend + frontend** and uses **3004**.
+
+Or manually:
+
 ```bash
-cd C:\Users\HCSUSER\OneDrive\Desktop\IFRSAI\frontend
+# Terminal 1 — project root
+python app.py
+
+# Terminal 2 — frontend
+cd frontend
 npm run dev
 ```
 
-### Start Backend:
-```bash
-cd C:\Users\HCSUSER\OneDrive\Desktop\IFRSAI
-python app.py
+---
+
+## Quick checklist
+
+- [ ] Backend running (see terminal: `API base: http://127.0.0.1:9000` or another port)
+- [ ] Frontend running: terminal shows `Local: http://localhost:3004` (or the port Next chose)
+- [ ] Browser: http://localhost:3004
+- [ ] If the UI says **API offline**, the Python backend is not running or not ready yet — refresh after it starts
+
+---
+
+## CFO Insights (example)
+
+```
+http://localhost:3004/dashboard/ifrs16/cfo-insights
 ```
 
 ---
 
-## 📋 Quick Checklist
+## Port busy?
 
-- [ ] Frontend running on port 3003
-- [ ] Backend running on port 8000
-- [ ] Open http://localhost:3003 in browser
-- [ ] See the new premium landing page
-
----
-
-## 🎨 What You'll See
-
-When you open **http://localhost:3003**, you should see:
-
-- ✅ Deep navy background (#080F1E)
-- ✅ Grid pattern overlay
-- ✅ Two blur orbs (blue & green)
-- ✅ Fixed navigation with backdrop blur
-- ✅ Hero section with gradient text
-- ✅ 3D dashboard mockup
-- ✅ Metrics bar (4 stats)
-- ✅ How It Works (3 steps)
-- ✅ Features grid (4 cards)
-- ✅ Pricing section
-- ✅ CTA banner
-
----
-
-## 🔄 If Port 3003 is Busy
-
-The server will automatically try:
-- 3004
-- 3005
-- 3006
-- etc.
-
-Check the terminal output for the actual port.
-
----
-
-## 💡 Pro Tip
-
-**Bookmark this URL:**
-```
-http://localhost:3003
-```
-
-Or use the batch file:
-```
-START_SIMPLE.bat
-```
-
----
-
-**All set! Open http://localhost:3003 to see your application!** 🚀
+Check the Next.js terminal for the actual **Local:** URL. For a fixed alternate port use `npm run dev:3000` or `dev:localhost` from `frontend/package.json`.

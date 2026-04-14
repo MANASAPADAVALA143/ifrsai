@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import toast from 'react-hot-toast';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? '';
 const CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
 type CheckStatus = 'pass' | 'fail' | 'slow' | 'checking' | 'idle';
@@ -18,6 +18,38 @@ interface CheckResult {
   fixCommand?: string;
   fixHint?: string;
   timestamp: string;
+}
+
+function HealthScoreRing({ score, label }: { score: number; label: string }) {
+  const r = 48;
+  const circ = 2 * Math.PI * r;
+  const offset = circ - (score / 100) * circ;
+  const color = score >= 75 ? '#16a34a' : score >= 50 ? '#d97706' : '#dc2626';
+
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <svg width={112} height={112} viewBox="0 0 112 112" className="flex-shrink-0">
+        <circle cx={56} cy={56} r={r} fill="none" stroke="#e2e8f0" strokeWidth={10} />
+        <circle
+          cx={56}
+          cy={56}
+          r={r}
+          fill="none"
+          stroke={color}
+          strokeWidth={10}
+          strokeDasharray={circ}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          transform="rotate(-90 56 56)"
+          className="transition-[stroke-dashoffset] duration-1000 ease-out"
+        />
+        <text x={56} y={56} textAnchor="middle" dominantBaseline="middle" fontSize={28} fontWeight={600} fill={color}>
+          {score}
+        </text>
+      </svg>
+      <span className="text-xs text-text-secondary text-center max-w-[140px]">{label}</span>
+    </div>
+  );
 }
 
 const SAMPLE_IFRS16_DATA = {
@@ -534,6 +566,28 @@ ${(validation.issues ?? []).length ? 'Issues: ' + (validation.issues ?? []).join
             >
               {isRunning ? '⏳ Running...' : '▶ Run All Checks Now'}
             </button>
+          </div>
+        </div>
+
+        {/* Health Score (0–100) — CFO-friendly single number */}
+        <div className="flex flex-wrap items-center gap-8">
+          <div className="flex flex-col items-center">
+            <HealthScoreRing
+              score={totalChecks > 0 ? Math.round((overallScore / totalChecks) * 100) : 0}
+              label={totalChecks > 0 ? `${overallScore}/${totalChecks} checks passed` : 'Run checks first'}
+            />
+          </div>
+          <div className="flex-1 min-w-[200px]">
+            <h3 className="text-base font-semibold text-text-primary mb-1">System Health Score</h3>
+            <p className="text-sm text-text-secondary">
+              {totalChecks === 0
+                ? 'Click &quot;Run All Checks Now&quot; to get your 0–100 health score.'
+                : overallScore === totalChecks
+                ? 'All systems operational. Ready for demo.'
+                : failed > 0
+                ? `${failed} issue${failed !== 1 ? 's' : ''} need attention before demo.`
+                : 'Most systems OK. Review slow checks.'}
+            </p>
           </div>
         </div>
 

@@ -1,32 +1,26 @@
 @echo off
 echo ========================================
-echo Starting IFRS AI Platform (Port 3002)
+echo Starting IFRS AI Platform (frontend port 3004)
 echo ========================================
 echo.
 
-echo Stopping any existing IFRS processes...
-taskkill /F /IM node.exe /FI "WINDOWTITLE eq IFRS*" 2>nul
-taskkill /F /IM python.exe /FI "WINDOWTITLE eq IFRS*" 2>nul
-timeout /t 2 /nobreak >nul
-
-echo [1/2] Starting Backend (FastAPI) on port 8000...
-start "IFRS Backend - Port 8000" cmd /k "cd /d %~dp0 && python app.py"
+echo [1/2] Starting Backend (FastAPI), default port 9000...
+start "IFRS Backend" cmd /k "cd /d %~dp0 && python app.py"
 timeout /t 3 /nobreak >nul
 
-echo [2/2] Starting Frontend (Next.js) on port 3002...
-start "IFRS Frontend - Port 3002" cmd /k "cd /d %~dp0\frontend && npm run dev"
+echo [2/2] Starting Frontend (Next.js package.json dev = port 3004)...
+start "IFRS Frontend" cmd /k "cd /d %~dp0\frontend && npm run dev"
 
 echo.
 echo ========================================
 echo IFRS AI Platform is starting!
 echo ========================================
 echo.
-echo Frontend: http://localhost:3002
-echo Backend:  http://localhost:8000
-echo API Docs: http://localhost:8000/api/docs
+echo Frontend: http://localhost:3004
+echo Backend:  http://localhost:9000
+echo API Docs: http://localhost:9000/api/docs
 echo.
-echo NOTE: Port 3000 is used by Real Estate app
-echo       IFRS.ai is running on port 3002
+echo For port 3002 or 3003 use: npm run dev:3002 / dev:localhost in frontend folder.
 echo.
 echo Press any key to exit this window...
 pause >nul

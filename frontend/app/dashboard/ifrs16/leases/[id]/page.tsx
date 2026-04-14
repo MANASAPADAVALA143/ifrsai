@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import {
@@ -29,7 +29,7 @@ import {
   AlertCircle,
   ChevronLeft,
 } from 'lucide-react';
-import { ifrs16Api } from '@/lib/api';
+import { ifrs16Api, ifrs16IbrApi } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 import {
   getLeaseById,
@@ -42,6 +42,7 @@ import Link from 'next/link';
 import { useRouter, useParams } from 'next/navigation';
 import toast from 'react-hot-toast';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from '@/components/Charts';
+import { ModificationAIAdvisor } from './ModificationAIAdvisor';
 
 const TAB_IDS = ['contract', 'financial', 'modifications', 'assets', 'schedules', 'disclosures', 'review'] as const;
 const TABS: { id: typeof TAB_IDS[number]; label: string; icon: any }[] = [
@@ -104,28 +105,34 @@ function getVal(obj: any): any {
 
 function flattenExtraction(data: any): Record<string, any> {
   if (!data) return {};
+  const startDateRaw = getVal(data?.dates?.commencement_date);
+  const endDateRaw = getVal(data?.dates?.end_date);
+  const startDate = startDateRaw != null ? String(startDateRaw).slice(0, 10) : '';
+  const endDate = endDateRaw != null ? String(endDateRaw).slice(0, 10) : '';
+  const discountVal = getVal(data?.discount_rate?.stated_rate);
+  const discountRate = discountVal == null ? '' : (Number(discountVal) > 1 ? String(Number(discountVal)) : String(Number(discountVal) * 100));
   return {
     title: getVal(data?.basic_info?.asset_description) ?? '',
     assetDescription: getVal(data?.basic_info?.asset_description) ?? '',
     lessee: getVal(data?.basic_info?.lessee_name) ?? '',
     lessor: getVal(data?.basic_info?.lessor_name) ?? '',
     leaseType: getVal(data?.basic_info?.lease_type) ?? '',
-    startDate: getVal(data?.dates?.commencement_date) ?? '',
-    endDate: getVal(data?.dates?.end_date) ?? '',
+    startDate,
+    endDate,
     lease_term_months: getVal(data?.dates?.lease_term_months) ?? '',
     baseRentAmount: getVal(data?.payments?.monthly_amount) ?? '',
     currency: getVal(data?.payments?.currency) ?? 'INR',
     paymentFrequency: getVal(data?.payments?.payment_frequency) ?? 'Monthly',
-    discountRate: (() => {
-      const v = getVal(data?.discount_rate?.stated_rate);
-      if (v == null) return '';
-      const n = Number(v);
-      return n > 1 ? n : n * 100;
-    })(),
+    paymentType: getVal(data?.payments?.payment_type) ?? 'Arrears',
+    discountRate,
     initialDirectCosts: getVal(data?.initial_costs?.total) ?? '',
+    leaseIncentives: getVal(data?.initial_costs?.incentives) ?? '',
     renewalOptions: getVal(data?.options?.renewal_options) ?? '',
     terminationClauses: getVal(data?.options?.termination_clause) ?? '',
     description: getVal(data?.basic_info?.asset_description) ?? '',
+    country: getVal((data?.basic_info as any)?.country) || getVal((data as any)?.location?.country) || 'India',
+    city: getVal((data?.basic_info as any)?.city) || getVal((data as any)?.location?.city) || '',
+    location: getVal((data?.basic_info as any)?.location) || getVal((data?.basic_info as any)?.premises) || getVal((data as any)?.location?.address) || '',
   };
 }
 
@@ -166,7 +173,20 @@ const defaultFormState = (): Record<string, any> => ({
   extendedBaseRentAmount: '',
   exchangeRate: '1',
   initialDirectCosts: '0',
+  nonLeaseComponent: '0',
+  nonLeaseDescription: '',
+  practicalExpedientElected: false,
+  legalFees: '0',
+  brokerageFees: '0',
+  otherInitialDirectCosts: '0',
+  initialDirectCostsDescription: '',
   leaseIncentives: '0',
+  rentFreeMonths: 0,
+  cashIncentive: '0',
+  leaseIncentiveDescription: '',
+  rvgAmount: '0',
+  rvgGuaranteedBy: 'None',
+  rvgExpectedPayment: '0',
   escalationType: 'None',
   escalationValue: '',
   escalationStartDate: '',
@@ -200,6 +220,7 @@ const defaultFormState = (): Record<string, any> => ({
   cpiAdjustments: false,
   baseIndexValue: '',
   currentIndexValue: '',
+  cpiAdjustmentFrequencyMonths: '12',
   lastAdjustmentDate: '',
   version: 'V1',
   functionalCurrency: 'INR',
@@ -243,7 +264,20 @@ function leaseToForm(lease: any): ReturnType<typeof defaultFormState> {
   form.paymentType = lease.payment_type || 'Arrears';
   form.exchangeRate = lease.exchange_rate ?? '1';
   form.initialDirectCosts = lease.initial_direct_costs != null ? String(lease.initial_direct_costs) : '0';
+  form.nonLeaseComponent = (lease as any).non_lease_component != null ? String((lease as any).non_lease_component) : '0';
+  form.nonLeaseDescription = (lease as any).non_lease_description ?? '';
+  form.practicalExpedientElected = Boolean((lease as any).practical_expedient_elected ?? false);
+  form.legalFees = (lease as any).legal_fees != null ? String((lease as any).legal_fees) : '0';
+  form.brokerageFees = (lease as any).brokerage_fees != null ? String((lease as any).brokerage_fees) : '0';
+  form.otherInitialDirectCosts = (lease as any).other_initial_direct_costs != null ? String((lease as any).other_initial_direct_costs) : '0';
+  form.initialDirectCostsDescription = (lease as any).initial_direct_costs_description ?? '';
   form.leaseIncentives = lease.lease_incentives != null ? String(lease.lease_incentives) : '0';
+  form.rentFreeMonths = (lease as any).rent_free_months ?? 0;
+  form.cashIncentive = (lease as any).cash_incentive != null ? String((lease as any).cash_incentive) : form.leaseIncentives;
+  form.leaseIncentiveDescription = (lease as any).lease_incentive_description ?? '';
+  form.rvgAmount = (lease as any).rvg_amount != null ? String((lease as any).rvg_amount) : '0';
+  form.rvgGuaranteedBy = (lease as any).rvg_guaranteed_by ?? 'None';
+  form.rvgExpectedPayment = (lease as any).rvg_expected_payment != null ? String((lease as any).rvg_expected_payment) : '0';
   form.escalationType = lease.escalation_type || 'None';
   form.escalationValue = lease.escalation_value != null ? String(lease.escalation_value) : '';
   form.escalationStartDate = lease.escalation_start_date || '';
@@ -271,6 +305,8 @@ function leaseToForm(lease: any): ReturnType<typeof defaultFormState> {
   form.cpiAdjustments = lease.cpi_adjustments ?? false;
   form.baseIndexValue = lease.base_index_value != null ? String(lease.base_index_value) : '';
   form.currentIndexValue = lease.current_index_value != null ? String(lease.current_index_value) : '';
+  form.cpiAdjustmentFrequencyMonths =
+    lease.cpi_adjustment_frequency_months != null ? String(lease.cpi_adjustment_frequency_months) : '12';
   form.lastAdjustmentDate = lease.last_adjustment_date || '';
   form.version = lease.version || 'V1';
   form.transactionType = lease.transaction_type || 'Lessee';
@@ -278,6 +314,127 @@ function leaseToForm(lease: any): ReturnType<typeof defaultFormState> {
   form.restorationCost = lease.restorationCost != null ? String(lease.restorationCost) : (lease as any).restoration_cost != null ? String((lease as any).restoration_cost) : '';
   return form;
 }
+
+/** Demo payloads — field names match form state (CPI → baseIndexValue / currentIndexValue). */
+const SAMPLE_LEASES = {
+  office: {
+    label: '🏢 Office Lease (Simple)',
+    data: {
+      title: 'Corporate Office — Banjara Hills, Hyderabad',
+      assetDescription: 'Corporate Office — Banjara Hills, Hyderabad',
+      lessor: 'Prestige Estates Pvt Ltd',
+      lessee: 'Gnanova Technologies Pvt Ltd',
+      startDate: '2024-04-01',
+      endDate: '2027-03-31',
+      lease_term_months: '36',
+      baseRentAmount: '85000',
+      discountRate: '8.5',
+      currency: 'INR',
+      paymentType: 'Arrears',
+      paymentFrequency: 'Monthly',
+      rentFreeMonths: 0,
+      escalationType: 'None',
+      escalationValue: '',
+      legalFees: '0',
+      brokerageFees: '0',
+      otherInitialDirectCosts: '0',
+      cashIncentive: '0',
+      rvgAmount: '0',
+      rvgGuaranteedBy: 'None',
+      rvgExpectedPayment: '0',
+      cpiAdjustments: false,
+      baseIndexValue: '0',
+      currentIndexValue: '0',
+      cpiAdjustmentFrequencyMonths: '12',
+      nonLeaseComponent: '0',
+      nonLeaseDescription: '',
+      practicalExpedientElected: false,
+      leaseType: 'Building',
+      assetType: 'Office Building',
+      country: 'India',
+      city: 'Hyderabad',
+    },
+  },
+  datacentre: {
+    label: '🖥️ Data Centre (Multi-Component + CPI)',
+    data: {
+      title: 'Data Centre Space — HITEC City, Hyderabad',
+      assetDescription: 'Data Centre Space — HITEC City, Hyderabad',
+      lessor: 'CtrlS Datacenters Ltd',
+      lessee: 'Gnanova Technologies Pvt Ltd',
+      startDate: '2024-04-01',
+      endDate: '2029-03-31',
+      lease_term_months: '60',
+      baseRentAmount: '500000',
+      discountRate: '10.5',
+      currency: 'INR',
+      paymentType: 'Arrears',
+      paymentFrequency: 'Monthly',
+      rentFreeMonths: 0,
+      escalationType: 'None',
+      escalationValue: '',
+      legalFees: '0',
+      brokerageFees: '0',
+      otherInitialDirectCosts: '0',
+      cashIncentive: '0',
+      rvgAmount: '0',
+      rvgGuaranteedBy: 'None',
+      rvgExpectedPayment: '0',
+      cpiAdjustments: true,
+      baseIndexValue: '100',
+      currentIndexValue: '107.5',
+      cpiAdjustmentFrequencyMonths: '12',
+      nonLeaseComponent: '75000',
+      nonLeaseDescription: 'Data centre cooling, physical security, UPS power',
+      practicalExpedientElected: false,
+      leaseType: 'Equipment',
+      assetType: 'Data Centre',
+      country: 'India',
+      city: 'Hyderabad',
+    },
+  },
+  ibmserver: {
+    label: '⚙️ IBM Server (Full — All Features)',
+    data: {
+      title: 'IBM Power Server Rack — HITEC City Data Centre',
+      assetDescription: 'IBM Power Server Rack — HITEC City Data Centre',
+      lessor: 'IBM India Pvt Ltd',
+      lessee: 'Gnanova Technologies Pvt Ltd',
+      startDate: '2024-07-01',
+      endDate: '2029-06-30',
+      lease_term_months: '60',
+      baseRentAmount: '250000',
+      discountRate: '10.5',
+      currency: 'INR',
+      paymentType: 'Arrears',
+      paymentFrequency: 'Monthly',
+      rentFreeMonths: 2,
+      escalationType: 'Percentage',
+      escalationValue: '5',
+      escalationFrequency: 'Annual',
+      legalFees: '40000',
+      brokerageFees: '35000',
+      otherInitialDirectCosts: '25000',
+      initialDirectCostsDescription: 'Legal fees for lease negotiation + agent commission',
+      cashIncentive: '50000',
+      leaseIncentiveDescription: 'Lessor fit-out contribution',
+      rvgAmount: '300000',
+      rvgGuaranteedBy: 'Lessee',
+      rvgExpectedPayment: '150000',
+      cpiAdjustments: true,
+      baseIndexValue: '100',
+      currentIndexValue: '103',
+      cpiAdjustmentFrequencyMonths: '12',
+      nonLeaseComponent: '30000',
+      nonLeaseDescription: 'IBM hardware maintenance included in rent',
+      practicalExpedientElected: false,
+      leaseType: 'Equipment',
+      assetType: 'Server Equipment',
+      country: 'India',
+      city: 'Hyderabad',
+    },
+  },
+};
 
 export default function LeaseDetailTabbedPage() {
   const params = useParams();
@@ -292,7 +449,18 @@ export default function LeaseDetailTabbedPage() {
   const [calcResults, setCalcResults] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
   const [extractionBanner, setExtractionBanner] = useState<string | null>(null);
+  const [extractedTabs, setExtractedTabs] = useState<Set<string>>(new Set());
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [ibrError, setIbrError] = useState<string | null>(null);
+  const [ibrSuggestion, setIbrSuggestion] = useState<{
+    ibr_low: number;
+    ibr_mid: number;
+    ibr_high: number;
+    rationale: string;
+    market_references: string[];
+  } | null>(null);
+  const [ibrLoading, setIbrLoading] = useState(false);
+  const ibrInputRef = useRef<HTMLInputElement>(null);
   const [aiBarOpen, setAiBarOpen] = useState(true);
   const [costCenterInput, setCostCenterInput] = useState('');
   const [isCalculating, setIsCalculating] = useState(false);
@@ -333,6 +501,9 @@ export default function LeaseDetailTabbedPage() {
   const [finaliseModalOpen, setFinaliseModalOpen] = useState(false);
   const [versionHistoryModalOpen, setVersionHistoryModalOpen] = useState(false);
   const [lastCalculatedAt, setLastCalculatedAt] = useState<string | null>(null);
+  /** Raw extractor JSON from upload-contract (plus optional persisted `contract_data` on saved leases). */
+  const [contractData, setContractData] = useState<Record<string, unknown> | null>(null);
+
   const [modificationForm, setModificationForm] = useState<Record<string, any>>({
     date: '',
     effectiveDate: '',
@@ -351,7 +522,19 @@ export default function LeaseDetailTabbedPage() {
     newRestoration: '',
   });
 
+  const [showSampleMenu, setShowSampleMenu] = useState(false);
+  const sampleMenuRef = useRef<HTMLDivElement>(null);
+
   const existingLease = isNew ? null : getLeaseById(id);
+  const modificationAdvisorFormOverlay = useMemo(
+    () => ({
+      renewalOptions: form.renewalOptions,
+      terminationClauses: form.terminationClauses,
+      description: form.description,
+      escalationClause: [form.escalationType, form.escalationValue].filter(Boolean).join(' ').trim(),
+    }),
+    [form.renewalOptions, form.terminationClauses, form.description, form.escalationType, form.escalationValue]
+  );
   const hasResults = !!calcResults || !!existingLease?.results;
   const schedule = (calcResults?.amortization_schedule ?? existingLease?.results?.amortization_schedule ?? []) as any[];
   const excelFileId = calcResults?.excel_file_id ?? existingLease?.excel_file_id;
@@ -366,7 +549,44 @@ export default function LeaseDetailTabbedPage() {
     interest: row.Interest ?? row.interest,
     principal: row.Principal ?? row.principal,
     closing: row.Closing_Balance ?? row.closing_balance,
+    rentFree: row.Rent_Free ?? row.rent_free ?? false,
+    rvgPayment: row.RVG_Payment ?? row.rvg_payment ?? 0,
   });
+
+  const fetchIbrSuggestion = async () => {
+    try {
+      setIbrLoading(true);
+      let termMonths = 12;
+      if (form.lease_term_months) termMonths = Math.max(1, parseInt(form.lease_term_months, 10) || 12);
+      else if (form.startDate && form.endDate) {
+        const ms = new Date(form.endDate).getTime() - new Date(form.startDate).getTime();
+        termMonths = Math.max(1, Math.ceil(ms / (1000 * 60 * 60 * 24 * 30)));
+      }
+      const lesseeRaw = String(form.lessee || '').toLowerCase();
+      const lesseeType = lesseeRaw.includes('startup') ? 'Startup' : lesseeRaw.includes('sme') ? 'SME' : 'Corporate';
+      const res = await ifrs16IbrApi.suggest({
+        country: String(form.country || 'India'),
+        currency: String(form.currency || 'INR'),
+        lease_term_months: termMonths,
+        asset_type: String(form.assetDescription || form.title || '').trim() || undefined,
+        lessee_type: lesseeType,
+      });
+      if (res.error || !res.data) {
+        toast.error(res.error || 'Could not fetch IBR suggestion');
+        return;
+      }
+      setIbrSuggestion({
+        ibr_low: Number(res.data.ibr_low),
+        ibr_mid: Number(res.data.ibr_mid),
+        ibr_high: Number(res.data.ibr_high),
+        rationale: String(res.data.rationale || ''),
+        market_references: Array.isArray(res.data.market_references) ? res.data.market_references.map(String) : [],
+      });
+      toast.success('IBR suggestion loaded');
+    } finally {
+      setIbrLoading(false);
+    }
+  };
 
 function buildDisclosureText(results: any): string {
   if (!results) return '';
@@ -415,6 +635,39 @@ The maturity analysis of lease liabilities is presented in the Schedules tab.
 Report generated on: ${calcDate}`;
 }
 
+function extractDisclosureSections(notesRaw: unknown): Array<{ title: string; body: string }> {
+  const text = typeof notesRaw === 'string' ? notesRaw.trim() : '';
+  if (!text) return [];
+  const labels = [
+    'Accounting Policy',
+    'Right-of-Use Assets',
+    'Lease Liabilities',
+    'Amounts in P&L',
+    'Cash Flow Information',
+    'Significant Judgements',
+  ];
+  const normalized = text.replace(/\r\n/g, '\n');
+  const sections: Array<{ title: string; body: string }> = [];
+  for (let i = 0; i < labels.length; i++) {
+    const current = labels[i];
+    const next = i < labels.length - 1 ? labels[i + 1] : null;
+    const startMatch = normalized.match(new RegExp(`${current}\\s*:?[\\s\\n]*`, 'i'));
+    if (!startMatch || startMatch.index == null) continue;
+    const start = startMatch.index + startMatch[0].length;
+    let end = normalized.length;
+    if (next) {
+      const nextMatch = normalized.slice(start).match(new RegExp(`${next}\\s*:?[\\s\\n]*`, 'i'));
+      if (nextMatch && nextMatch.index != null) end = start + nextMatch.index;
+    }
+    const body = normalized.slice(start, end).trim();
+    if (body) sections.push({ title: current, body });
+  }
+  if (sections.length === 0 && text) {
+    return labels.map((title) => ({ title, body: text }));
+  }
+  return sections;
+}
+
 function getFYFromDate(dateStr: string): string {
   if (!dateStr) return '';
   const d = new Date(dateStr);
@@ -433,11 +686,23 @@ function getReportingDateForFY(fy: string): Date {
   useEffect(() => {
     if (!isNew && existingLease) {
       setForm(leaseToForm(existingLease));
+      setContractData((existingLease as { contract_data?: Record<string, unknown> }).contract_data ?? null);
       if (existingLease.results && !calcResults) setCalcResults(existingLease.results);
     } else if (isNew) {
       setForm((p) => ({ ...p, leaseId: `LEASE-2026-${String(Date.now()).slice(-6)}` }));
+      setContractData(null);
     }
   }, [id, isNew]);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (sampleMenuRef.current && !sampleMenuRef.current.contains(e.target as Node)) {
+        setShowSampleMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
   const markDirty = useCallback((tab: string) => {
     setDirtyTabs((s) => new Set(s).add(tab));
@@ -447,6 +712,7 @@ function getReportingDateForFY(fy: string): Date {
     setUploading(true);
     setUploadError(null);
     setExtractionBanner(null);
+    setExtractedTabs(new Set());
     try {
       const { data, error } = await ifrs16Api.uploadContract(file);
       if (error) {
@@ -454,29 +720,104 @@ function getReportingDateForFY(fy: string): Date {
         toast.error(error);
         return;
       }
-      const raw = data?.extracted_data;
+      const raw = data?.extracted_data ?? data;
+      const extractedBlob = (data as { extracted_data?: unknown })?.extracted_data;
+      setContractData(
+        extractedBlob != null &&
+          typeof extractedBlob === 'object' &&
+          !Array.isArray(extractedBlob)
+          ? { ...(extractedBlob as Record<string, unknown>) }
+          : null
+      );
       const flat = flattenExtraction(raw);
-      const count = countExtracted(flat);
+      // Merge flat from nested extraction with any top-level keys API might return
+      const result: Record<string, any> = { ...flat };
+      if (raw && typeof raw === 'object') {
+        const top = raw as Record<string, any>;
+        if (top.start_date != null) result.startDate = result.startDate ?? String(top.start_date).slice(0, 10);
+        if (top.end_date != null) result.endDate = result.endDate ?? String(top.end_date).slice(0, 10);
+        if (top.commencement_date != null) result.startDate = result.startDate ?? String(top.commencement_date).slice(0, 10);
+        if (top.monthly_payment != null) result.baseRentAmount = result.baseRentAmount ?? String(top.monthly_payment);
+        if (top.base_rent_amount != null) result.baseRentAmount = result.baseRentAmount ?? String(top.base_rent_amount);
+        if (top.discount_rate != null) result.discountRate = result.discountRate ?? String(top.discount_rate);
+        if (top.ibr != null) result.discountRate = result.discountRate ?? String(top.ibr);
+        if (top.asset_description != null) result.assetDescription = result.assetDescription ?? String(top.asset_description);
+        if (top.title != null) result.title = result.title ?? String(top.title);
+        if (top.lessor != null) result.lessor = result.lessor ?? String(top.lessor);
+        if (top.lessor_name != null) result.lessor = result.lessor ?? String(top.lessor_name);
+        if (top.lessee != null) result.lessee = result.lessee ?? String(top.lessee);
+        if (top.lessee_name != null) result.lessee = result.lessee ?? String(top.lessee_name);
+        if (top.currency != null) result.currency = result.currency ?? String(top.currency);
+        if (top.payment_frequency != null) result.paymentFrequency = result.paymentFrequency ?? String(top.payment_frequency);
+        if (top.payment_type != null) result.paymentType = result.paymentType ?? String(top.payment_type);
+        if (top.lease_type != null) result.leaseType = result.leaseType ?? String(top.lease_type);
+        if (top.asset_type != null) result.leaseType = result.leaseType ?? String(top.asset_type);
+        if (top.country != null) result.country = result.country ?? String(top.country);
+        if (top.city != null) result.city = result.city ?? String(top.city);
+        if (top.location != null) result.location = result.location ?? String(top.location);
+        if (top.address != null) result.location = result.location ?? String(top.address);
+        if (top.brand != null) result.brand = result.brand ?? String(top.brand);
+        if (top.residual_value != null) result.residualValue = result.residualValue ?? String(top.residual_value);
+        if (top.transaction_type != null) result.transactionType = result.transactionType ?? String(top.transaction_type);
+        if (top.description != null) result.description = result.description ?? String(top.description);
+        if (top.initial_direct_costs != null) result.initialDirectCosts = result.initialDirectCosts ?? String(top.initial_direct_costs);
+        if (top.lease_incentives != null) result.leaseIncentives = result.leaseIncentives ?? String(top.lease_incentives);
+        if (top.escalation_type != null) result.escalationType = result.escalationType ?? String(top.escalation_type);
+        if (top.escalation_value != null) result.escalationValue = result.escalationValue ?? String(top.escalation_value);
+      }
+      console.log('Full extraction result:', result);
+      const count = countExtracted(result);
+      const tabsWithData = new Set<string>();
+      if (result.title || result.startDate || result.endDate || result.lessee || result.lessor || result.leaseType || result.lease_term_months || result.renewalOptions || result.terminationClauses || result.description || result.residualValue || result.transactionType) tabsWithData.add('contract');
+      if (result.baseRentAmount || result.currency || result.paymentFrequency || result.discountRate || result.initialDirectCosts || result.leaseIncentives || result.paymentType || result.escalationType || result.escalationValue) tabsWithData.add('financial');
+      if (result.assetDescription || result.leaseType || result.country || result.city || result.location || result.brand) tabsWithData.add('assets');
+      if (result.renewalOptions || result.terminationClauses) tabsWithData.add('modifications');
       setForm((p) => ({
         ...p,
-        title: flat.title || p.title,
-        assetDescription: flat.assetDescription || p.assetDescription,
-        lessee: flat.lessee || p.lessee,
-        lessor: flat.lessor || p.lessor,
-        leaseType: flat.leaseType || p.leaseType,
-        startDate: flat.startDate || p.startDate,
-        endDate: flat.endDate || p.endDate,
-        lease_term_months: flat.lease_term_months ? String(flat.lease_term_months) : p.lease_term_months,
-        baseRentAmount: flat.baseRentAmount ? String(flat.baseRentAmount) : p.baseRentAmount,
-        currency: flat.currency || p.currency,
-        paymentFrequency: flat.paymentFrequency || p.paymentFrequency,
-        discountRate: flat.discountRate !== '' && flat.discountRate != null ? String(flat.discountRate) : p.discountRate,
-        initialDirectCosts: flat.initialDirectCosts !== '' && flat.initialDirectCosts != null ? String(flat.initialDirectCosts) : p.initialDirectCosts,
-        renewalOptions: flat.renewalOptions || p.renewalOptions,
-        terminationClauses: flat.terminationClauses || p.terminationClauses,
-        description: flat.description || p.description,
+        // Tab 1 - Contract Details
+        title: result.title ?? result.assetDescription ?? p.title,
+        startDate: result.startDate ?? p.startDate,
+        endDate: result.endDate ?? p.endDate,
+        leaseStatus: 'Active',
+        transactionType: result.transactionType ?? p.transactionType,
+        description: result.description ?? p.description,
+        residualValue: result.residualValue ?? p.residualValue,
+        lessor: result.lessor ?? result.lessor_name ?? p.lessor,
+        lessee: result.lessee ?? result.lessee_name ?? p.lessee,
+        renewalOptions: result.renewalOptions ?? p.renewalOptions,
+        terminationClauses: result.terminationClauses ?? p.terminationClauses,
+        lease_term_months: result.lease_term_months ? String(result.lease_term_months) : p.lease_term_months,
+        // Tab 2 - Financial Management
+        baseRentAmount: result.baseRentAmount ?? result.monthly_payment ?? p.baseRentAmount,
+        discountRate: result.discountRate ?? result.ibr ?? p.discountRate,
+        currency: result.currency ?? p.currency,
+        paymentFrequency: result.paymentFrequency ?? p.paymentFrequency,
+        paymentType: result.paymentType ?? p.paymentType,
+        initialDirectCosts: result.initialDirectCosts ?? p.initialDirectCosts,
+        legalFees: result.legalFees ?? p.legalFees ?? '0',
+        brokerageFees: result.brokerageFees ?? p.brokerageFees ?? '0',
+        otherInitialDirectCosts: result.otherInitialDirectCosts ?? p.otherInitialDirectCosts ?? '0',
+        initialDirectCostsDescription: result.initialDirectCostsDescription ?? p.initialDirectCostsDescription ?? '',
+        leaseIncentives: result.leaseIncentives ?? p.leaseIncentives,
+        rentFreeMonths: result.rentFreeMonths ?? p.rentFreeMonths ?? 0,
+        cashIncentive: result.cashIncentive ?? result.leaseIncentives ?? p.cashIncentive ?? p.leaseIncentives,
+        leaseIncentiveDescription: result.leaseIncentiveDescription ?? p.leaseIncentiveDescription,
+        rvgAmount: result.rvgAmount ?? p.rvgAmount ?? '0',
+        rvgGuaranteedBy: result.rvgGuaranteedBy ?? p.rvgGuaranteedBy ?? 'None',
+        rvgExpectedPayment: result.rvgExpectedPayment ?? p.rvgExpectedPayment ?? '0',
+        escalationType: result.escalationType ?? p.escalationType,
+        escalationValue: result.escalationValue ?? p.escalationValue,
+        // Tab 4 - Assets & Locations
+        leaseType: result.leaseType ?? result.asset_type ?? p.leaseType,
+        assetDescription: result.assetDescription ?? p.assetDescription,
+        country: result.country ?? p.country,
+        city: result.city ?? p.city,
+        location: result.location ?? result.address ?? p.location,
+        brand: result.brand ?? p.brand,
       }));
-      setExtractionBanner(`✅ Extracted ${count} fields. Review each tab below.`);
+      setExtractedTabs(tabsWithData);
+      setExtractionBanner('✅ AI extracted fields from your contract. Review each tab below.');
+      setActiveTab('contract');
       toast.success('Extraction complete');
     } catch (err: any) {
       const msg = err?.message || 'Upload failed. Check file format.';
@@ -489,10 +830,19 @@ function getReportingDateForFY(fy: string): Date {
 
   const handleCalculate = async () => {
     const start = form.startDate || form.effectiveDate;
-    if (!start || !form.baseRentAmount || !form.discountRate || !form.assetDescription) {
-      toast.error('Set Start Date, Base Rent, Discount Rate, and Asset Description');
+    const ibrNum = parseFloat(String(form.discountRate || '').trim()) || 0;
+    if (!start || !form.baseRentAmount || !form.assetDescription) {
+      toast.error('Set Start Date, Base Rent, and Asset Description');
       return;
     }
+    if (!form.discountRate || ibrNum <= 0) {
+      setIbrError('IBR rate is required. Typical range: 6%–12%');
+      toast.error('IBR rate is required. Typical range: 6%–12%');
+      setActiveTab('financial');
+      setTimeout(() => ibrInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
+      return;
+    }
+    setIbrError(null);
     let termMonths = 12;
     if (form.lease_term_months) termMonths = Math.max(1, parseInt(form.lease_term_months) || 12);
     else if (form.endDate) {
@@ -510,12 +860,26 @@ function getReportingDateForFY(fy: string): Date {
         commencement_date: start,
         lease_term_months: termMonths,
         monthly_payment: parseFloat(form.baseRentAmount) || 0,
+        non_lease_component: parseFloat(form.nonLeaseComponent ?? '0') || 0,
+        non_lease_description: String(form.nonLeaseDescription ?? '').trim(),
+        practical_expedient_elected: Boolean(form.practicalExpedientElected),
         annual_discount_rate: (() => {
           const v = parseFloat(form.discountRate) || 0.085;
           return v > 1 ? v / 100 : v;
         })(),
-        initial_direct_costs: parseFloat(form.initialDirectCosts) || 0,
+        initial_direct_costs: (parseFloat(form.legalFees ?? '0') || 0) + (parseFloat(form.brokerageFees ?? '0') || 0) + (parseFloat(form.otherInitialDirectCosts ?? '0') || 0) || parseFloat(form.initialDirectCosts ?? '0') || 0,
+        legal_fees: parseFloat(form.legalFees ?? '0') || 0,
+        brokerage_fees: parseFloat(form.brokerageFees ?? '0') || 0,
+        other_initial_direct_costs: parseFloat(form.otherInitialDirectCosts ?? '0') || 0,
+        initial_direct_costs_description: String(form.initialDirectCostsDescription ?? '').trim(),
         currency: form.currency,
+        payment_type: form.paymentType || 'Arrears',
+        rent_free_months: Number(form.rentFreeMonths ?? 0) || 0,
+        cash_incentive: parseFloat(form.cashIncentive ?? form.leaseIncentives ?? '0') || 0,
+        lease_incentive_description: String(form.leaseIncentiveDescription ?? '').trim(),
+        rvg_amount: parseFloat(form.rvgAmount ?? '0') || 0,
+        rvg_guaranteed_by: String(form.rvgGuaranteedBy ?? 'None').trim(),
+        rvg_expected_payment: parseFloat(form.rvgExpectedPayment ?? '0') || 0,
       };
       const { data, error } = await ifrs16Api.calculate(payload);
       if (error) {
@@ -537,6 +901,26 @@ function getReportingDateForFY(fy: string): Date {
     }
   };
 
+  const loadSampleData = (key: keyof typeof SAMPLE_LEASES) => {
+    const sample = SAMPLE_LEASES[key].data;
+    setForm((prev) => ({
+      ...prev,
+      ...sample,
+      leaseIncentives:
+        sample.cashIncentive != null && String(sample.cashIncentive) !== ''
+          ? String(sample.cashIncentive)
+          : prev.leaseIncentives,
+      leaseId: `SAMPLE-${key.toUpperCase()}-${Date.now()}`,
+      leaseStatus: 'Draft',
+      version: 'V1',
+    }));
+    setCalcResults(null);
+    setContractData(null);
+    if (typeof setIbrSuggestion === 'function') setIbrSuggestion(null);
+    toast.success(`✅ Loaded: ${SAMPLE_LEASES[key].label}`);
+    setActiveTab('financial');
+  };
+
   const handleSaveToRepo = () => {
     setSaving(true);
     try {
@@ -547,7 +931,8 @@ function getReportingDateForFY(fy: string): Date {
         { ...form, costCenters },
         existingLease,
         calcResults ? { ...calcResults } : null,
-        excelFileId
+        excelFileId,
+        contractData
       );
       saveToLeaseRepository(entry);
       setDirtyTabs(new Set());
@@ -615,7 +1000,49 @@ function getReportingDateForFY(fy: string): Date {
                 <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-700">{form.version || 'V1'}</span>
               </div>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2 items-center">
+              <div className="relative" ref={sampleMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowSampleMenu((p) => !p)}
+                  className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-[#475569] bg-white border border-[#e2e8f0] rounded-lg hover:bg-[#f8fafc] hover:border-[#2E86AB] transition-colors shadow-sm"
+                >
+                  <span>📂</span>
+                  Load Sample
+                  <svg
+                    className={`w-4 h-4 transition-transform duration-200 ${showSampleMenu ? 'rotate-180' : ''}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {showSampleMenu && (
+                  <div className="absolute right-0 mt-1 w-72 bg-white border border-[#e2e8f0] rounded-lg shadow-xl z-50 py-1 animate-in fade-in slide-in-from-top-2">
+                    <div className="px-3 py-2 text-xs font-semibold text-[#94a3b8] uppercase tracking-wider border-b border-[#f1f5f9]">
+                      Demo Data — fills all fields instantly
+                    </div>
+                    {Object.entries(SAMPLE_LEASES).map(([k, { label }]) => (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => {
+                          loadSampleData(k as keyof typeof SAMPLE_LEASES);
+                          setShowSampleMenu(false);
+                        }}
+                        className="w-full text-left px-3 py-3 text-sm text-[#374151] hover:bg-[#f0f9ff] hover:text-[#2E86AB] transition-colors flex items-center gap-2 border-b border-[#f8fafc] last:border-0"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                    <div className="px-3 py-2 bg-[#f8fafc] rounded-b-lg">
+                      <p className="text-xs text-[#94a3b8]">✦ AI IBR suggestion available after loading</p>
+                    </div>
+                  </div>
+                )}
+              </div>
               <Button onClick={handleCalculate} disabled={isCalculating} className="bg-gradient-to-r from-[#f97316] to-[#ef4444] text-white hover:opacity-90">
                 {isCalculating ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Calculator className="w-4 h-4 mr-2" />}
                 Calculate IFRS 16
@@ -623,11 +1050,13 @@ function getReportingDateForFY(fy: string): Date {
               <Button onClick={handleHeaderSave} disabled={saving} variant="secondary" className="border border-[#e2e8f0] bg-white">
                 <Save className="w-4 h-4 mr-2" /> Save
               </Button>
-              <a href={excelFileId ? ifrs16Api.downloadReport(excelFileId) : '#'} target="_blank" rel="noopener noreferrer">
-                <Button variant="secondary" className="border border-[#e2e8f0] bg-white" disabled={!excelFileId}>
-                  <Download className="w-4 h-4 mr-2" /> Download Excel
-                </Button>
-              </a>
+              {excelFileId ? (
+                <a href={ifrs16Api.downloadReport(excelFileId)} target="_blank" rel="noopener noreferrer">
+                  <Button variant="secondary" className="border border-[#e2e8f0] bg-white">
+                    <Download className="w-4 h-4 mr-2" /> Download Excel
+                  </Button>
+                </a>
+              ) : null}
               <Button variant="secondary" className="text-red-600 hover:bg-red-50 border-0" onClick={handleDelete}>
                 Delete
               </Button>
@@ -683,14 +1112,16 @@ function getReportingDateForFY(fy: string): Date {
               const Icon = t.icon;
               const active = activeTab === t.id;
               const dirty = dirtyTabs.has(t.id);
+              const hasExtracted = extractedTabs.has(t.id);
               return (
                 <button
                   key={t.id}
                   onClick={() => setActiveTab(t.id)}
-                  className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${active ? 'border-[#f97316] text-[#f97316]' : 'border-transparent text-[#64748b] hover:bg-[#fff7ed]'} ${dirty ? ' relative' : ''}`}
+                  className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${active ? 'border-[#f97316] text-[#f97316]' : 'border-transparent text-[#64748b] hover:bg-[#fff7ed]'} ${dirty || hasExtracted ? ' relative' : ''}`}
                 >
                   <Icon className="w-4 h-4" /> {t.label}
-                  {dirty && <span className="absolute top-1.5 right-1 w-2 h-2 rounded-full bg-[#f97316]" />}
+                  {hasExtracted && <span className="absolute top-1.5 right-1 w-2 h-2 rounded-full bg-[#f97316]" title="AI extracted data" />}
+                  {dirty && !hasExtracted && <span className="absolute top-1.5 right-1 w-2 h-2 rounded-full bg-[#f97316]" />}
                 </button>
               );
             })}
@@ -828,8 +1259,109 @@ function getReportingDateForFY(fy: string): Date {
                   </div>
                   <div><label className={labelClass}>Extended Base Rent (₹)</label><input type="number" value={form.extendedBaseRentAmount} onChange={(e) => { setForm((p) => ({ ...p, extendedBaseRentAmount: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
                   <div><label className={labelClass}>Exchange Rate</label><input type="text" value={form.exchangeRate} onChange={(e) => { setForm((p) => ({ ...p, exchangeRate: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Initial Direct Costs (₹)</label><input type="number" value={form.initialDirectCosts} onChange={(e) => { setForm((p) => ({ ...p, initialDirectCosts: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Lease Incentives (₹)</label><input type="number" value={form.leaseIncentives} onChange={(e) => { setForm((p) => ({ ...p, leaseIncentives: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
+                  <div>
+                    <label className={labelClass} title="Incremental costs of obtaining a lease: ✅ Legal fees, agent commissions, costs to prepare asset. ❌ Internal staff time, general admin.">
+                      Legal Fees (₹) <Info className="inline w-3.5 h-3.5 text-[#64748b] cursor-help" />
+                    </label>
+                    <input type="number" min="0" value={form.legalFees ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, legalFees: e.target.value })); markDirty('financial'); }} className={inputClass} />
+                  </div>
+                  <div><label className={labelClass}>Brokerage / Agent Fees (₹)</label><input type="number" min="0" value={form.brokerageFees ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, brokerageFees: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
+                  <div><label className={labelClass}>Other Initial Direct Costs (₹)</label><input type="number" min="0" value={form.otherInitialDirectCosts ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, otherInitialDirectCosts: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
+                  <div className="md:col-span-2"><label className={labelClass}>IDC Description</label><input type="text" value={form.initialDirectCostsDescription ?? ''} onChange={(e) => { setForm((p) => ({ ...p, initialDirectCostsDescription: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="e.g. Legal fees for lease negotiation, agent commission" /></div>
+                  <div className="md:col-span-2 flex items-end"><p className="text-sm text-[#64748b]">Total initial direct costs: <span className="font-mono font-medium text-[#1e293b]">{formatIndianCurrency((parseFloat(form.legalFees ?? '0') || 0) + (parseFloat(form.brokerageFees ?? '0') || 0) + (parseFloat(form.otherInitialDirectCosts ?? '0') || 0))}</span></p></div>
+                  <div><label className={labelClass}>Rent-Free Period (months)</label><input type="number" min="0" value={form.rentFreeMonths ?? 0} onChange={(e) => { setForm((p) => ({ ...p, rentFreeMonths: parseInt(e.target.value, 10) || 0 })); markDirty('financial'); }} className={inputClass} placeholder="0" /></div>
+                  <div><label className={labelClass}>Cash Incentive Received (₹)</label><input type="number" min="0" value={form.cashIncentive ?? form.leaseIncentives ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, cashIncentive: e.target.value, leaseIncentives: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="0" /></div>
+                  <div className="md:col-span-2"><label className={labelClass}>Lease Incentive Description</label><input type="text" value={form.leaseIncentiveDescription ?? ''} onChange={(e) => { setForm((p) => ({ ...p, leaseIncentiveDescription: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="e.g. 2 months rent free" /></div>
+                </div>
+              </section>
+              <section className="mb-6">
+                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3 flex items-center gap-2">
+                  Lease vs Non-Lease Components
+                  <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">
+                    IFRS 16 §12
+                  </span>
+                </h4>
+                <div className="flex items-center gap-3 mb-4 p-3 bg-gray-50 rounded-lg">
+                  <input
+                    type="checkbox"
+                    id="practicalExpedient"
+                    checked={form.practicalExpedientElected}
+                    onChange={(e) => { setForm((p) => ({ ...p, practicalExpedientElected: e.target.checked })); markDirty('financial'); }}
+                    className="w-4 h-4"
+                  />
+                  <label htmlFor="practicalExpedient" className="text-sm text-[#374151]">
+                    Elect practical expedient - do not separate components
+                    <span className="text-xs text-[#64748b] ml-1">(IFRS 16 §15)</span>
+                  </label>
+                </div>
+                {!form.practicalExpedientElected && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelClass}>Non-Lease Component (₹/month)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={form.nonLeaseComponent}
+                        onChange={(e) => { setForm((p) => ({ ...p, nonLeaseComponent: e.target.value })); markDirty('financial'); }}
+                        className={inputClass}
+                        placeholder="e.g. 5000"
+                      />
+                      <p className="mt-1 text-xs text-[#64748b]">
+                        Service, maintenance, insurance included in payment
+                      </p>
+                    </div>
+                    <div>
+                      <label className={labelClass}>Non-Lease Description</label>
+                      <input
+                        type="text"
+                        value={form.nonLeaseDescription}
+                        onChange={(e) => { setForm((p) => ({ ...p, nonLeaseDescription: e.target.value })); markDirty('financial'); }}
+                        className={inputClass}
+                        placeholder="e.g. Building maintenance, security services"
+                      />
+                    </div>
+                  </div>
+                )}
+                {!form.practicalExpedientElected && parseFloat(form.nonLeaseComponent) > 0 && (
+                  <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded text-sm">
+                    <div className="grid grid-cols-3 gap-4 text-center">
+                      <div>
+                        <div className="text-xs text-[#64748b]">Total Payment</div>
+                        <div className="font-semibold">
+                          ₹{parseFloat(form.baseRentAmount || '0').toLocaleString()}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-red-500">Non-Lease (P&amp;L expense)</div>
+                        <div className="font-semibold text-red-600">
+                          ₹{parseFloat(form.nonLeaseComponent || '0').toLocaleString()}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-green-600">Lease Component (IFRS 16)</div>
+                        <div className="font-semibold text-green-700">
+                          ₹{(parseFloat(form.baseRentAmount || '0') - parseFloat(form.nonLeaseComponent || '0')).toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </section>
+              <section className="mb-6">
+                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Residual Value Guarantee (IFRS 16 para 26(d))</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div><label className={labelClass}>RVG Amount (₹)</label><input type="number" min="0" value={form.rvgAmount ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, rvgAmount: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="Guaranteed amount" /></div>
+                  <div>
+                    <label className={labelClass}>Guaranteed By</label>
+                    <select value={form.rvgGuaranteedBy ?? 'None'} onChange={(e) => { setForm((p) => ({ ...p, rvgGuaranteedBy: e.target.value })); markDirty('financial'); }} className={inputClass}>
+                      <option value="None">None</option>
+                      <option value="Lessee">Lessee</option>
+                      <option value="Third party">Third party</option>
+                    </select>
+                    <p className="mt-1 text-xs text-[#64748b]">Only lessee guarantee included in liability</p>
+                  </div>
+                  <div><label className={labelClass}>Expected Payment at End (₹)</label><input type="number" min="0" value={form.rvgExpectedPayment ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, rvgExpectedPayment: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="What lessee expects to pay" /></div>
                 </div>
               </section>
               <section className="mb-6">
@@ -849,7 +1381,72 @@ function getReportingDateForFY(fy: string): Date {
                       {ESCALATION_FREQ.map((f) => <option key={f}>{f}</option>)}
                     </select>
                   </div>
-                  <div><label className={labelClass}>IBR / Discount Rate %</label><input type="number" step="0.01" value={form.discountRate} onChange={(e) => { setForm((p) => ({ ...p, discountRate: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
+                  <div>
+                    <label className={labelClass}>IBR / Discount Rate % <span className="text-red-500">*</span></label>
+                    <input
+                      ref={ibrInputRef}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="e.g. 8.5"
+                      value={form.discountRate}
+                      onChange={(e) => { setForm((p) => ({ ...p, discountRate: e.target.value })); markDirty('financial'); setIbrError(null); }}
+                      className={`${inputClass} ${ibrError ? 'border-red-500 ring-2 ring-red-200' : ''}`}
+                    />
+                    <button
+                      type="button"
+                      onClick={fetchIbrSuggestion}
+                      disabled={ibrLoading}
+                      className="mt-2 flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 border border-blue-200 rounded px-2 py-1 bg-blue-50 hover:bg-blue-100 disabled:opacity-70"
+                    >
+                      {ibrLoading ? <span className="animate-spin">⟳</span> : <span>✦</span>}
+                      {ibrLoading ? 'Analysing market rates...' : 'AI: Suggest IBR range'}
+                    </button>
+                    {ibrSuggestion && (
+                      <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-medium text-blue-800">AI IBR Suggestion</span>
+                          <span className="text-xs text-blue-500">IFRS 16 §26</span>
+                        </div>
+                        <div className="flex gap-2 mb-2">
+                          <button
+                            type="button"
+                            onClick={() => { setForm((p) => ({ ...p, discountRate: String(ibrSuggestion.ibr_high) })); setIbrError(null); }}
+                            className="flex-1 py-1.5 rounded border text-xs font-medium border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
+                          >
+                            Conservative<br />
+                            <span className="text-sm font-bold">{ibrSuggestion.ibr_high}%</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setForm((p) => ({ ...p, discountRate: String(ibrSuggestion.ibr_mid) })); setIbrError(null); }}
+                            className="flex-1 py-1.5 rounded border text-xs font-medium border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                          >
+                            Mid<br />
+                            <span className="text-sm font-bold">{ibrSuggestion.ibr_mid}%</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setForm((p) => ({ ...p, discountRate: String(ibrSuggestion.ibr_low) })); setIbrError(null); }}
+                            className="flex-1 py-1.5 rounded border text-xs font-medium border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
+                          >
+                            Aggressive<br />
+                            <span className="text-sm font-bold">{ibrSuggestion.ibr_low}%</span>
+                          </button>
+                        </div>
+                        <p className="text-xs text-blue-700 mb-1">{ibrSuggestion.rationale}</p>
+                        <div className="flex flex-wrap gap-1">
+                          {ibrSuggestion.market_references.map((ref) => (
+                            <span key={ref} className="text-xs bg-white border border-blue-200 text-blue-600 rounded px-1.5 py-0.5">
+                              {ref}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <p className="mt-1 text-xs text-[#64748b]">Incremental Borrowing Rate — company&apos;s cost of borrowing. Typical: Corporate 6–10%, SME 8–12%</p>
+                    {ibrError && <p className="mt-1 text-sm text-red-600">{ibrError}</p>}
+                  </div>
                   <div><label className={labelClass}>Extended Escalation Value</label><input type="text" value={form.extendedEscalationValue} onChange={(e) => { setForm((p) => ({ ...p, extendedEscalationValue: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
                 </div>
               </section>
@@ -1041,6 +1638,20 @@ function getReportingDateForFY(fy: string): Date {
                     <Button variant="secondary" className="mb-2" onClick={() => { setModificationPanel('list'); setModificationFormIndex(null); }}>← Back to list</Button>
                     <h4 className="text-lg font-semibold text-[#1e293b]">{modificationFormIndex === null ? 'New Modification' : `Edit Modification ${(modificationFormIndex ?? 0) + 1}`}</h4>
 
+                    <ModificationAIAdvisor
+                      extractorHints={contractData}
+                      formOverlay={modificationAdvisorFormOverlay}
+                      modificationInputs={{
+                        modification_type: modificationForm.type,
+                        new_payment: newMonthly,
+                        original_payment: currentMonthly,
+                        new_lease_term_months: newTerm,
+                        original_lease_term_months: currentTermMonths,
+                      }}
+                      currentModificationType={modificationForm.type}
+                      onAccept={(type) => setModificationForm((p) => ({ ...p, type }))}
+                    />
+
                     <section className="rounded-xl border border-[#e2e8f0] p-6 bg-white">
                       <h5 className="text-sm font-semibold text-[#64748b] uppercase mb-4">Part A — Modification Details</h5>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -1123,6 +1734,7 @@ function getReportingDateForFY(fy: string): Date {
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div><label className={labelClass}>Base Index Value</label><input type="number" value={form.baseIndexValue} onChange={(e) => { setForm((p) => ({ ...p, baseIndexValue: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
                     <div><label className={labelClass}>Current Index Value</label><input type="number" value={form.currentIndexValue} onChange={(e) => { setForm((p) => ({ ...p, currentIndexValue: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
+                    <div><label className={labelClass}>CPI review every (months)</label><input type="number" min="1" step="1" value={form.cpiAdjustmentFrequencyMonths} onChange={(e) => { setForm((p) => ({ ...p, cpiAdjustmentFrequencyMonths: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
                     <div><label className={labelClass}>Last Adjustment Date</label><input type="date" value={form.lastAdjustmentDate} onChange={(e) => { setForm((p) => ({ ...p, lastAdjustmentDate: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
                   </div>
                 )}
@@ -1235,6 +1847,72 @@ function getReportingDateForFY(fy: string): Date {
                       <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">Monthly Depreciation</p><p className="font-mono font-semibold text-[#1e293b]">{formatIndianCurrency(monthlyDepreciation)}</p></div>
                       <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">Total Interest</p><p className="font-mono font-semibold text-[#1e293b]">{formatIndianCurrency(totalInterest)}</p></div>
                     </div>
+                    {(() => {
+                      const rb = calcResults?.rou_build_up ?? existingLease?.results?.rou_build_up;
+                      const incNote = calcResults?.incentive_disclosure_note ?? existingLease?.results?.incentive_disclosure_note;
+                      const lb = calcResults?.liability_breakdown ?? existingLease?.results?.liability_breakdown;
+                      const rvgNote = calcResults?.rvg_disclosure_note ?? existingLease?.results?.rvg_disclosure_note;
+                      const idcNote = calcResults?.idc_disclosure_note ?? existingLease?.results?.idc_disclosure_note;
+                      const hasIncentives = rb && (Number(rb.less_lease_incentives ?? 0) > 0);
+                      const hasRvg = lb && (Number(lb.pv_residual_value_guarantee ?? 0) > 0);
+                      const hasIdc = rb && (Number(rb.add_initial_direct_costs ?? 0) > 0);
+                      if (!rb && !incNote && !lb && !rvgNote && !idcNote) return null;
+                      return (
+                        <div className="mb-6 space-y-3">
+                          {lb && (hasRvg || Number(lb.pv_regular_payments ?? 0) > 0) && (
+                            <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white">
+                              <p className="text-xs font-semibold text-[#64748b] uppercase mb-3">Lease Liability Calculation</p>
+                              <table className="w-full text-sm font-mono">
+                                <tbody>
+                                  <tr><td className="py-1 text-[#64748b]">PV of lease payments</td><td className="py-1 text-right">{formatIndianCurrency(Number(lb.pv_regular_payments ?? 0))}</td></tr>
+                                  {hasRvg && <tr><td className="py-1 text-[#64748b]">PV of residual value guarantee</td><td className="py-1 text-right">{formatIndianCurrency(Number(lb.pv_residual_value_guarantee ?? 0))}</td></tr>}
+                                  <tr className="border-t border-[#e2e8f0]"><td className="py-2 font-semibold text-[#1e293b]">Total lease liability</td><td className="py-2 text-right font-semibold">{formatIndianCurrency(Number(lb.total_lease_liability ?? 0))}</td></tr>
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                          {rb && (
+                            <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white">
+                              <p className="text-xs font-semibold text-[#64748b] uppercase mb-3">ROU Asset Calculation</p>
+                              <table className="w-full text-sm font-mono">
+                                <tbody>
+                                  <tr><td className="py-1 text-[#64748b]">PV of lease payments</td><td className="py-1 text-right">{formatIndianCurrency(Number(rb.pv_lease_payments ?? 0))}</td></tr>
+                                  {hasIdc && (
+                                    <>
+                                      {Number(rb.legal_fees ?? 0) > 0 && <tr><td className="py-1 text-[#64748b] pl-4">Legal fees</td><td className="py-1 text-right">{formatIndianCurrency(Number(rb.legal_fees ?? 0))}</td></tr>}
+                                      {Number(rb.brokerage_fees ?? 0) > 0 && <tr><td className="py-1 text-[#64748b] pl-4">Brokerage / agent fees</td><td className="py-1 text-right">{formatIndianCurrency(Number(rb.brokerage_fees ?? 0))}</td></tr>}
+                                      {Number(rb.other_initial_direct_costs ?? 0) > 0 && <tr><td className="py-1 text-[#64748b] pl-4">Other initial direct costs</td><td className="py-1 text-right">{formatIndianCurrency(Number(rb.other_initial_direct_costs ?? 0))}</td></tr>}
+                                      <tr><td className="py-1 text-[#64748b] font-medium">Add: Initial direct costs</td><td className="py-1 text-right">{formatIndianCurrency(Number(rb.add_initial_direct_costs ?? 0))}</td></tr>
+                                    </>
+                                  )}
+                                  {Number(rb.add_prepaid_rent ?? 0) > 0 && <tr><td className="py-1 text-[#64748b]">Add: Prepaid rent</td><td className="py-1 text-right">{formatIndianCurrency(Number(rb.add_prepaid_rent ?? 0))}</td></tr>}
+                                  {hasIncentives && <tr><td className="py-1 text-[#64748b]">Less: Lease incentives</td><td className="py-1 text-right text-red-600">({formatIndianCurrency(Number(rb.less_lease_incentives ?? 0))})</td></tr>}
+                                  <tr className="border-t border-[#e2e8f0]"><td className="py-2 font-semibold text-[#1e293b]">ROU Asset at commencement</td><td className="py-2 text-right font-semibold">{formatIndianCurrency(Number(rb.rou_asset_at_commencement ?? 0))}</td></tr>
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                          {incNote && (
+                            <div className="p-4 rounded-lg bg-[#f0fdf4] border border-[#86efac] text-sm text-[#166534]">
+                              <p className="font-medium mb-1">Disclosure Note (IFRS 16 para 24)</p>
+                              <p className="whitespace-pre-wrap">{incNote}</p>
+                            </div>
+                          )}
+                          {rvgNote && (
+                            <div className="p-4 rounded-lg bg-[#eff6ff] border border-[#93c5fd] text-sm text-[#1e40af]">
+                              <p className="font-medium mb-1">Disclosure Note (IFRS 16 para 26(d))</p>
+                              <p className="whitespace-pre-wrap">{rvgNote}</p>
+                            </div>
+                          )}
+                          {idcNote && (
+                            <div className="p-4 rounded-lg bg-[#fefce8] border border-[#fef08a] text-sm text-[#854d0e]">
+                              <p className="font-medium mb-1">Disclosure Note (IFRS 16 para 24 — Initial Direct Costs)</p>
+                              <p className="whitespace-pre-wrap">{idcNote}</p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                     <div className="flex flex-wrap items-center gap-4 mb-4 p-3 rounded-lg bg-[#f9fafb] border border-[#e2e8f0]">
                       <span className="text-xs font-medium text-[#64748b] uppercase">For schedules:</span>
                       <label className="flex items-center gap-2"><span className="text-sm text-[#64748b]">Functional currency</span><select value={form.functionalCurrency || 'INR'} onChange={(e) => setForm((p) => ({ ...p, functionalCurrency: e.target.value }))} className="px-3 py-1.5 border border-[#e2e8f0] rounded-lg text-sm">{CURRENCIES.map((c) => (<option key={c} value={c}>{c}</option>))}</select></label>
@@ -1255,6 +1933,7 @@ function getReportingDateForFY(fy: string): Date {
                     {/* Sub-tab: Payment Schedule */}
                     {activeScheduleSubTab === 'payment' && (
                       <div className="relative">
+                        <p className="text-sm text-[#64748b] mb-2">Calculated using IBR: {(parseFloat(String(form.discountRate || '0')) || 0).toFixed(2)}%</p>
                         <div className="absolute top-0 right-0">
                           <Button variant="secondary" size="sm" className="border border-[#e2e8f0]" onClick={() => exportScheduleCsv('payment-schedule', ['Period', 'Date', 'Payment Amount', 'Lease Component', 'Non-Lease Component', 'VAT/GST', 'Total Payment'], schedule.map((row: any, i: number) => { const r = scheduleRow(row); const p = r.payment ?? 0; return [r.period ?? i + 1, r.date ?? '', p, p, 0, 0, p]; }))}>
                             <Download className="w-4 h-4 mr-1" /> Export This Schedule
@@ -1275,6 +1954,7 @@ function getReportingDateForFY(fy: string): Date {
                     {/* Sub-tab: Lease Liability Schedule (with modification dividers) */}
                     {activeScheduleSubTab === 'liability' && (
                       <div className="relative">
+                        <p className="text-sm text-[#64748b] mb-2">Calculated using IBR: {(parseFloat(String(form.discountRate || '0')) || 0).toFixed(2)}%</p>
                         <div className="absolute top-0 right-0">
                           <Button variant="secondary" size="sm" className="border border-[#e2e8f0]" onClick={() => { const rows = schedule.map((row: any, i: number) => { const r = scheduleRow(row); return [r.period ?? i + 1, r.date, r.opening, r.payment, r.interest, r.principal, r.closing]; }); exportScheduleCsv('lease-liability-schedule', ['Period', 'Date', 'Opening', 'Payment', 'Interest', 'Principal', 'Closing'], rows); }}>
                             <Download className="w-4 h-4 mr-1" /> Export This Schedule
@@ -1282,17 +1962,20 @@ function getReportingDateForFY(fy: string): Date {
                         </div>
                         <div className="overflow-x-auto max-h-[50vh] overflow-y-auto rounded-xl border border-[#e2e8f0] bg-white">
                           <table className="w-full text-sm">
-                            <thead className="bg-[#f9fafb] sticky top-0"><tr><th className="text-left py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Period</th><th className="text-left py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Date</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Opening</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Payment</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#f97316] uppercase">Interest</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Principal</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Closing</th></tr></thead>
+                            <thead className="bg-[#f9fafb] sticky top-0"><tr><th className="text-left py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Period</th><th className="text-left py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Date</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Opening</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Payment</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#f97316] uppercase">Interest</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Principal</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Closing</th>{schedule.some((row: any) => scheduleRow(row).rentFree) && <th className="text-center py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Rent-Free</th>}{schedule.some((row: any) => (scheduleRow(row).rvgPayment ?? 0) > 0) && <th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">RVG Payment</th>}</tr></thead>
                             <tbody>
                               {liabilityRows.map((item, idx) => {
                                 if (item.type === 'divider') {
                                   const m = modifications[item.modIndex];
-                                  return (<tr key={`d-${idx}`} className="bg-[#fef2f2] border-l-4 border-[#ef4444]"><td colSpan={7} className="py-2 px-3 text-sm font-medium text-[#1e293b]">Modification Date — Modification {item.modIndex + 1}: {item.date} <button type="button" onClick={() => setModificationModalIndex(item.modIndex)} className="text-[#f97316] hover:underline inline-flex items-center gap-1">Details <ChevronRight className="w-4 h-4" /></button></td></tr>);
+                                  const colCount = 7 + (schedule.some((row: any) => scheduleRow(row).rentFree) ? 1 : 0) + (schedule.some((row: any) => (scheduleRow(row).rvgPayment ?? 0) > 0) ? 1 : 0);
+                                  return (<tr key={`d-${idx}`} className="bg-[#fef2f2] border-l-4 border-[#ef4444]"><td colSpan={colCount} className="py-2 px-3 text-sm font-medium text-[#1e293b]">Modification Date — Modification {item.modIndex + 1}: {item.date} <button type="button" onClick={() => setModificationModalIndex(item.modIndex)} className="text-[#f97316] hover:underline inline-flex items-center gap-1">Details <ChevronRight className="w-4 h-4" /></button></td></tr>);
                                 }
                                 const r = scheduleRow(item.row);
-                                return (<tr key={idx} className={`border-t border-[#e2e8f0] ${idx % 2 === 1 ? 'bg-[#fafafa]' : 'bg-white'}`}><td className="py-2 px-3 font-mono">{r.period ?? item.index + 1}</td><td className="py-2 px-3">{r.date ?? '—'}</td><td className="py-2 px-3 text-right font-mono">{r.opening != null ? formatIndianCurrencyWithDecimals(r.opening, 0) : '—'}</td><td className="py-2 px-3 text-right font-mono">{r.payment != null ? formatIndianCurrencyWithDecimals(r.payment, 0) : '—'}</td><td className="py-2 px-3 text-right font-mono text-[#f97316]">{r.interest != null ? formatIndianCurrencyWithDecimals(r.interest, 0) : '—'}</td><td className="py-2 px-3 text-right font-mono">{r.principal != null ? formatIndianCurrencyWithDecimals(r.principal, 0) : '—'}</td><td className="py-2 px-3 text-right font-mono">{r.closing != null ? formatIndianCurrencyWithDecimals(r.closing, 0) : '—'}</td></tr>);
+                                const showRentFree = schedule.some((row: any) => scheduleRow(row).rentFree);
+                                const showRvg = schedule.some((row: any) => (scheduleRow(row).rvgPayment ?? 0) > 0);
+                                return (<tr key={idx} className={`border-t border-[#e2e8f0] ${r.rentFree ? 'bg-amber-50' : idx % 2 === 1 ? 'bg-[#fafafa]' : 'bg-white'}`}><td className="py-2 px-3 font-mono">{r.period ?? item.index + 1}</td><td className="py-2 px-3">{r.date ?? '—'}</td><td className="py-2 px-3 text-right font-mono">{r.opening != null ? formatIndianCurrencyWithDecimals(r.opening, 0) : '—'}</td><td className="py-2 px-3 text-right font-mono">{r.payment != null ? formatIndianCurrencyWithDecimals(r.payment, 0) : '—'}</td><td className="py-2 px-3 text-right font-mono text-[#f97316]">{r.interest != null ? formatIndianCurrencyWithDecimals(r.interest, 0) : '—'}</td><td className="py-2 px-3 text-right font-mono">{r.principal != null ? formatIndianCurrencyWithDecimals(r.principal, 0) : '—'}</td><td className="py-2 px-3 text-right font-mono">{r.closing != null ? formatIndianCurrencyWithDecimals(r.closing, 0) : '—'}</td>{showRentFree && <td className="py-2 px-3 text-center">{r.rentFree ? <span className="px-2 py-0.5 rounded bg-amber-200 text-amber-800 text-xs font-medium">Yes</span> : '—'}</td>}{showRvg && <td className="py-2 px-3 text-right font-mono">{(r.rvgPayment ?? 0) > 0 ? formatIndianCurrencyWithDecimals(r.rvgPayment ?? 0, 0) : '—'}</td>}</tr>);
                               })}
-                              <tr className="border-t-2 border-[#e2e8f0] bg-[#f9fafb] font-medium"><td colSpan={2} className="py-2 px-3">TOTAL</td><td colSpan={3} className="py-2 px-3"></td><td className="py-2 px-3 text-right font-mono">{schedule.length > 0 ? formatIndianCurrency(scheduleRow(schedule[schedule.length - 1]).closing ?? 0) : '—'}</td></tr>
+                              <tr className="border-t-2 border-[#e2e8f0] bg-[#f9fafb] font-medium"><td colSpan={2} className="py-2 px-3">TOTAL</td><td colSpan={3 + (schedule.some((row: any) => scheduleRow(row).rentFree) ? 1 : 0)} className="py-2 px-3"></td><td className="py-2 px-3 text-right font-mono">{schedule.length > 0 ? formatIndianCurrency(scheduleRow(schedule[schedule.length - 1]).closing ?? 0) : '—'}</td>{schedule.some((row: any) => scheduleRow(row).rentFree) && <td></td>}{schedule.some((row: any) => (scheduleRow(row).rvgPayment ?? 0) > 0) && <td></td>}</tr>
                             </tbody>
                           </table>
                         </div>
@@ -1430,6 +2113,15 @@ function getReportingDateForFY(fy: string): Date {
           {activeTab === 'disclosures' && (() => {
             const liability = calcResults?.lease_liability ?? existingLease?.liability ?? 0;
             const rou = calcResults?.rou_asset ?? existingLease?.rou ?? 0;
+            const disclosureNotesText =
+              calcResults?.disclosure_notes ??
+              calcResults?.disclosures ??
+              calcResults?.notes ??
+              existingLease?.results?.disclosure_notes ??
+              existingLease?.results?.disclosures ??
+              existingLease?.results?.notes ??
+              '';
+            const disclosureSections = extractDisclosureSections(disclosureNotesText);
             const split = calcResults?.liability_split ?? existingLease?.results?.liability_split ?? {};
             const currentPortion = Number(split.current_portion ?? 0);
             const nonCurrentPortion = Number(split.non_current_portion ?? 0);
@@ -1624,6 +2316,25 @@ The Company has not applied the short-term or low-value exemptions to this lease
                 )}
 
                 <div className="space-y-6">
+                  {disclosureSections.length > 0 && (
+                    <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden" style={{ borderLeft: '4px solid #f97316' }}>
+                      <div className="px-4 py-3 border-b border-[#e2e8f0]">
+                        <div className="font-semibold text-[#1e293b]">Generated Disclosure Notes</div>
+                      </div>
+                      <div className="p-4 space-y-2">
+                        {disclosureSections.map((sec) => (
+                          <details key={sec.title} className="border border-[#e2e8f0] rounded-lg bg-[#fffaf5]">
+                            <summary className="px-3 py-2 cursor-pointer text-sm font-semibold text-[#9a3412]">{sec.title}</summary>
+                            <div className="px-3 pb-3">
+                              <pre className="whitespace-pre-wrap text-[14px] leading-6 text-[#1f2937]" style={{ fontFamily: 'Times New Roman, Times, serif' }}>
+                                {sec.body}
+                              </pre>
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden" style={{ borderLeft: '4px solid #f97316' }}>
                     <div className="px-4 py-3 border-b border-[#e2e8f0]">
                       <div className="font-semibold text-[#1e293b]">Note X: Maturity Analysis of Lease Liabilities</div>
@@ -1851,7 +2562,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
             const vStart = !!form.startDate;
             const vEnd = !!form.endDate;
             const vPayment = !!(form.baseRentAmount && parseFloat(String(form.baseRentAmount)) > 0);
-            const vIbr = !!(form.discountRate && parseFloat(String(form.discountRate)) >= 0);
+            const vIbr = !!(form.discountRate && parseFloat(String(form.discountRate)) > 0);
             const vAsset = !!(form.leaseType || form.assetDescription);
             const vRestoration = true;
             const vCurrency = !!form.currency;
@@ -1997,9 +2708,11 @@ The Company has not applied the short-term or low-value exemptions to this lease
                       {isCalculating ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}🧮 Calculate IFRS 16
                     </Button>
                     <Button onClick={handleSaveToRepo} disabled={saving} variant="secondary" className="border border-[#e2e8f0] bg-white">💾 Save</Button>
-                    <a href={excelFileId ? ifrs16Api.downloadReport(excelFileId) : '#'} target="_blank" rel="noopener noreferrer">
-                      <Button variant="secondary" className="border border-[#e2e8f0] bg-white" disabled={!excelFileId}>📥 Download Excel</Button>
-                    </a>
+                    {excelFileId ? (
+                      <a href={ifrs16Api.downloadReport(excelFileId)} target="_blank" rel="noopener noreferrer">
+                        <Button variant="secondary" className="border border-[#e2e8f0] bg-white">📥 Download Excel</Button>
+                      </a>
+                    ) : null}
                     <Button variant="secondary" className="border border-[#e2e8f0] bg-white" onClick={handlePrintReport}>🖨️ Print Report</Button>
                   </div>
                 </div>
@@ -2045,7 +2758,10 @@ The Company has not applied the short-term or low-value exemptions to this lease
                 {hasResults && (
                   <>
                     {!isCalculating && (
-                      <div className="p-3 rounded-lg bg-green-50 border border-green-200 text-green-800 text-sm mb-4">✅ Calculation complete</div>
+                      <div className="p-3 rounded-lg bg-green-50 border border-green-200 text-green-800 text-sm mb-4">
+                        ✅ Calculation complete
+                        {ibrPct > 0 && <span className="block mt-1 font-medium">Calculated using IBR: {Number(ibrPct).toFixed(2)}%</span>}
+                      </div>
                     )}
                     {/* Section 2 — KPI Cards */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -2066,6 +2782,119 @@ The Company has not applied the short-term or low-value exemptions to this lease
                         </div>
                       ))}
                     </div>
+                    {(() => {
+                      const ibr = Number(ibrPct) || 0;
+                      const monthlyEquiv = ibr / 12;
+                      const ptRaw = String(form.paymentType || 'Arrears').trim();
+                      const isAdvance = ptRaw.toLowerCase().includes('advance');
+                      const paymentTimingLabel = isAdvance
+                        ? `${ptRaw || 'Advance'} (beginning of period)`
+                        : `${ptRaw || 'Arrears'} (end of period)`;
+                      const termM = termMonths || 0;
+                      const nonLease =
+                        parseFloat(String(form.nonLeaseComponent ?? '0')) || 0;
+                      const rentFreeM = form.rentFreeMonths ?? 0;
+                      const cpiBase = parseFloat(String(form.baseIndexValue || '0')) || 0;
+                      const cpiCurrent = parseFloat(String(form.currentIndexValue || '0')) || 0;
+                      const cpiFreq =
+                        parseInt(String(form.cpiAdjustmentFrequencyMonths || '12'), 10) || 12;
+                      const cpiStepPct =
+                        cpiBase > 0 ? ((cpiCurrent / cpiBase - 1) * 100).toFixed(1) : '0.0';
+                      return (
+                        <div className="mt-4 p-4 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-600 mb-6">
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <span className="text-gray-400">⚙</span>
+                            <span className="font-semibold text-gray-700 uppercase tracking-wide text-xs">
+                              Calculation Assumptions
+                            </span>
+                            <span className="ml-auto text-xs text-blue-500 font-medium">IFRS 16 §26</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-x-6 gap-y-1.5">
+                            <div className="flex justify-between gap-2">
+                              <span className="text-gray-500">Discount rate (IBR)</span>
+                              <span className="font-medium text-gray-800 text-right shrink-0">
+                                {ibr.toFixed(2)}% (monthly: {monthlyEquiv.toFixed(4)}%)
+                              </span>
+                            </div>
+                            <div className="flex justify-between gap-2">
+                              <span className="text-gray-500">Payment timing</span>
+                              <span className="font-medium text-gray-800 text-right">{paymentTimingLabel}</span>
+                            </div>
+                            <div className="flex justify-between gap-2">
+                              <span className="text-gray-500">Lease term</span>
+                              <span className="font-medium text-gray-800 text-right">{termM} months</span>
+                            </div>
+                            <div className="flex justify-between gap-2">
+                              <span className="text-gray-500">Depreciation method</span>
+                              <span className="font-medium text-gray-800 text-right">
+                                Straight-line over lease term
+                              </span>
+                            </div>
+                            <div className="flex justify-between gap-2">
+                              <span className="text-gray-500">PV method</span>
+                              <span className="font-medium text-gray-800 text-right">
+                                Effective interest method
+                              </span>
+                            </div>
+                            <div className="flex justify-between gap-2">
+                              <span className="text-gray-500">Ownership transfer</span>
+                              <span className="font-medium text-gray-800 text-right">Not assumed</span>
+                            </div>
+                            {nonLease > 0 && (
+                              <div className="flex justify-between col-span-2 gap-2">
+                                <span className="text-gray-500">Non-lease component</span>
+                                <span className="font-medium text-gray-800 text-right">
+                                  ₹{nonLease.toLocaleString('en-IN')} /month excluded from PV
+                                </span>
+                              </div>
+                            )}
+                            {rentFreeM > 0 && (
+                              <div className="flex justify-between col-span-2 gap-2">
+                                <span className="text-gray-500">Rent-free period</span>
+                                <span className="font-medium text-gray-800 text-right">
+                                  {rentFreeM} months (₹0 payment, interest accrues)
+                                </span>
+                              </div>
+                            )}
+                            {cpiBase > 0 && (
+                              <div className="flex justify-between col-span-2 gap-2">
+                                <span className="text-gray-500">CPI adjustment</span>
+                                <span className="font-medium text-gray-800 text-right">
+                                  Index {cpiBase} → {cpiCurrent} (+{cpiStepPct}% step-up at month {cpiFreq})
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {(() => {
+                      const componentAnalysis = calcResults?.component_analysis ?? existingLease?.results?.component_analysis;
+                      if (!componentAnalysis) return null;
+                      return (
+                        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                          <h4 className="text-sm font-semibold text-blue-800 mb-2">Component Split</h4>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+                            <div>
+                              <p className="text-[#64748b]">Total monthly</p>
+                              <p className="font-semibold">{formatIndianCurrency(Number(componentAnalysis.total_monthly_payment || 0))}</p>
+                            </div>
+                            <div>
+                              <p className="text-[#64748b]">Lease component (IFRS 16 liability basis)</p>
+                              <p className="font-semibold text-green-700">{formatIndianCurrency(Number(componentAnalysis.lease_component || 0))}</p>
+                            </div>
+                            <div>
+                              <p className="text-[#64748b]">Non-lease (P&amp;L straight-line)</p>
+                              <p className="font-semibold text-red-600">{formatIndianCurrency(Number(componentAnalysis.non_lease_component || 0))}</p>
+                            </div>
+                            <div>
+                              <p className="text-[#64748b]">Total non-lease over term</p>
+                              <p className="font-semibold">{formatIndianCurrency(Number(componentAnalysis.total_non_lease_over_term || 0))}</p>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {/* Section 3 — Parameters */}
                     <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden mb-6">
@@ -2227,9 +3056,11 @@ The Company has not applied the short-term or low-value exemptions to this lease
                     <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden mb-6">
                       <div className="px-4 py-3 border-b border-[#e2e8f0] font-semibold text-[#1e293b]">Download Reports</div>
                       <div className="p-4 flex flex-wrap gap-2">
-                        <a href={excelFileId ? ifrs16Api.downloadReport(excelFileId) : '#'} target="_blank" rel="noopener noreferrer">
-                          <Button variant="secondary" className="border border-[#e2e8f0]" disabled={!excelFileId}>📥 Download Excel</Button>
-                        </a>
+                        {excelFileId ? (
+                          <a href={ifrs16Api.downloadReport(excelFileId)} target="_blank" rel="noopener noreferrer">
+                            <Button variant="secondary" className="border border-[#e2e8f0]">📥 Download Excel</Button>
+                          </a>
+                        ) : null}
                         <Button variant="secondary" className="border border-[#e2e8f0]" onClick={handlePrintReport}>📥 Download PDF</Button>
                         <Button variant="secondary" className="border border-[#e2e8f0]" onClick={handleDownloadTallyXml}>📥 Tally XML Export</Button>
                         <Button variant="secondary" className="border border-[#e2e8f0]" onClick={() => { toast.info('SAP format: use Journal Entries export'); }}>📥 SAP Journal Upload Format</Button>

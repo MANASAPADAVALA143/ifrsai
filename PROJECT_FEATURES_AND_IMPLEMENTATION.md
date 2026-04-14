@@ -561,7 +561,7 @@ cd IFRSAI
 python app.py
 ```
 
-**API Docs:** http://localhost:8000/api/docs
+**API Docs:** http://localhost:9000/api/docs
 
 ### 2. Start Frontend
 

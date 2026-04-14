@@ -135,7 +135,7 @@ IFRSAI/
 ### Example Request
 
 ```bash
-curl -X POST "http://localhost:8000/api/calculate" \
+curl -X POST "http://localhost:9000/api/calculate" \
   -H "Content-Type: application/json" \
   -d '{
     "lease_id": "LEASE-2024-001",
@@ -234,7 +234,7 @@ python example_usage.py
 python app.py
 
 # Visit docs
-# http://localhost:8000/api/docs
+# http://localhost:9000/api/docs
 ```
 
 ---

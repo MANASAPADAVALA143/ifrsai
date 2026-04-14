@@ -12,8 +12,8 @@ echo Clearing Next.js cache...
 cd /d %~dp0\frontend
 if exist .next rmdir /s /q .next
 
-echo Starting frontend on port 3002...
-start "IFRS Frontend" cmd /k "cd /d %~dp0\frontend && echo === IFRS.ai Frontend === && echo Starting on http://localhost:3002 && echo. && npm run dev"
+echo Starting frontend (npm run dev = port 3004)...
+start "IFRS Frontend" cmd /k "cd /d %~dp0\frontend && echo === IFRS.ai Frontend === && echo Starting on http://localhost:3004 && echo. && npm run dev"
 
 echo.
 echo ========================================
@@ -21,7 +21,7 @@ echo Frontend is restarting!
 echo ========================================
 echo.
 echo Wait 10-15 seconds, then open:
-echo http://localhost:3002
+echo http://localhost:3004
 echo.
 echo Press any key to exit...
 pause >nul

@@ -69,7 +69,7 @@ Before starting, verify:
   - Contains: `ANTHROPIC_API_KEY=sk-ant-api03-...`
 - [ ] **Frontend env file exists:**
   - File: `frontend\.env.local`
-  - Contains: `NEXT_PUBLIC_API_URL=http://localhost:8000`
+  - Contains: `NEXT_PUBLIC_API_URL=http://localhost:9000`
 
 ---
 
@@ -100,7 +100,7 @@ Get-Content .env | Select-String "ANTHROPIC_API_KEY"
 ```
 
 ### Test backend health:
-Open browser: http://localhost:8000/api/health
+Open browser: http://localhost:9000/api/health
 Should show: `{"status":"ok","anthropic_configured":true}`
 
 ---
@@ -146,7 +146,7 @@ You'll know everything is working when:
 - ✅ Backend terminal shows: `Uvicorn running on http://127.0.0.1:8000`
 - ✅ Frontend terminal shows: `Local: http://localhost:3003`
 - ✅ Browser at http://localhost:3003 shows the landing page
-- ✅ http://localhost:8000/api/health returns `{"status":"ok","anthropic_configured":true}`
+- ✅ http://localhost:9000/api/health returns `{"status":"ok","anthropic_configured":true}`
 - ✅ File upload at `/dashboard/ifrs16` works without errors
 
 ---

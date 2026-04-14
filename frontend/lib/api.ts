@@ -1,7 +1,18 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000'; // Backend runs on 9000
+import {
+  getBackendConnectivityMessage,
+  getApiHealthTimeoutMessage,
+} from '@/lib/service-messages';
+
+// Use '' so browser calls same-origin /api/*; the Next server proxies to Python (see app/api/[...path]/route.ts).
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
+
+/** Shown when fetch fails or API is down (customer-safe in production builds). */
+export function getBackendUnreachableHelp(): string {
+  return getBackendConnectivityMessage();
+}
 
 function getConnectionErrorMessage(): string {
-  return 'Service temporarily unavailable. Please try again shortly.';
+  return getBackendConnectivityMessage();
 }
 
 interface ApiResponse<T> {
@@ -14,10 +25,13 @@ async function apiCall<T>(
   options: RequestInit = {}
 ): Promise<ApiResponse<T>> {
   try {
+    const method = (options.method ?? 'GET').toString().toUpperCase();
+    const hasBody = options.body != null && options.body !== '';
+    const jsonContentType = hasBody && method !== 'GET' && method !== 'HEAD';
     const response = await fetch(`${API_URL}${endpoint}`, {
       ...options,
       headers: {
-        'Content-Type': 'application/json',
+        ...(jsonContentType ? { 'Content-Type': 'application/json' } : {}),
         ...options.headers,
       },
     });
@@ -33,9 +47,14 @@ async function apiCall<T>(
     const data = await response.json();
     return { data };
   } catch (error) {
-    return {
-      error: error instanceof Error ? error.message : 'An error occurred',
-    };
+    const msg = error instanceof Error ? error.message : 'An error occurred';
+    const net =
+      msg === 'Failed to fetch' ||
+      msg.includes('NetworkError') ||
+      msg.includes('Load failed') ||
+      msg.includes('connection') ||
+      msg.includes('reset');
+    return { error: net ? getBackendUnreachableHelp() : msg };
   }
 }
 
@@ -45,6 +64,16 @@ export const ifrs16Api = {
     return apiCall('/api/calculate', {
       method: 'POST',
       body: JSON.stringify(leaseData),
+    });
+  },
+
+  modificationAdvice: async (body: {
+    extractor_hints: Record<string, unknown>;
+    modification_inputs: Record<string, unknown>;
+  }) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs16/modification-advice', {
+      method: 'POST',
+      body: JSON.stringify(body),
     });
   },
 
@@ -69,23 +98,30 @@ export const ifrs16Api = {
       });
       clearTimeout(timeoutId);
 
+      const bodyText = await response.text();
       if (!response.ok) {
-        // Try to get error detail from response
-        let errorMessage = `Upload failed: ${response.statusText}`;
+        let errorMessage = `Upload failed (${response.status} ${response.statusText || ''})`.trim();
         try {
-          const errorData = await response.json();
-          if (errorData.detail) {
-            errorMessage = errorData.detail;
-          } else if (errorData.error) {
-            errorMessage = errorData.error;
-          }
+          const errorData = JSON.parse(bodyText) as {
+            detail?: unknown;
+            error?: unknown;
+            message?: unknown;
+          };
+          const d = errorData.detail;
+          if (typeof d === 'string') errorMessage = d;
+          else if (Array.isArray(d))
+            errorMessage = d.map((x: { msg?: string }) => x?.msg || JSON.stringify(x)).join('; ');
+          else if (d != null) errorMessage = String(d);
+          else if (errorData.error != null) errorMessage = String(errorData.error);
+          else if (errorData.message != null) errorMessage = String(errorData.message);
         } catch {
-          // If JSON parsing fails, use status text
+          const snippet = bodyText.replace(/\s+/g, ' ').trim().slice(0, 400);
+          if (snippet) errorMessage = `${errorMessage}. ${snippet}`;
         }
         throw new Error(errorMessage);
       }
 
-      return { data: await response.json() };
+      return { data: JSON.parse(bodyText) };
     } catch (error) {
       clearTimeout(timeoutId);
       const msg = error instanceof Error ? error.message : 'Upload failed';
@@ -100,6 +136,54 @@ export const ifrs16Api = {
   downloadReport: (fileId: string) => {
     return `${API_URL}/api/download/${fileId}`;
   },
+
+  bulkTemplateUrl: () => `${API_URL}/api/ifrs16/bulk-template`,
+
+  bulkCalculate: async (leases: unknown[]) =>
+    apiCall<{
+      total: number;
+      successful: number;
+      failed: number;
+      results: Array<{
+        lease_id: string;
+        status: string;
+        error: string | null;
+        lease_liability: number;
+        rou_asset: number;
+        monthly_depreciation: number;
+        total_interest: number;
+        calculation_results?: Record<string, unknown> | null;
+      }>;
+      portfolio_summary: {
+        total_lease_liability: number;
+        total_rou_asset: number;
+        avg_ibr: number;
+        currency_breakdown: Record<string, number>;
+      };
+    }>('/api/ifrs16/bulk-calculate', {
+      method: 'POST',
+      body: JSON.stringify({ leases }),
+    }),
+};
+
+export const ifrs16IbrApi = {
+  suggest: async (payload: {
+    country: string;
+    currency: string;
+    lease_term_months: number;
+    asset_type?: string;
+    lessee_type?: string;
+  }) =>
+    apiCall<{
+      ibr_low: number;
+      ibr_mid: number;
+      ibr_high: number;
+      rationale: string;
+      market_references: string[];
+    }>('/api/ifrs16/suggest-ibr', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };
 
 // IFRS 16 Smart Alerts
@@ -146,11 +230,63 @@ export const chatApi = {
   },
 };
 
-// Health check
-export const healthCheck = async () => {
-  return apiCall('/api/health', {
-    method: 'GET',
-  });
+/**
+ * Health check with retries (Next.js dev / Turbopack cold start, slow API wake).
+ * Does not send Content-Type on GET.
+ */
+export const healthCheck = async (): Promise<ApiResponse<{ status?: string }>> => {
+  const maxAttempts = 5;
+  const timeoutMs = 8000;
+  let lastError = 'Unable to reach API';
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, 350 * attempt));
+    }
+    try {
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), timeoutMs);
+      const response = await fetch(`${API_URL}/api/health`, {
+        method: 'GET',
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+      clearTimeout(tid);
+
+      if (response.ok) {
+        const data = (await response.json()) as { status?: string };
+        return { data };
+      }
+
+      let detail = `HTTP ${response.status}`;
+      try {
+        const t = await response.text();
+        const j = JSON.parse(t) as { detail?: unknown };
+        if (j.detail != null) detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail);
+      } catch {
+        /* ignore */
+      }
+      lastError = detail;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const aborted = e instanceof Error && (e.name === 'AbortError' || msg.includes('aborted'));
+      if (aborted) {
+        lastError = getApiHealthTimeoutMessage();
+      } else if (
+        msg === 'Failed to fetch' ||
+        msg.includes('NetworkError') ||
+        msg.includes('Load failed') ||
+        msg.includes('connection') ||
+        msg.includes('reset')
+      ) {
+        lastError = getBackendUnreachableHelp();
+      } else {
+        lastError = msg;
+      }
+    }
+  }
+
+  return { error: lastError };
 };
 
 // Batch calculate
@@ -258,5 +394,45 @@ export const ifrs9Api = {
     apiCall<{ file_id: string; filename: string }>('/api/ifrs9/download-report', {
       method: 'POST',
       body: JSON.stringify(data),
+    }),
+};
+
+export const macroSensitivityApi = {
+  getCurrent: async (tenantId = 'default', portfolioType = 'all') =>
+    apiCall<Record<string, unknown>>(
+      `/api/admin/macro-sensitivity?tenant_id=${encodeURIComponent(tenantId)}&portfolio_type=${encodeURIComponent(portfolioType)}`
+    ),
+  update: async (payload: Record<string, unknown>) =>
+    apiCall<{ status: string; effective: string }>('/api/admin/macro-sensitivity', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  getHistory: async (tenantId = 'default', portfolioType = 'all') =>
+    apiCall<Array<Record<string, unknown>>>(
+      `/api/admin/macro-sensitivity/history?tenant_id=${encodeURIComponent(tenantId)}&portfolio_type=${encodeURIComponent(portfolioType)}`
+    ),
+};
+
+export const consolidationApi = {
+  getEntities: () => apiCall<any[]>('/api/consolidation/entities'),
+  addEntity: (payload: Record<string, unknown>) =>
+    apiCall('/api/consolidation/entities', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  addIntercompany: (payload: Record<string, unknown>) =>
+    apiCall('/api/consolidation/intercompany', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  run: (entity_ids: string[], group_currency: string) =>
+    apiCall('/api/consolidation/run', {
+      method: 'POST',
+      body: JSON.stringify({ entity_ids, group_currency }),
+    }),
+  runIfrs16: (payload: { group_currency: string; entities: any[] }) =>
+    apiCall('/api/ifrs16/consolidate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
 };

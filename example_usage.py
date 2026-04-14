@@ -358,7 +358,7 @@ def main():
         print("   - Excel reports (.xlsx)")
         print("   - JSON extractions (.json)")
         print("\n📖 For API usage, run: python app.py")
-        print("   Then visit: http://localhost:8000/api/docs")
+        print("   Then visit: http://localhost:9000/api/docs")
         print("\n" + "="*70)
         
     except Exception as e:

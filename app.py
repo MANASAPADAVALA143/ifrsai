@@ -4,7 +4,7 @@ Enterprise REST API for IFRS 16 calculations and reporting
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
@@ -17,8 +17,20 @@ import uuid
 from pathlib import Path
 import shutil
 from contextlib import asynccontextmanager
+import sys
 from dotenv import load_dotenv
+
+# Avoid UnicodeEncodeError on Windows (cp1252) when logging emoji or other non-ASCII text.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        pass
+from currency_format import format_currency_value  # noqa: F401 — INR vs international amount formatting
 import gc
+from macro_sensitivity_config import MACRO_SENSITIVITY_DEFAULTS, update_sensitivity, get_sensitivity, is_db_loaded, set_db_loaded
+from macro_sensitivity_db import init_db, get_active_config, save_config, get_config_history
 
 # Load environment variables from .env file
 # Always load from project root so .env is found regardless of cwd
@@ -38,8 +50,18 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Initialize services
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-# Public API URL for links (Render sets RENDER_EXTERNAL_URL automatically)
-PUBLIC_API_URL = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_API_URL", "http://127.0.0.1:9000")
+
+
+def get_public_api_base() -> str:
+    """Base URL for printed links (docs, health). Cloud: RENDER_EXTERNAL_URL / PUBLIC_API_URL. Local: _IFRS_BIND_PORT."""
+    r = (os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    if r:
+        return r
+    p = (os.getenv("PUBLIC_API_URL") or "").strip().rstrip("/")
+    if p:
+        return p
+    port = (os.getenv("_IFRS_BIND_PORT") or "9000").strip()
+    return f"http://127.0.0.1:{port}"
 
 # Global RAG engine instance (lazy-loaded on first use)
 rag_engine = None
@@ -53,11 +75,11 @@ def get_rag_engine():
     try:
         from rag_engine import IFRSRagEngine
         rag_engine = IFRSRagEngine(anthropic_api_key=ANTHROPIC_API_KEY)
-        print("✅ RAG engine initialized successfully")
+        print("RAG engine initialized successfully")
         gc.collect()
         return rag_engine
     except Exception as e:
-        print(f"⚠️  RAG engine failed: {e}")
+        print(f"RAG engine failed: {e}")
         traceback.print_exc()
         return None
 
@@ -65,12 +87,28 @@ def get_rag_engine():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan: startup then yield (shutdown runs after yield)."""
+    init_db()
+    try:
+        from entity_consolidation import init_consolidation_db
+        init_consolidation_db()
+    except Exception as e:
+        print(f"Consolidation DB init warning: {e}")
+    row = get_active_config()
+    if row:
+        update_sensitivity("gdp_sensitivity", row[0])
+        update_sensitivity("unemployment_sensitivity", row[1])
+        update_sensitivity("interest_rate_sensitivity", row[2])
+        print(f"Macro sensitivity loaded from DB: GDP={row[0]}, Unemp={row[1]}, Rate={row[2]}")
+    else:
+        set_db_loaded(False)
+        print("Macro sensitivity using hardcoded defaults")
     print("="*70)
     print("IFRS AI AUTOMATION API - SERVER STARTED")
     print("="*70)
-    print(f"API Documentation: {PUBLIC_API_URL.rstrip('/')}/api/docs")
-    print(f"ReDoc: {PUBLIC_API_URL.rstrip('/')}/api/redoc")
-    print(f"Health Check: {PUBLIC_API_URL.rstrip('/')}/health")
+    _base = get_public_api_base()
+    print(f"API Documentation: {_base}/api/docs")
+    print(f"ReDoc: {_base}/api/redoc")
+    print(f"Health Check: {_base}/health")
     print(f"Claude API: {'Configured' if ANTHROPIC_API_KEY else 'Not configured'}")
     print("RAG engine: loads on first /api/chat or embed request")
     print("="*70)
@@ -87,32 +125,35 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-@app.get("/health")
-def health():
-    """Simple health check for Render/load balancers"""
-    return {"status": "ok"}
-
-
-# CORS middleware (explicit origins required when allow_credentials=True; wildcard "*" fails)
+# CORS middleware - MUST be added before route definitions
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://ifrsai.vercel.app",
-        "https://ifrs-ai.vercel.app",
-        "https://ifrs-ai-frontend.onrender.com",
         "http://localhost:3000",
+        "http://localhost:3002",
         "http://localhost:3003",
         "http://localhost:3004",
         "http://localhost:3005",
+        "http://localhost:5173",
         "http://127.0.0.1:3000",
+        "http://127.0.0.1:3002",
         "http://127.0.0.1:3003",
         "http://127.0.0.1:3004",
         "http://127.0.0.1:3005",
+        "http://127.0.0.1:5173",
+        "https://ifrsai.vercel.app",
+        "https://ifrs-ai.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+@app.get("/health")
+def health():
+    """Simple health check for Render/load balancers"""
+    return {"status": "ok"}
 
 # Pydantic Models
 class LeaseRequest(BaseModel):
@@ -125,10 +166,27 @@ class LeaseRequest(BaseModel):
     commencement_date: str = Field(..., description="Lease commencement date (YYYY-MM-DD)")
     lease_term_months: int = Field(..., gt=0, description="Lease term in months")
     monthly_payment: float = Field(..., gt=0, description="Monthly payment amount")
-    annual_discount_rate: float = Field(..., ge=0, le=1, description="Annual discount rate (e.g., 0.085 for 8.5%)")
-    initial_direct_costs: float = Field(default=0, ge=0, description="Initial direct costs")
+    non_lease_component: float = Field(default=0, ge=0, description="Monthly non-lease portion (e.g. service/maintenance) excluded from IFRS 16 liability")
+    non_lease_description: str = Field(default="", description="What the non-lease component covers")
+    practical_expedient_elected: bool = Field(default=False, description="IFRS 16 §15: elect not to separate components")
+    annual_discount_rate: float = Field(..., gt=0.0001, le=1, description="Annual discount rate (e.g., 0.085 for 8.5%). IBR must be > 0%.")
+    initial_direct_costs: float = Field(default=0, ge=0, description="Initial direct costs (legacy; use legal+brokerage+other if provided)")
+    legal_fees: float = Field(default=0, ge=0, description="Legal fees")
+    brokerage_fees: float = Field(default=0, ge=0, description="Brokerage / agent fees")
+    other_initial_direct_costs: float = Field(default=0, ge=0, description="Other initial direct costs")
+    initial_direct_costs_description: str = Field(default="", description="e.g. Legal fees for lease negotiation, agent commission")
     escalation_rate: float = Field(default=0, ge=0, description="Annual escalation rate (e.g., 0.05 for 5%)")
+    cpi_index_base: float = Field(default=0, ge=0, description="CPI index at lease commencement (e.g. 100)")
+    cpi_index_current: float = Field(default=0, ge=0, description="Latest CPI index value (e.g. 107.5)")
+    cpi_adjustment_frequency_months: int = Field(default=12, ge=1, description="Months between CPI payment reviews (typically 12)")
     currency: str = Field(default="INR", description="Currency code")
+    payment_type: str = Field(default="Arrears", description="Payment timing: 'Arrears' (end of period) or 'Advance' (beginning of period)")
+    rent_free_months: int = Field(default=0, ge=0, description="Rent-free period in months")
+    cash_incentive: float = Field(default=0, ge=0, description="Cash incentive received (reduces ROU asset)")
+    lease_incentive_description: str = Field(default="", description="e.g. '2 months rent free'")
+    rvg_amount: float = Field(default=0, ge=0, description="Residual value guarantee (guaranteed amount)")
+    rvg_guaranteed_by: str = Field(default="None", description="Lessee | Third party | None")
+    rvg_expected_payment: float = Field(default=0, ge=0, description="Expected payment at end of lease")
     
     class Config:
         json_schema_extra = {
@@ -196,6 +254,30 @@ class ChatResponse(BaseModel):
     context_count: int
 
 
+class CFOInsightsRequest(BaseModel):
+    """CFO strategic insights request - prompt built client-side from lease portfolio"""
+    prompt: str = Field(..., description="Full prompt for Claude with lease portfolio JSON")
+
+
+class IFRS16BulkCalculateRequest(BaseModel):
+    """Bulk IFRS 16 calculation — same lease objects as /api/calculate"""
+    leases: List[LeaseRequest] = Field(..., description="Leases to calculate")
+
+
+class ModificationAdviceRequest(BaseModel):
+    """IFRS 16 §44 vs §45 modification advisor — extractor hints + live modification inputs."""
+    extractor_hints: Dict[str, Any] = Field(default_factory=dict)
+    modification_inputs: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IbrSuggestRequest(BaseModel):
+    country: str = Field(default="India")
+    currency: str = Field(default="INR")
+    lease_term_months: int = Field(..., gt=0)
+    asset_type: Optional[str] = Field(default="")
+    lessee_type: str = Field(default="Corporate")
+
+
 # IFRS 15 Models
 class PerformanceObligationRequest(BaseModel):
     obligation_id: str
@@ -214,30 +296,75 @@ class IFRS15CalculateRequest(BaseModel):
     contract_term_months: int
     fixed_consideration: float
     variable_consideration: float = 0
+    # IFRS 15 §56-58 variable consideration constraint
+    variable_consideration_constrained: float = Field(default=0, ge=0, description="Explicitly constrained VC amount (used when constraint_method='amount')")
+    constraint_percentage: float = Field(default=100, ge=0, le=100, description="% of variable consideration that is highly probable (0–100). Default 100 = no constraint.")
+    constraint_method: str = Field(default="percentage", description="'percentage' or 'amount'")
     discounts: float = 0
     rebates: float = 0
     financing_adjustment: float = 0
     currency: str = "USD"
     cash_received: float = 0
+    contract_type: str = "fixed_price"
+    hourly_rate: float = 0
+    hours_worked: float = 0
+    tm_cap: float = 0
+    cumulative_billed: float = 0
+    total_estimated_cost: float = 0
+    actual_cost_to_date: float = 0
+    prior_revenue_recognised: float = 0
+    maintenance_term_months: int = 0
+    volume_slabs: list = Field(default_factory=list)
+    estimated_annual_volume: float = 0
+    can_estimate_volume: bool = True
+    sla_items: list = Field(default_factory=list)
     performance_obligations: List[PerformanceObligationRequest]
+
+
+class IFRS15ClassifyContractRequest(BaseModel):
+    contract_text: str = Field(..., min_length=1)
 
 
 # Helper Functions
 def convert_lease_request_to_input(request: LeaseRequest):
     """Convert API request to LeaseInput dataclass"""
     from ifrs16_calculator import LeaseInput
+    raw_date = (request.commencement_date or "").strip()[:10]
+    try:
+        commencement_dt = datetime.strptime(raw_date, "%Y-%m-%d")
+    except ValueError as e:
+        raise ValueError(
+            f"commencement_date must be YYYY-MM-DD (got {request.commencement_date!r})"
+        ) from e
     return LeaseInput(
         lease_id=request.lease_id,
         asset_description=request.asset_description,
         lessee_name=request.lessee_name,
         lessor_name=request.lessor_name,
-        commencement_date=datetime.strptime(request.commencement_date, "%Y-%m-%d"),
+        commencement_date=commencement_dt,
         lease_term_months=request.lease_term_months,
         monthly_payment=Decimal(str(request.monthly_payment)),
+        non_lease_component=Decimal(str(getattr(request, 'non_lease_component', 0) or 0)),
+        non_lease_description=getattr(request, 'non_lease_description', '') or '',
+        practical_expedient_elected=bool(getattr(request, 'practical_expedient_elected', False)),
         annual_discount_rate=Decimal(str(request.annual_discount_rate)),
         initial_direct_costs=Decimal(str(request.initial_direct_costs)),
+        legal_fees=Decimal(str(getattr(request, "legal_fees", 0) or 0)),
+        brokerage_fees=Decimal(str(getattr(request, "brokerage_fees", 0) or 0)),
+        other_initial_direct_costs=Decimal(str(getattr(request, "other_initial_direct_costs", 0) or 0)),
+        initial_direct_costs_description=getattr(request, "initial_direct_costs_description", "") or "",
         escalation_rate=Decimal(str(request.escalation_rate)),
-        currency=request.currency
+        cpi_index_base=Decimal(str(getattr(request, "cpi_index_base", 0) or 0)),
+        cpi_index_current=Decimal(str(getattr(request, "cpi_index_current", 0) or 0)),
+        cpi_adjustment_frequency_months=int(getattr(request, "cpi_adjustment_frequency_months", 12) or 12),
+        currency=request.currency,
+        payment_type=getattr(request, "payment_type", "Arrears") or "Arrears",
+        rent_free_months=getattr(request, "rent_free_months", 0) or 0,
+        cash_incentive=Decimal(str(getattr(request, "cash_incentive", 0) or 0)),
+        lease_incentive_description=getattr(request, "lease_incentive_description", "") or "",
+        rvg_amount=Decimal(str(getattr(request, "rvg_amount", 0) or 0)),
+        rvg_guaranteed_by=getattr(request, "rvg_guaranteed_by", "None") or "None",
+        rvg_expected_payment=Decimal(str(getattr(request, "rvg_expected_payment", 0) or 0)),
     )
 
 
@@ -469,9 +596,9 @@ async def calculate_lease(request: LeaseRequest):
         exporter = IFRS16ExcelExporter()
         exporter.export_ifrs16_workbook(results, str(excel_filename))
         
-        # Auto-trigger RAG embedding if company_id provided and RAG engine available
-        engine = get_rag_engine()
-        if request.company_id and engine:
+        # Auto-trigger RAG embedding only when company_id is provided.
+        engine = get_rag_engine() if request.company_id else None
+        if engine:
             try:
                 # Prepare content for embedding (use original results with DataFrames converted)
                 embed_content = {
@@ -499,10 +626,10 @@ async def calculate_lease(request: LeaseRequest):
                     content=embed_content,
                     document_id=request.lease_id
                 )
-                print(f"✅ RAG embedding completed: {rag_result.get('status')}")
+                print(f"RAG embedding completed: {rag_result.get('status')}")
                 
             except Exception as rag_error:
-                print(f"⚠️  RAG embedding failed (non-critical): {rag_error}")
+                print(f"RAG embedding failed (non-critical): {rag_error}")
                 # Don't fail the request if RAG embedding fails
         
         gc.collect()
@@ -569,7 +696,7 @@ async def upload_contract_get():
         status_code=200,
         content={
             "message": "This endpoint accepts POST only. Upload a file from the app or use the API docs.",
-            "docs": f"{PUBLIC_API_URL.rstrip('/')}/api/docs",
+            "docs": f"{get_public_api_base()}/api/docs",
             "method": "POST",
         },
     )
@@ -586,57 +713,134 @@ async def upload_contract(file: UploadFile = File(...)):
     - Text files (.txt)
     - Excel files (.xlsx, .xls)
     """
-    print(f"📥 Upload received: {file.filename} ({file.content_type})")
-    
+    import traceback
+    safe_name = (file.filename or "upload").replace("\\", "_").replace("/", "_")
+    print(f"📥 Upload received: {safe_name} ({file.content_type})")
+
     if not ANTHROPIC_API_KEY:
         raise HTTPException(
             status_code=503,
             detail="Claude API not configured. Set ANTHROPIC_API_KEY environment variable."
         )
-    
-    # Validate file type
+
     allowed_extensions = ['.pdf', '.docx', '.txt', '.xlsx', '.xls']
-    file_ext = Path(file.filename).suffix.lower()
-    
+    file_ext = Path(safe_name).suffix.lower()
+
     if file_ext not in allowed_extensions:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}"
         )
+
+    file_id = str(uuid.uuid4())
+    upload_path = UPLOAD_DIR / f"{file_id}_{safe_name}"
     
     try:
         # Save uploaded file
-        file_id = str(uuid.uuid4())
-        upload_path = UPLOAD_DIR / f"{file_id}_{file.filename}"
-        
         with open(upload_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
+    except Exception as e:
+        print(f"❌ Save error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+    
+    try:
         # Extract from file
         from ifrs16_extractor import IFRS16LeaseExtractor
         extractor = IFRS16LeaseExtractor(api_key=ANTHROPIC_API_KEY)
         extracted_data = extractor.extract_from_file(str(upload_path))
         
-        # Validate extraction
-        validation = extractor.validate_extraction(extracted_data)
+        # Validate extraction (don't let validation failure break the response)
+        try:
+            validation = extractor.validate_extraction(extracted_data)
+        except Exception as val_err:
+            print(f"⚠️ Validation warning: {val_err}")
+            validation = {
+                'is_valid': False,
+                'errors': [str(val_err)],
+                'warnings': [],
+                'requires_review': True,
+                'low_confidence_count': 0,
+                'error_count': 1,
+                'warning_count': 0
+            }
         
         # Save extraction
-        extraction_file = OUTPUT_DIR / f"extraction_{file_id}.json"
-        extractor.save_extraction(extracted_data, str(extraction_file))
+        try:
+            extraction_file = OUTPUT_DIR / f"extraction_{file_id}.json"
+            extractor.save_extraction(extracted_data, str(extraction_file))
+        except Exception as save_err:
+            print(f"⚠️ Could not save extraction JSON: {save_err}")
         
-        print(f"✅ Extraction complete: {file.filename}")
+        del extractor  # free ref so gc can reclaim
+        print(f"✅ Extraction complete: {safe_name}")
         gc.collect()
+        
+        # Ensure JSON-serializable (datetime, Decimal, etc.)
+        def make_serializable(obj):
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return {str(k): make_serializable(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [make_serializable(v) for v in obj]
+            if isinstance(obj, (str, int, float, bool)):
+                return obj
+            if hasattr(obj, 'isoformat'):
+                return obj.isoformat()
+            if hasattr(obj, '__float__') and not isinstance(obj, (int, float)):
+                try:
+                    return float(obj)
+                except (TypeError, ValueError):
+                    return str(obj)
+            return str(obj)
+        
+        extracted_data = make_serializable(extracted_data)
+        validation = make_serializable(validation)
+        
         return {
             "status": "success",
             "file_id": file_id,
-            "filename": file.filename,
+            "filename": safe_name,
             "extracted_data": extracted_data,
             "validation": validation
         }
         
     except Exception as e:
-        print(f"❌ Upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Upload error: {str(e)}")
+        err_msg = str(e)
+        print(f"❌ Upload error: {err_msg}")
+        traceback.print_exc()
+        # Common causes: Claude rate limit, memory after multiple uploads, temp file / file handle
+        if "api_key" in err_msg.lower() or "authentication" in err_msg.lower():
+            raise HTTPException(status_code=503, detail="Invalid Claude API key. Check ANTHROPIC_API_KEY in .env")
+        if "rate" in err_msg.lower() or "overloaded" in err_msg.lower():
+            raise HTTPException(status_code=503, detail="Claude API rate limit. Please try again in a moment.")
+        if "File not found" in err_msg or "No such file" in err_msg:
+            raise HTTPException(status_code=500, detail="File could not be read. Try a different file.")
+        if "JSON" in err_msg or "json" in err_msg:
+            raise HTTPException(status_code=500, detail="AI extraction returned invalid format. Try again or use a clearer contract.")
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {err_msg[:200]}")
+    finally:
+        # Always delete temp upload file to avoid disk buildup and possible lock/memory issues
+        try:
+            if upload_path.exists():
+                upload_path.unlink()
+                print(f"🗑️ Cleaned up temp file: {upload_path.name}")
+        except Exception as cleanup_err:
+            print(f"⚠️ Could not delete temp file {upload_path}: {cleanup_err}")
+        gc.collect()
+
+
+@app.post("/api/ifrs16/modification-advice")
+async def ifrs16_modification_advice(body: ModificationAdviceRequest):
+    """
+    Suggest IFRS 16 modification treatment (§44 separate lease vs §45 remeasurement)
+    from extractor-style JSON plus current modification form values.
+    """
+    from modification_advisor import advise_modification
+
+    result = advise_modification(body.extractor_hints or {}, body.modification_inputs or {})
+    return result
 
 
 @app.get("/api/download/{file_id}")
@@ -732,6 +936,244 @@ async def batch_calculate(leases: List[LeaseRequest]):
     }
 
 
+@app.post("/api/ifrs16/bulk-calculate")
+async def ifrs16_bulk_calculate(body: IFRS16BulkCalculateRequest):
+    """
+    Calculate IFRS 16 for many leases in one request.
+    One failure does not stop the rest. Returns summary metrics per lease + portfolio roll-up.
+    """
+    from ifrs16_calculator import IFRS16Calculator
+
+    out_results: List[Dict[str, Any]] = []
+    total = len(body.leases)
+    successful = 0
+    failed = 0
+    total_lease_liability = 0.0
+    total_rou_asset = 0.0
+    ibr_sum = 0.0
+    currency_counts: Dict[str, int] = {}
+
+    for lease in body.leases:
+        try:
+            lease_input = convert_lease_request_to_input(lease)
+            calculator = IFRS16Calculator()
+            result = calculator.calculate_full_ifrs16(lease_input)
+            result_json = result.copy()
+            if "amortization_schedule" in result_json and hasattr(result_json["amortization_schedule"], "to_dict"):
+                result_json["amortization_schedule"] = result_json["amortization_schedule"].to_dict(orient="records")
+
+            ll = float(result.get("lease_liability", 0) or 0)
+            rou = float(result.get("rou_asset", 0) or 0)
+            md = float(result.get("monthly_depreciation", 0) or 0)
+            ti = float(result.get("total_interest", 0) or 0)
+
+            total_lease_liability += ll
+            total_rou_asset += rou
+            ibr_sum += float(lease.annual_discount_rate or 0)
+            ccy = (lease.currency or "INR").upper()
+            currency_counts[ccy] = currency_counts.get(ccy, 0) + 1
+            successful += 1
+
+            out_results.append(
+                {
+                    "lease_id": lease.lease_id,
+                    "status": "success",
+                    "error": None,
+                    "lease_liability": ll,
+                    "rou_asset": rou,
+                    "monthly_depreciation": md,
+                    "total_interest": ti,
+                    "calculation_results": result_json,
+                }
+            )
+        except Exception as e:
+            failed += 1
+            out_results.append(
+                {
+                    "lease_id": getattr(lease, "lease_id", "") or "",
+                    "status": "error",
+                    "error": str(e),
+                    "lease_liability": 0.0,
+                    "rou_asset": 0.0,
+                    "monthly_depreciation": 0.0,
+                    "total_interest": 0.0,
+                    "calculation_results": None,
+                }
+            )
+
+    gc.collect()
+    avg_ibr = (ibr_sum / successful) if successful else 0.0
+    return {
+        "total": total,
+        "successful": successful,
+        "failed": failed,
+        "results": out_results,
+        "portfolio_summary": {
+            "total_lease_liability": total_lease_liability,
+            "total_rou_asset": total_rou_asset,
+            "avg_ibr": avg_ibr,
+            "currency_breakdown": currency_counts,
+        },
+    }
+
+
+@app.get("/api/ifrs16/bulk-template")
+async def ifrs16_bulk_template():
+    """Download Excel template for portfolio bulk upload (3 sample rows)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Leases"
+
+    headers = [
+        "lease_id",
+        "asset_description",
+        "lessee_name",
+        "lessor_name",
+        "commencement_date",
+        "lease_term_months",
+        "monthly_payment",
+        "annual_discount_rate",
+        "currency",
+        "payment_type",
+        "rent_free_months",
+        "escalation_rate",
+        "legal_fees",
+        "brokerage_fees",
+        "other_initial_direct_costs",
+        "cash_incentive",
+        "rvg_amount",
+        "rvg_guaranteed_by",
+        "rvg_expected_payment",
+        "cpi_index_base",
+        "cpi_index_current",
+        "cpi_adjustment_frequency_months",
+        "non_lease_component",
+        "non_lease_description",
+        "practical_expedient_elected",
+    ]
+
+    yellow = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
+    instr = (
+        "Fill in your lease data below. Do not change column headers. "
+        "Date format: YYYY-MM-DD. Rates as decimals: 8.5% = 0.085"
+    )
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+    c1 = ws.cell(row=1, column=1, value=instr)
+    c1.fill = yellow
+    c1.font = Font(bold=True)
+    c1.alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[1].height = 36
+
+    for col, h in enumerate(headers, start=1):
+        cell = ws.cell(row=2, column=col, value=h)
+        cell.font = Font(bold=True)
+
+    samples = [
+        [
+            "OFFICE-SAMPLE-001",
+            "Corporate Office — Banjara Hills, Hyderabad",
+            "Gnanova Technologies Pvt Ltd",
+            "Prestige Estates Pvt Ltd",
+            "2024-04-01",
+            36,
+            85000,
+            0.085,
+            "INR",
+            "Arrears",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "None",
+            0,
+            0,
+            0,
+            12,
+            0,
+            "",
+            "FALSE",
+        ],
+        [
+            "DC-SAMPLE-001",
+            "Data Centre Space — HITEC City, Hyderabad",
+            "Gnanova Technologies Pvt Ltd",
+            "CtrlS Datacenters Ltd",
+            "2024-04-01",
+            60,
+            500000,
+            0.105,
+            "INR",
+            "Arrears",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "None",
+            0,
+            100,
+            107.5,
+            12,
+            75000,
+            "Data centre cooling, physical security, UPS power",
+            "FALSE",
+        ],
+        [
+            "IBM-SAMPLE-001",
+            "IBM Power Server Rack — HITEC City Data Centre",
+            "Gnanova Technologies Pvt Ltd",
+            "IBM India Pvt Ltd",
+            "2024-07-01",
+            60,
+            250000,
+            0.105,
+            "INR",
+            "Arrears",
+            2,
+            0.05,
+            40000,
+            35000,
+            25000,
+            50000,
+            300000,
+            "Lessee",
+            150000,
+            100,
+            103,
+            12,
+            30000,
+            "IBM hardware maintenance included in rent",
+            "FALSE",
+        ],
+    ]
+
+    for r_idx, row in enumerate(samples, start=3):
+        for c_idx, val in enumerate(row, start=1):
+            ws.cell(row=r_idx, column=c_idx, value=val)
+
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 22
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    gc.collect()
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="ifrs16_bulk_lease_template.xlsx"'},
+    )
+
+
 # ==================== IFRS 15 Endpoints ====================
 
 class IFRS15ExtractRequest(BaseModel):
@@ -822,10 +1264,26 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
             contract_term_months=request.contract_term_months,
             fixed_consideration=Decimal(str(request.fixed_consideration)),
             variable_consideration=Decimal(str(request.variable_consideration)),
+            variable_consideration_constrained=Decimal(str(request.variable_consideration_constrained)),
+            constraint_percentage=Decimal(str(request.constraint_percentage)),
+            constraint_method=request.constraint_method,
             discounts=Decimal(str(request.discounts)),
             rebates=Decimal(str(request.rebates)),
             financing_adjustment=Decimal(str(request.financing_adjustment)),
             currency=request.currency,
+            contract_type=request.contract_type,
+            hourly_rate=Decimal(str(request.hourly_rate)),
+            hours_worked=Decimal(str(request.hours_worked)),
+            tm_cap=Decimal(str(request.tm_cap)),
+            cumulative_billed=Decimal(str(request.cumulative_billed)),
+            total_estimated_cost=Decimal(str(request.total_estimated_cost)),
+            actual_cost_to_date=Decimal(str(request.actual_cost_to_date)),
+            prior_revenue_recognised=Decimal(str(request.prior_revenue_recognised)),
+            maintenance_term_months=request.maintenance_term_months,
+            volume_slabs=request.volume_slabs,
+            estimated_annual_volume=Decimal(str(request.estimated_annual_volume)),
+            can_estimate_volume=request.can_estimate_volume,
+            sla_items=request.sla_items,
             performance_obligations=obligations
         )
         calc = IFRS15Calculator()
@@ -851,6 +1309,57 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/classify-contract")
+async def ifrs15_classify_contract(request: IFRS15ClassifyContractRequest):
+    """Classify IT services contract type for IFRS 15 revenue method selection."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Claude API not configured. Set ANTHROPIC_API_KEY environment variable."
+        )
+    try:
+        import anthropic
+        import json
+        import re
+
+        prompt = (
+            "Read this IT services contract and classify it. Return ONLY JSON:\n"
+            "{\n"
+            "  'contract_type':\n"
+            "    'time_and_material' |\n"
+            "    'fixed_price' |\n"
+            "    'capped_tm' |\n"
+            "    'maintenance',\n"
+            "  'confidence': 0-100,\n"
+            "  'reason': 'one sentence explanation',\n"
+            "  'key_indicators': [\n"
+            "    'indicator 1',\n"
+            "    'indicator 2'\n"
+            "  ],\n"
+            "  'hourly_rate': number or null,\n"
+            "  'tm_cap': number or null,\n"
+            "  'estimated_cost': number or null\n"
+            "}\n\n"
+            f"Contract:\n{request.contract_text}"
+        )
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1200,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = response.content[0].text if response.content else ""
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        parsed = json.loads(cleaned.replace("'", '"'))
+        return {"status": "success", "classification": parsed}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Contract classification failed: {str(e)}")
 
 
 @app.get("/api/ifrs15/download/{file_id}")
@@ -913,6 +1422,42 @@ async def chat_with_rag(request: ChatRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+
+
+@app.post("/api/cfo-insights")
+async def cfo_insights(request: CFOInsightsRequest):
+    """
+    CFO Strategic Insights - AI analysis of lease portfolio
+    
+    Accepts a prompt (built client-side from lease_repository) and returns structured
+    insights: risk flags, cost-saving opportunities, renewal alerts, efficiency recommendations.
+    Uses Claude API; requires ANTHROPIC_API_KEY.
+    """
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Claude API not configured. Set ANTHROPIC_API_KEY in .env"
+        )
+    try:
+        import anthropic
+        import re
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": request.prompt}],
+        )
+        raw = "".join(
+            b.text for b in response.content if getattr(b, "type", None) == "text"
+        )
+        clean = re.sub(r"```json|```", "", raw).strip()
+        parsed = json.loads(clean)
+        gc.collect()
+        return {"status": "success", "result": parsed}
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/rag/stats/{company_id}")
@@ -1046,6 +1591,148 @@ async def check_alerts(request: AlertsCheckRequest):
     return {"alerts": alerts}
 
 
+@app.post("/api/ifrs16/suggest-ibr")
+async def suggest_ibr(payload: IbrSuggestRequest):
+    fallback_by_currency = {
+        "INR": {"ibr_low": 7.5, "ibr_mid": 9.0, "ibr_high": 12.0},
+        "USD": {"ibr_low": 5.5, "ibr_mid": 7.0, "ibr_high": 9.0},
+        "EUR": {"ibr_low": 3.5, "ibr_mid": 5.0, "ibr_high": 7.0},
+    }
+    fallback = fallback_by_currency.get((payload.currency or "").upper(), {"ibr_low": 6.0, "ibr_mid": 8.5, "ibr_high": 11.0})
+    fallback_response = {
+        **fallback,
+        "rationale": "Fallback estimate based on currency-level market conditions and typical borrowing spreads.",
+        "market_references": ["Policy rate", "Commercial lending benchmarks", "Typical credit spread"],
+    }
+    if not ANTHROPIC_API_KEY:
+        return fallback_response
+
+    try:
+        import anthropic
+
+        system_prompt = """You are an IFRS 16 expert. Given a lease's country, currency, tenor, asset type,
+and lessee type, suggest a realistic Incremental Borrowing Rate (IBR) range.
+
+Respond ONLY with a JSON object. No preamble, no markdown, no explanation outside
+the JSON. Format:
+{
+  "ibr_low": 7.5,
+  "ibr_mid": 8.5,
+  "ibr_high": 10.0,
+  "rationale": "2-3 sentence explanation referencing current market context,
+                 RBI/central bank rates, and IFRS 16 para 26 guidance",
+  "market_references": ["RBI repo rate", "SBI MCLR", "typical corporate bond spread"]
+}"""
+
+        user_prompt = (
+            f"Country: {payload.country}, Currency: {payload.currency}, "
+            f"Lease term: {payload.lease_term_months} months, "
+            f"Asset type: {payload.asset_type or 'N/A'}, Lessee type: {payload.lessee_type}. "
+            "Suggest IBR range."
+        )
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=800,
+            temperature=0,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        text = msg.content[0].text.strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        data = json.loads(text)
+        return {
+            "ibr_low": float(data.get("ibr_low")),
+            "ibr_mid": float(data.get("ibr_mid")),
+            "ibr_high": float(data.get("ibr_high")),
+            "rationale": str(data.get("rationale", "")),
+            "market_references": data.get("market_references", []) or [],
+        }
+    except Exception:
+        return fallback_response
+
+
+@app.post("/api/ifrs16/consolidate")
+async def consolidate_ifrs16(request: dict):
+    """
+    Consolidate IFRS 16 across multiple entities.
+
+    Body:
+    {
+      "group_currency": "USD",
+      "entities": [
+        {
+          "entity_name": "Subsidiary A",
+          "entity_currency": "INR",
+          "fx_rate_to_group": 0.012,
+          "leases": [ ...lease results... ]
+        }
+      ]
+    }
+    """
+    try:
+        from ifrs16_calculator import consolidate_leases
+
+        entities = request.get("entities", [])
+        if not entities:
+            raise HTTPException(400, "At least one entity required")
+        result = consolidate_leases(entities)
+        result["group_currency"] = request.get("group_currency", "USD")
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/consolidation/entities")
+async def consolidation_entities(parent_id: str = ""):
+    from entity_consolidation import get_entities
+    return get_entities(parent_id or None)
+
+
+@app.post("/api/consolidation/entities")
+async def consolidation_add_entity(payload: dict):
+    from entity_consolidation import save_entity
+    if not payload.get("entity_id") or not payload.get("entity_name"):
+        raise HTTPException(400, "entity_id and entity_name are required")
+    save_entity(
+        entity_id=payload["entity_id"],
+        entity_name=payload["entity_name"],
+        parent_id=payload.get("parent_id"),
+        currency=payload.get("currency", "INR"),
+        fx_rate=float(payload.get("fx_rate_to_group", 1.0)),
+    )
+    return {"status": "saved"}
+
+
+@app.post("/api/consolidation/intercompany")
+async def consolidation_add_intercompany(payload: dict):
+    from entity_consolidation import save_intercompany
+    required = ["lessor_entity", "lessee_entity", "lease_id", "monthly_amount"]
+    missing = [k for k in required if k not in payload]
+    if missing:
+        raise HTTPException(400, f"Missing fields: {', '.join(missing)}")
+    save_intercompany(
+        lessor=payload["lessor_entity"],
+        lessee=payload["lessee_entity"],
+        lease_id=payload["lease_id"],
+        monthly_amount=float(payload["monthly_amount"]),
+    )
+    return {"status": "saved"}
+
+
+@app.post("/api/consolidation/run")
+async def consolidation_run(payload: dict):
+    from entity_consolidation import consolidate
+    entity_ids = payload.get("entity_ids", [])
+    if not entity_ids:
+        raise HTTPException(400, "At least one entity required")
+    return consolidate(entity_ids=entity_ids, group_currency=payload.get("group_currency", "INR"))
+
+
 # ==================== IFRS 9 ECL Endpoints ====================
 
 # Standard PD by credit rating (IFRS 9 para 5.5.17)
@@ -1107,6 +1794,21 @@ async def calculate_ecl(data: dict):
     Returns: ecl_12m, ecl_lifetime, applicable_ecl, coverage_ratio, journal_entries, disclosure_notes, scenario_results.
     """
     try:
+        def apply_macro_overlay_pd_pct(base_pd_pct: float, macro: dict | None) -> float:
+            """Apply macro overlay to PD in percentage points."""
+            if not macro:
+                return base_pd_pct
+            gdp_growth = float((macro or {}).get("gdp_growth", 0) or 0)
+            unemployment = float((macro or {}).get("unemployment", 0) or 0)
+            interest_rate = float((macro or {}).get("interest_rate", 0) or 0)
+            gdp_s = get_sensitivity("gdp_sensitivity")
+            unemp_s = get_sensitivity("unemployment_sensitivity")
+            rate_s = get_sensitivity("interest_rate_sensitivity")
+            gdp_adj = max(0.20, 1 + ((-gdp_growth) * gdp_s))
+            unemp_adj = max(0.20, 1 + (unemployment * unemp_s))
+            rate_adj = max(0.20, 1 + (interest_rate * rate_s))
+            return max(0.0, min(100.0, base_pd_pct * gdp_adj * unemp_adj * rate_adj))
+
         approach = data.get("approach", "general")
         stage = int(data.get("stage", 1))
         pd_12m = float(data.get("pd_12m", 0.01))
@@ -1114,6 +1816,13 @@ async def calculate_ecl(data: dict):
         lgd = float(data.get("lgd", 0.45))
         ead = float(data.get("ead", 0))
         discount_rate = float(data.get("discount_rate", 0.08))
+
+        scenarios = data.get("scenarios") or {}
+        base_macro = scenarios.get("base_macro") or {}
+        optimistic_macro = scenarios.get("optimistic_macro") or {}
+        pessimistic_macro = scenarios.get("pessimistic_macro") or {}
+        pd_12m_base = apply_macro_overlay_pd_pct(pd_12m, base_macro)
+        pd_lifetime_base = apply_macro_overlay_pd_pct(pd_lifetime, base_macro)
 
         if approach == "simplified" and data.get("ageing_buckets"):
             # Provision matrix: sum(amount * rate) per bucket
@@ -1129,21 +1838,33 @@ async def calculate_ecl(data: dict):
         else:
             # General: ECL = PD × LGD × EAD (with optional discount)
             dfactor = 1 / (1 + discount_rate)
-            ecl_12m = ead * (pd_12m / 100) * (lgd / 100) * dfactor
-            ecl_lifetime = ead * (pd_lifetime / 100) * (lgd / 100) * dfactor
+            ecl_12m = ead * (pd_12m_base / 100) * (lgd / 100) * dfactor
+            ecl_lifetime = ead * (pd_lifetime_base / 100) * (lgd / 100) * dfactor
             applicable_ecl = float(ecl_12m if stage == 1 else ecl_lifetime)
             bucket_results = []
 
         coverage = (applicable_ecl / ead * 100) if ead else 0
 
         # Scenario-weighted ECL (optional)
-        scenarios = data.get("scenarios") or {}
         base_w = float(scenarios.get("base_weight", 50)) / 100
         opt_w = float(scenarios.get("optimistic_weight", 30)) / 100
         pess_w = float(scenarios.get("pessimistic_weight", 20)) / 100
-        base_ecl = float(scenarios.get("base_ecl", applicable_ecl))
-        opt_ecl = float(scenarios.get("optimistic_ecl", applicable_ecl * 0.8))
-        pess_ecl = float(scenarios.get("pessimistic_ecl", applicable_ecl * 1.2))
+        if approach == "general":
+            dfactor = 1 / (1 + discount_rate)
+            pd_12m_opt = apply_macro_overlay_pd_pct(pd_12m, optimistic_macro)
+            pd_12m_pess = apply_macro_overlay_pd_pct(pd_12m, pessimistic_macro)
+            pd_lifetime_opt = apply_macro_overlay_pd_pct(pd_lifetime, optimistic_macro)
+            pd_lifetime_pess = apply_macro_overlay_pd_pct(pd_lifetime, pessimistic_macro)
+            base_ecl_calc = ead * ((pd_12m_base if stage == 1 else pd_lifetime_base) / 100) * (lgd / 100) * dfactor
+            opt_ecl_calc = ead * ((pd_12m_opt if stage == 1 else pd_lifetime_opt) / 100) * (lgd / 100) * dfactor
+            pess_ecl_calc = ead * ((pd_12m_pess if stage == 1 else pd_lifetime_pess) / 100) * (lgd / 100) * dfactor
+            base_ecl = float(scenarios.get("base_ecl", base_ecl_calc))
+            opt_ecl = float(scenarios.get("optimistic_ecl", opt_ecl_calc))
+            pess_ecl = float(scenarios.get("pessimistic_ecl", pess_ecl_calc))
+        else:
+            base_ecl = float(scenarios.get("base_ecl", applicable_ecl))
+            opt_ecl = float(scenarios.get("optimistic_ecl", applicable_ecl * 0.8))
+            pess_ecl = float(scenarios.get("pessimistic_ecl", applicable_ecl * 1.2))
         ecl_weighted = base_ecl * base_w + opt_ecl * opt_w + pess_ecl * pess_w
 
         journal_entries = [
@@ -1153,19 +1874,34 @@ async def calculate_ecl(data: dict):
         disclosure_notes = (
             f"Note: Expected Credit Losses (IFRS 9)\n\n"
             f"The Company applies the {approach} approach. ECL = PD × LGD × EAD.\n"
-            f"PD (12M): {pd_12m}% | PD (Lifetime): {pd_lifetime}% | LGD: {lgd}% | EAD: {ead:,.0f}\n"
+            f"PD (12M): {pd_12m}% (macro-adjusted: {pd_12m_base:.2f}%) | "
+            f"PD (Lifetime): {pd_lifetime}% (macro-adjusted: {pd_lifetime_base:.2f}%) | LGD: {lgd}% | EAD: {ead:,.0f}\n"
             f"Applicable ECL: {applicable_ecl:,.0f} | Coverage: {coverage:.2f}%\n"
             f"Probability-weighted ECL (scenarios): {ecl_weighted:,.0f}"
         )
 
         return {
-            "ecl_12m": ead * (pd_12m / 100) * (lgd / 100) if approach == "general" else None,
-            "ecl_lifetime": ead * (pd_lifetime / 100) * (lgd / 100) if approach == "general" else None,
+            "ecl_12m": ead * (pd_12m_base / 100) * (lgd / 100) if approach == "general" else None,
+            "ecl_lifetime": ead * (pd_lifetime_base / 100) * (lgd / 100) if approach == "general" else None,
             "ecl_simplified": applicable_ecl if approach == "simplified" else None,
             "applicable_ecl": applicable_ecl,
             "ecl_weighted": ecl_weighted,
             "coverage_ratio": round(coverage, 2),
-            "pd_used": pd_12m if stage == 1 else pd_lifetime,
+            "pd_used": pd_12m_base if stage == 1 else pd_lifetime_base,
+            "macro_pd": {
+                "base_pd_12m": pd_12m_base,
+                "base_pd_lifetime": pd_lifetime_base,
+                "optimistic_pd_12m": apply_macro_overlay_pd_pct(pd_12m, optimistic_macro),
+                "optimistic_pd_lifetime": apply_macro_overlay_pd_pct(pd_lifetime, optimistic_macro),
+                "pessimistic_pd_12m": apply_macro_overlay_pd_pct(pd_12m, pessimistic_macro),
+                "pessimistic_pd_lifetime": apply_macro_overlay_pd_pct(pd_lifetime, pessimistic_macro),
+            },
+            "macro_sensitivity_used": {
+                "gdp_sensitivity": get_sensitivity("gdp_sensitivity"),
+                "unemployment_sensitivity": get_sensitivity("unemployment_sensitivity"),
+                "interest_rate_sensitivity": get_sensitivity("interest_rate_sensitivity"),
+                "config_source": "db" if is_db_loaded() else "default",
+            },
             "lgd_used": lgd,
             "ead_used": ead,
             "journal_entries": journal_entries,
@@ -1180,6 +1916,65 @@ async def calculate_ecl(data: dict):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/macro-sensitivity")
+async def get_macro_sensitivity(tenant_id: str = "default", portfolio_type: str = "all"):
+    row = get_active_config(tenant_id, portfolio_type)
+    if row:
+        return {
+            "source": "database",
+            "tenant_id": tenant_id,
+            "portfolio_type": portfolio_type,
+            "gdp_sensitivity": row[0],
+            "unemployment_sensitivity": row[1],
+            "interest_rate_sensitivity": row[2],
+            "effective_from": row[3],
+            "approved_by": row[4],
+            "approval_notes": row[5],
+            "created_at": row[6],
+        }
+    return {"source": "defaults", **MACRO_SENSITIVITY_DEFAULTS}
+
+
+@app.post("/api/admin/macro-sensitivity")
+async def update_macro_sensitivity(payload: dict):
+    required = ["gdp_sensitivity", "unemployment_sensitivity", "interest_rate_sensitivity"]
+    for key in required:
+        if key not in payload:
+            raise HTTPException(400, f"Missing field: {key}")
+    save_config(
+        tenant_id=payload.get("tenant_id", "default"),
+        portfolio_type=payload.get("portfolio_type", "all"),
+        gdp=float(payload["gdp_sensitivity"]),
+        unemp=float(payload["unemployment_sensitivity"]),
+        rate=float(payload["interest_rate_sensitivity"]),
+        approved_by=payload.get("approved_by", ""),
+        notes=payload.get("approval_notes", ""),
+    )
+    update_sensitivity("gdp_sensitivity", float(payload["gdp_sensitivity"]))
+    update_sensitivity("unemployment_sensitivity", float(payload["unemployment_sensitivity"]))
+    update_sensitivity("interest_rate_sensitivity", float(payload["interest_rate_sensitivity"]))
+    return {"status": "updated", "effective": "immediately"}
+
+
+@app.get("/api/admin/macro-sensitivity/history")
+async def macro_sensitivity_history(tenant_id: str = "default", portfolio_type: str = "all"):
+    rows = get_config_history(tenant_id, portfolio_type)
+    cols = [
+        "id",
+        "tenant_id",
+        "portfolio_type",
+        "gdp_sensitivity",
+        "unemployment_sensitivity",
+        "interest_rate_sensitivity",
+        "effective_from",
+        "approved_by",
+        "approval_notes",
+        "is_active",
+        "created_at",
+    ]
+    return [dict(zip(cols, r)) for r in rows]
 
 
 @app.post("/api/ifrs9/classify")
@@ -1251,15 +2046,38 @@ async def delete_rag_document(company_id: str, document_id: str):
         raise HTTPException(status_code=500, detail=f"Delete error: {str(e)}")
 
 
-# Run application
+# Run application (local dev). Tries PORT/API_PORT then scans for a free port if busy (Windows 10048, etc.).
 if __name__ == "__main__":
+    import socket
     import uvicorn
-    uvicorn.run(
-        app,
-        host="127.0.0.1",
-        port=9000,
-        reload=False
-    )
+
+    def _pick_bind_port(start: int, span: int = 40) -> int:
+        for p in range(start, start + span):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("127.0.0.1", p))
+                except OSError:
+                    continue
+                return p
+        raise RuntimeError(f"No free TCP port between {start} and {start + span - 1}")
+
+    base = int(os.environ.get("PORT", os.environ.get("API_PORT", "9000")))
+    chosen = _pick_bind_port(base)
+    os.environ["_IFRS_BIND_PORT"] = str(chosen)
+    os.environ["PUBLIC_API_URL"] = f"http://127.0.0.1:{chosen}"
+
+    port_file = _project_root / "api_dev_port.txt"
+    try:
+        port_file.write_text(str(chosen), encoding="utf-8")
+    except OSError as werr:
+        print(f"WARNING: Could not write {port_file.name}: {werr}")
+
+    if chosen != base:
+        print(f"WARNING: Port {base} is already in use; using {chosen} instead.")
+    print(f"API base: http://127.0.0.1:{chosen}")
+    print(f"Wrote {port_file.name} for Next.js proxy (restart npm run dev if the UI was already running).")
+
+    uvicorn.run(app, host="127.0.0.1", port=chosen, reload=False)
 
 
 

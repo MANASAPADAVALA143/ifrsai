@@ -12,6 +12,8 @@ from typing import Dict
 from datetime import datetime
 from pathlib import Path
 
+from currency_format import format_currency_value, excel_money_number_format, currency_display_symbol
+
 
 class IFRS16ExcelExporter:
     """Export IFRS 16 calculations to professional Excel format"""
@@ -70,7 +72,7 @@ class IFRS16ExcelExporter:
         
         # Save workbook
         wb.save(filename)
-        print(f"✅ Excel workbook saved: {filename}")
+        print(f"Excel workbook saved: {filename}")
     
     def _create_summary_sheet(self, wb: Workbook, results: Dict):
         """Summary sheet with key metrics and overview"""
@@ -122,9 +124,7 @@ class IFRS16ExcelExporter:
         ws[f'B{row}'].font = self.header_font
         ws[f'A{row}'].fill = self.header_fill
         ws[f'B{row}'].fill = self.header_fill
-        
-        currency_symbol = "₹" if results['disclosure_data']['currency'] == "INR" else results['disclosure_data']['currency']
-        
+
         metrics = [
             ("Lease Liability", results['lease_liability']),
             ("Right-of-Use Asset", results['rou_asset']),
@@ -136,9 +136,58 @@ class IFRS16ExcelExporter:
             row += 1
             ws[f'A{row}'] = metric_name
             ws[f'B{row}'] = value
-            ws[f'B{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+            ws[f'B{row}'].number_format = money_fmt
             ws[f'A{row}'].border = self.border
             ws[f'B{row}'].border = self.border
+        
+        # Lease liability breakdown (if RVG present)
+        if results.get('liability_breakdown') and results['liability_breakdown'].get('pv_residual_value_guarantee', 0) != 0:
+            row += 2
+            ws[f'A{row}'] = "LEASE LIABILITY CALCULATION"
+            ws[f'A{row}'].font = self.subtitle_font
+            ws.merge_cells(f'A{row}:D{row}')
+            row += 1
+            lb = results['liability_breakdown']
+            liability_items = [
+                ("PV of lease payments", lb.get('pv_regular_payments', 0)),
+                ("PV of residual value guarantee", lb.get('pv_residual_value_guarantee', 0)),
+                ("Total lease liability", lb.get('total_lease_liability', 0)),
+            ]
+            for label, val in liability_items:
+                row += 1
+                ws[f'A{row}'] = label
+                ws[f'B{row}'] = val
+                ws[f'B{row}'].number_format = money_fmt
+                ws[f'A{row}'].border = self.border
+                ws[f'B{row}'].border = self.border
+
+        # ROU Asset build-up (if lease incentives or IDC present)
+        rb = results.get('rou_build_up')
+        if rb and (rb.get('less_lease_incentives', 0) != 0 or rb.get('add_initial_direct_costs', 0) != 0):
+            row += 2
+            ws[f'A{row}'] = "ROU ASSET CALCULATION"
+            ws[f'A{row}'].font = self.subtitle_font
+            ws.merge_cells(f'A{row}:D{row}')
+            row += 1
+            build_up = [("PV of lease payments", rb.get('pv_lease_payments', 0))]
+            if rb.get('add_initial_direct_costs', 0) != 0:
+                if rb.get('legal_fees', 0) != 0:
+                    build_up.append(("  Legal fees", rb.get('legal_fees', 0)))
+                if rb.get('brokerage_fees', 0) != 0:
+                    build_up.append(("  Brokerage / agent fees", rb.get('brokerage_fees', 0)))
+                if rb.get('other_initial_direct_costs', 0) != 0:
+                    build_up.append(("  Other initial direct costs", rb.get('other_initial_direct_costs', 0)))
+                build_up.append(("Add: Initial direct costs", rb.get('add_initial_direct_costs', 0)))
+            if rb.get('less_lease_incentives', 0) != 0:
+                build_up.append(("Less: Lease incentives", -float(rb.get('less_lease_incentives', 0))))
+            build_up.append(("ROU Asset at commencement", rb.get('rou_asset_at_commencement', 0)))
+            for label, val in build_up:
+                row += 1
+                ws[f'A{row}'] = label
+                ws[f'B{row}'] = val
+                ws[f'B{row}'].number_format = money_fmt
+                ws[f'A{row}'].border = self.border
+                ws[f'B{row}'].border = self.border
         
         # Balance sheet classification
         row += 2
@@ -164,7 +213,7 @@ class IFRS16ExcelExporter:
             row += 1
             ws[f'A{row}'] = item_name
             ws[f'B{row}'] = value
-            ws[f'B{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+            ws[f'B{row}'].number_format = money_fmt
             ws[f'A{row}'].border = self.border
             ws[f'B{row}'].border = self.border
             
@@ -198,7 +247,7 @@ class IFRS16ExcelExporter:
             row += 1
             ws[f'A{row}'] = item_name
             ws[f'B{row}'] = value
-            ws[f'B{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+            ws[f'B{row}'].number_format = money_fmt
             ws[f'A{row}'].border = self.border
             ws[f'B{row}'].border = self.border
             
@@ -231,7 +280,7 @@ class IFRS16ExcelExporter:
             row += 1
             ws[f'A{row}'] = item_name
             ws[f'B{row}'] = value
-            ws[f'B{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+            ws[f'B{row}'].number_format = money_fmt
             ws[f'A{row}'].border = self.border
             ws[f'B{row}'].border = self.border
             
@@ -252,7 +301,8 @@ class IFRS16ExcelExporter:
     
     def _create_amortization_sheet(self, wb: Workbook, results: Dict):
         """Amortization schedule sheet with full payment table"""
-        
+        mf = excel_money_number_format(results.get('disclosure_data', {}).get('currency') or 'INR')
+
         ws = wb.create_sheet("Amortization Schedule")
         
         # Title
@@ -283,8 +333,7 @@ class IFRS16ExcelExporter:
                 else:
                     # Format numbers
                     if c_idx >= 4 and c_idx <= 8:  # Amount columns
-                        currency_symbol = "₹" if results['disclosure_data']['currency'] == "INR" else results['disclosure_data']['currency']
-                        cell.number_format = f'"{currency_symbol}"#,##0.00'
+                        cell.number_format = mf
                 
                 cell.border = self.border
         
@@ -294,7 +343,10 @@ class IFRS16ExcelExporter:
     
     def _create_journal_entries_sheet(self, wb: Workbook, results: Dict):
         """Journal entries sheet with all accounting entries"""
-        
+        ccy = results.get('disclosure_data', {}).get('currency') or 'INR'
+        currency_symbol = currency_display_symbol(ccy)
+        mf = excel_money_number_format(ccy)
+
         ws = wb.create_sheet("Journal Entries")
         
         ws['A1'] = "ACCOUNTING JOURNAL ENTRIES"
@@ -302,8 +354,6 @@ class IFRS16ExcelExporter:
         ws.merge_cells('A1:D1')
         ws['A1'].alignment = Alignment(horizontal='center')
         ws.row_dimensions[1].height = 25
-        
-        currency_symbol = "₹" if results['disclosure_data']['currency'] == "INR" else results['disclosure_data']['currency']
         
         row = 3
         
@@ -338,9 +388,9 @@ class IFRS16ExcelExporter:
             ws[f'D{row}'] = entry['narration']
             
             if entry['dr'] > 0:
-                ws[f'B{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+                ws[f'B{row}'].number_format = mf
             if entry['cr'] > 0:
-                ws[f'C{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+                ws[f'C{row}'].number_format = mf
             
             for col in ['A', 'B', 'C', 'D']:
                 ws[f'{col}{row}'].border = self.border
@@ -373,9 +423,9 @@ class IFRS16ExcelExporter:
             ws[f'D{row}'] = entry['narration']
             
             if entry['dr'] > 0:
-                ws[f'B{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+                ws[f'B{row}'].number_format = mf
             if entry['cr'] > 0:
-                ws[f'C{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+                ws[f'C{row}'].number_format = mf
             
             for col in ['A', 'B', 'C', 'D']:
                 ws[f'{col}{row}'].border = self.border
@@ -408,9 +458,9 @@ class IFRS16ExcelExporter:
             ws[f'D{row}'] = entry['narration']
             
             if entry['dr'] > 0:
-                ws[f'B{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+                ws[f'B{row}'].number_format = mf
             if entry['cr'] > 0:
-                ws[f'C{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+                ws[f'C{row}'].number_format = mf
             
             for col in ['A', 'B', 'C', 'D']:
                 ws[f'{col}{row}'].border = self.border
@@ -445,14 +495,12 @@ class IFRS16ExcelExporter:
         ws[f'B{row}'].fill = self.header_fill
         ws[f'A{row}'].border = self.border
         ws[f'B{row}'].border = self.border
-        
-        currency_symbol = "₹" if results['disclosure_data']['currency'] == "INR" else results['disclosure_data']['currency']
-        
+
         for period, amount in results['maturity_analysis'].items():
             row += 1
             ws[f'A{row}'] = period.replace('_', ' ')
             ws[f'B{row}'] = amount
-            ws[f'B{row}'].number_format = f'"{currency_symbol}"#,##0.00'
+            ws[f'B{row}'].number_format = mf
             ws[f'A{row}'].border = self.border
             ws[f'B{row}'].border = self.border
             
@@ -482,6 +530,9 @@ class IFRS16ExcelExporter:
         ws.merge_cells(f'A{row}:B{row}')
         
         row += 2
+        disc_ccy = results.get('disclosure_data', {}).get('currency') or 'INR'
+        y1 = results.get('year_1_impact') or {}
+        ls = results.get('liability_split') or {}
         disclosure_text = f"""The Company has adopted IFRS 16 'Leases' with effect from {results['disclosure_data']['commencement']}.
 
 The Company has lease contracts for office premises. The Company's obligations under its leases are secured by the lessor's title to the leased assets.
@@ -490,22 +541,22 @@ The Company has recognized right-of-use assets and lease liabilities for these l
 
 Right-of-Use Assets:
 - Asset description: {results['disclosure_data']['asset']}
-- Carrying amount: {results['disclosure_data']['currency']} {results['rou_asset']:,.2f}
+- Carrying amount: {format_currency_value(float(results['rou_asset']), disc_ccy)}
 - Accumulated depreciation: Depreciated on a straight-line basis over lease term
 
 Lease Liabilities:
-- Total lease liability: {results['disclosure_data']['currency']} {results['lease_liability']:,.2f}
-- Current portion: {results['disclosure_data']['currency']} {results['liability_split']['current_portion']:,.2f}
-- Non-current portion: {results['disclosure_data']['currency']} {results['liability_split']['non_current_portion']:,.2f}
+- Total lease liability: {format_currency_value(float(results['lease_liability']), disc_ccy)}
+- Current portion: {format_currency_value(float(ls.get('current_portion', 0)), disc_ccy)}
+- Non-current portion: {format_currency_value(float(ls.get('non_current_portion', 0)), disc_ccy)}
 
 The Company has used incremental borrowing rate of {results['disclosure_data']['discount_rate_pct']:.2f}% to calculate the present value of lease payments.
 
 Amounts recognized in statement of profit and loss:
-- Depreciation expense: {results['disclosure_data']['currency']} {results['year_1_impact']['depreciation_expense']:,.2f} (Year 1)
-- Interest expense: {results['disclosure_data']['currency']} {results['year_1_impact']['interest_expense']:,.2f} (Year 1)
-- Total expense: {results['disclosure_data']['currency']} {results['year_1_impact']['total_p_l_expense']:,.2f} (Year 1)
+- Depreciation expense: {format_currency_value(float(y1.get('depreciation_expense', 0)), disc_ccy)} (Year 1)
+- Interest expense: {format_currency_value(float(y1.get('interest_expense', 0)), disc_ccy)} (Year 1)
+- Total expense: {format_currency_value(float(y1.get('total_p_l_expense', 0)), disc_ccy)} (Year 1)
 
-Cash outflow for leases: {results['disclosure_data']['currency']} {results['year_1_impact']['cash_outflow']:,.2f} (Year 1)
+Cash outflow for leases: {format_currency_value(float(y1.get('cash_outflow', 0)), disc_ccy)} (Year 1)
 
 The maturity analysis of lease liabilities is presented in the 'Maturity Analysis' sheet.
 

@@ -10,6 +10,7 @@ import { saveToLeaseRepository, buildLeaseEntry } from '@/lib/lease-repository';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import toast from 'react-hot-toast';
+import { isCustomerFacingBuild } from '@/lib/service-messages';
 
 function getVal(obj: any): any {
   if (obj == null) return null;
@@ -83,7 +84,9 @@ export default function BulkUploadPage() {
       const ed = flattenExtraction(raw);
       setExtractedData(raw);
       const dr = (v: any) => (v != null && v !== '') ? String(v) : '';
-      const disc = ed.discount_rate != null ? (Number(ed.discount_rate) > 1 ? Number(ed.discount_rate) / 100 : Number(ed.discount_rate)) : 0.085;
+      const rawDisc = ed.discount_rate != null ? Number(ed.discount_rate) : null;
+      const disc = (rawDisc != null && rawDisc > 0) ? (rawDisc > 1 ? rawDisc / 100 : rawDisc) : 0.085;
+      const discDisplay = disc >= 1 ? String(disc) : String(Math.round(disc * 1000) / 10);
       setFormData({
         lease_id: dr(ed.lease_id) || `LEASE-${Date.now().toString().slice(-6)}`,
         asset_description: dr(ed.asset_description) || '',
@@ -92,7 +95,7 @@ export default function BulkUploadPage() {
         commencement_date: dr(ed.commencement_date) || '',
         lease_term_months: dr(ed.lease_term_months) || '36',
         monthly_payment: dr(ed.monthly_payment) || '0',
-        annual_discount_rate: String(disc),
+        annual_discount_rate: discDisplay,
         initial_direct_costs: String(ed.initial_direct_costs ?? 0),
         currency: ed.currency || 'INR',
       });
@@ -111,6 +114,12 @@ export default function BulkUploadPage() {
       toast.error('Fill required fields');
       return;
     }
+    const rateRaw = parseFloat(formData.annual_discount_rate);
+    const ratePct = Number.isFinite(rateRaw) ? (rateRaw > 1 ? rateRaw / 100 : rateRaw) : 0;
+    if (ratePct <= 0) {
+      toast.error('IBR / Discount rate is required and must be > 0%. Typical range: 6–12%.');
+      return;
+    }
     setIsCalculating(true);
     try {
       const payload = {
@@ -118,10 +127,7 @@ export default function BulkUploadPage() {
         company_id: getCompanyId(),
         lease_term_months: parseInt(formData.lease_term_months),
         monthly_payment: parseFloat(formData.monthly_payment),
-        annual_discount_rate: (() => {
-          const v = parseFloat(formData.annual_discount_rate) || 0.085;
-          return v > 1 ? v / 100 : v;
-        })(),
+        annual_discount_rate: ratePct,
         initial_direct_costs: parseFloat(formData.initial_direct_costs),
       };
       const { data, error } = await ifrs16Api.calculate(payload);
@@ -176,8 +182,29 @@ export default function BulkUploadPage() {
         {uploadError && (
           <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-800 text-sm">
             <strong>Upload failed</strong>
-            <p className="mt-1">{uploadError}</p>
-            <p className="mt-2 text-xs text-red-600">Use PDF, DOCX, TXT, or Excel. Ensure the backend is running and ANTHROPIC_API_KEY is set for AI extraction.</p>
+            <p className="mt-1 whitespace-pre-wrap break-words">{uploadError}</p>
+            {isCustomerFacingBuild() ? (
+              <p className="mt-3 text-xs text-red-700">
+                You can still enter lease details manually below, or try again later.
+              </p>
+            ) : (
+              <p className="mt-3 text-xs text-red-700 space-y-1">
+                <span className="block">
+                  1. Backend must be running: <code className="bg-red-100 px-1 rounded">python app.py</code> (check the port matches Next.js — restart{' '}
+                  <code className="bg-red-100 px-1 rounded">npm run dev</code> after the backend if the port changed).
+                </span>
+                <span className="block">
+                  2. AI extraction needs <strong>ANTHROPIC_API_KEY</strong> in <code className="bg-red-100 px-1 rounded">IFRSAI\.env</code> (project root), then restart the backend.
+                </span>
+                <span className="block">
+                  3. For many leases without AI, use{' '}
+                  <Link href="/dashboard/ifrs16/bulk-upload" className="underline font-medium text-red-900">
+                    Portfolio bulk upload (Excel template)
+                  </Link>
+                  .
+                </span>
+              </p>
+            )}
           </div>
         )}
 
@@ -206,8 +233,9 @@ export default function BulkUploadPage() {
                 <input type="number" value={formData.monthly_payment} onChange={(e) => setFormData({ ...formData, monthly_payment: e.target.value })} className={inputClass} />
               </div>
               <div>
-                <label className="block text-sm font-medium text-[#1e293b] mb-2">Discount Rate</label>
-                <input type="number" step="0.01" value={formData.annual_discount_rate} onChange={(e) => setFormData({ ...formData, annual_discount_rate: e.target.value })} className={inputClass} placeholder="0.085" />
+                <label className="block text-sm font-medium text-[#1e293b] mb-2">IBR / Discount Rate % <span className="text-red-500">*</span></label>
+                <input type="number" step="0.01" min="0.01" max="100" value={formData.annual_discount_rate} onChange={(e) => setFormData({ ...formData, annual_discount_rate: e.target.value })} className={inputClass} placeholder="8.5 (required)" />
+                <p className="text-xs text-[#64748b] mt-1">Required. Typical range: 6–12%. IBR must be &gt; 0.</p>
               </div>
             </div>
             <div className="mt-6 flex gap-3">

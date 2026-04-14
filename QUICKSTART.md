@@ -150,13 +150,13 @@ python app.py
 ```
 
 **Visit:**
-- API Docs: http://localhost:8000/api/docs
-- Health Check: http://localhost:8000/api/health
+- API Docs: http://localhost:9000/api/docs
+- Health Check: http://localhost:9000/api/health
 
 **Test with curl:**
 
 ```bash
-curl http://localhost:8000/api/health
+curl http://localhost:9000/api/health
 ```
 
 **Response:**
@@ -175,7 +175,7 @@ curl http://localhost:8000/api/health
 **Using the API:**
 
 ```bash
-curl -X POST "http://localhost:8000/api/calculate" \
+curl -X POST "http://localhost:9000/api/calculate" \
   -H "Content-Type: application/json" \
   -d '{
     "lease_id": "LEASE-2024-001",
@@ -192,7 +192,7 @@ curl -X POST "http://localhost:8000/api/calculate" \
 
 ```bash
 # Get file_id from calculate response
-curl http://localhost:8000/api/download/{file_id} -o report.xlsx
+curl http://localhost:9000/api/download/{file_id} -o report.xlsx
 ```
 
 ---
@@ -269,7 +269,7 @@ python app.py
 python my_first_lease.py
 
 # Check health
-curl http://localhost:8000/api/health
+curl http://localhost:9000/api/health
 ```
 
 ---
@@ -333,7 +333,7 @@ You now have:
 ### Learn More:
 1. **Full Documentation**: [README.md](README.md)
 2. **Complete Examples**: Run `python example_usage.py`
-3. **API Reference**: http://localhost:8000/api/docs
+3. **API Reference**: http://localhost:9000/api/docs
 4. **Deployment Guide**: [DEPLOYMENT.md](DEPLOYMENT.md)
 
 ### Try Advanced Features:

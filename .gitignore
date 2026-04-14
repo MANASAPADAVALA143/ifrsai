@@ -19,6 +19,7 @@ build/
 outputs/
 uploads/
 chroma_db/
+ifrs_config.db
 
 # IDE
 .vscode/
@@ -51,6 +52,9 @@ yarn-error.log*
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local dev: written by python app.py so Next.js can proxy to the actual port
+api_dev_port.txt
 
 # Temporary files
 *.tmp

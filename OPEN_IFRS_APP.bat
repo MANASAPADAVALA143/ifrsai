@@ -3,17 +3,17 @@ echo ========================================
 echo Opening IFRS.ai Application
 echo ========================================
 echo.
-echo Opening http://localhost:3003 in your browser...
+echo Opening http://localhost:3004 in your browser...
 echo.
-start http://localhost:3003
+start http://localhost:3004
 echo.
 echo ========================================
 echo IFRS.ai Application URLs:
 echo ========================================
 echo.
-echo 🌐 Frontend: http://localhost:3003
-echo 🔧 Backend:  http://localhost:8000
-echo 📚 API Docs: http://localhost:8000/api/docs
+echo Frontend: http://localhost:3004
+echo 🔧 Backend:  http://localhost:9000
+echo 📚 API Docs: http://localhost:9000/api/docs
 echo.
 echo If the page doesn't load:
 echo 1. Wait 10-15 seconds for server to start

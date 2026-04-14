@@ -35,7 +35,7 @@
 
 **Lines of Code:** ~2,000  
 **Test Coverage:** Production-tested  
-**API Status:** Live at http://localhost:8000/api/docs
+**API Status:** Live at http://localhost:9000/api/docs
 
 ---
 
@@ -179,7 +179,7 @@ python example_all_products.py
 python app.py
 ```
 
-**Visit:** http://localhost:8000/api/docs
+**Visit:** http://localhost:9000/api/docs
 
 **Live Endpoints:**
 - `POST /api/calculate` - Calculate IFRS 16 lease
@@ -447,7 +447,7 @@ results = calc.calculate_full_ifrs9_ecl(portfolio)
 - **Quick Start:** [QUICKSTART.md](QUICKSTART.md)
 - **All Products:** [ALL_PRODUCTS_README.md](ALL_PRODUCTS_README.md)
 - **Deployment:** [DEPLOYMENT.md](DEPLOYMENT.md)
-- **API Docs:** http://localhost:8000/api/docs
+- **API Docs:** http://localhost:9000/api/docs
 
 ### Examples
 - **IFRS 16 Only:** `python example_usage.py`
