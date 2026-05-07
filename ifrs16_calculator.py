@@ -137,12 +137,14 @@ class IFRS16Calculator:
         
         ROU Asset = PV of lease payments + Initial direct costs - Lease incentives
         
-        Lease incentives include: rent-free period value, cash incentives received.
+        Lease incentives here are cash incentives received. Rent-free months are
+        reflected by zero lease payments in the cash-flow schedule, not deducted
+        again from the ROU asset.
         
         Args:
             lease_liability: PV of lease payments (lease liability)
             initial_costs: Initial direct costs (stamp duty, legal fees, etc.)
-            lease_incentives: Total lease incentives (rent-free value + cash incentive)
+            lease_incentives: Cash lease incentives received
             
         Returns:
             ROU asset value
@@ -201,9 +203,10 @@ class IFRS16Calculator:
         cpi_base = getattr(lease, 'cpi_index_base', Decimal('0')) or Decimal('0')
         cpi_cur = getattr(lease, 'cpi_index_current', Decimal('0')) or Decimal('0')
 
-        if months_since_rf % freq == 0:
+        if months_since_rf % freq == 0 and cpi_base > 0 and cpi_cur > 0:
+            base_lease_payment = self.get_lease_component_payment(lease)
             cpi_adjusted = self._get_cpi_adjusted_payment(
-                lease.monthly_payment,
+                base_lease_payment,
                 cpi_base,
                 cpi_cur,
             )
@@ -320,7 +323,7 @@ class IFRS16Calculator:
                     interest = actual_payment - principal
                     if interest < 0:
                         interest = Decimal('0')
-                    actual_payment = principal
+                    actual_payment = principal + interest
                 principal = principal.quantize(self.precision, ROUND_HALF_UP)
                 closing = (balance - principal).quantize(self.precision, ROUND_HALF_UP)
                 closing = max(Decimal('0'), closing)
@@ -406,28 +409,52 @@ class IFRS16Calculator:
                 }
             ]
         
+        initial_entries = [
+            {
+                'account': 'Right-of-Use Asset',
+                'account_type': 'Non-Current Asset',
+                'dr': float(rou_asset),
+                'cr': 0,
+                'narration': 'Recognition of ROU asset'
+            },
+            {
+                'account': 'Lease Liability',
+                'account_type': 'Current & Non-Current Liability',
+                'dr': 0,
+                'cr': float(lease_liability),
+                'narration': 'Recognition of lease liability at PV'
+            }
+        ]
+        initial_total_dr = rou_asset
+        initial_total_cr = lease_liability
+        net_initial_cash = (rou_asset - lease_liability).quantize(self.precision, ROUND_HALF_UP)
+        if net_initial_cash > 0:
+            initial_entries.append({
+                'account': 'Cash/Bank',
+                'account_type': 'Current Asset',
+                'dr': 0,
+                'cr': float(net_initial_cash),
+                'narration': 'Net initial direct costs paid less cash lease incentives received'
+            })
+            initial_total_cr += net_initial_cash
+        elif net_initial_cash < 0:
+            cash_received = abs(net_initial_cash)
+            initial_entries.append({
+                'account': 'Cash/Bank',
+                'account_type': 'Current Asset',
+                'dr': float(cash_received),
+                'cr': 0,
+                'narration': 'Net cash lease incentives received in excess of initial direct costs'
+            })
+            initial_total_dr += cash_received
+
         return {
             'initial_recognition': {
                 'date': 'Commencement Date',
                 'description': 'Initial recognition of lease under IFRS 16',
-                'entries': [
-                    {
-                        'account': 'Right-of-Use Asset',
-                        'account_type': 'Non-Current Asset',
-                        'dr': float(rou_asset),
-                        'cr': 0,
-                        'narration': 'Recognition of ROU asset'
-                    },
-                    {
-                        'account': 'Lease Liability',
-                        'account_type': 'Current & Non-Current Liability',
-                        'dr': 0,
-                        'cr': float(lease_liability),
-                        'narration': 'Recognition of lease liability at PV'
-                    }
-                ],
-                'total_dr': float(rou_asset),
-                'total_cr': float(lease_liability)
+                'entries': initial_entries,
+                'total_dr': float(initial_total_dr),
+                'total_cr': float(initial_total_cr)
             },
             'monthly_depreciation': {
                 'description': 'Monthly depreciation expense (recurring entry)',
@@ -556,15 +583,11 @@ class IFRS16Calculator:
                 pv_rvg = rvg_expected
         lease_liability = pv_regular_payments + pv_rvg
         
-        # Step 2: Compute lease incentives (rent-free value + cash incentive)
+        # Step 2: Compute lease incentives. Rent-free months are already reflected
+        # as zero payments in the PV cash flows; do not deduct them again.
         rent_free = getattr(lease, 'rent_free_months', 0) or 0
         cash_incentive = getattr(lease, 'cash_incentive', Decimal('0')) or Decimal('0')
-        rent_free_value = (
-            effective_payment * Decimal(str(rent_free))
-            if rent_free > 0
-            else Decimal('0')
-        )
-        total_lease_incentives = rent_free_value + cash_incentive
+        total_lease_incentives = cash_incentive
         
         # Step 3: Calculate ROU Asset (PV + IDC - lease incentives)
         rou_asset = self.calculate_rou_asset(
@@ -697,9 +720,10 @@ class IFRS16Calculator:
             ),
             'incentive_disclosure_note': (
                 f"The lease includes a rent-free period of {rent_free} months commencing {lease.commencement_date.strftime('%Y-%m-%d')}. "
-                f"Lease incentives of {format_currency_value(float(total_lease_incentives), str(lease.currency))} have been deducted from the right-of-use asset at commencement "
+                f"The rent-free period is reflected as zero lease payments in those months. "
+                f"Cash lease incentives of {format_currency_value(float(cash_incentive), str(lease.currency))} have been deducted from the right-of-use asset at commencement "
                 f"in accordance with IFRS 16 paragraph 24."
-                if total_lease_incentives > 0
+                if rent_free > 0 or cash_incentive > 0
                 else None
             ),
         }
