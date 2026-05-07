@@ -27,6 +27,11 @@ const defaultConfig = {
   },
 };
 
+interface AlertResponse {
+  status: string;
+  message: string;
+}
+
 function loadConfig(): typeof defaultConfig {
   if (typeof window === 'undefined') return defaultConfig;
   try {
@@ -100,10 +105,11 @@ export default function AlertsPage() {
     }
     setLoading(true);
     const { data, error } = await alertsApi.sendTest({ email: config.email });
+    const typedData = data as AlertResponse | undefined;
     setLoading(false);
     if (error) toast.error(error);
-    else if (data?.status === 'sent') toast.success('Test email sent!');
-    else toast.success(data?.message || 'Check config');
+    else if (typedData?.status === 'sent') toast.success('Test email sent!');
+    else toast.success(typedData?.message || 'Check config');
   };
 
   const visibleAlerts = alerts.filter((a) => !dismissed.has(a.id + (a.type || '')));

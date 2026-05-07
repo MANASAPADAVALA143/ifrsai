@@ -5,7 +5,7 @@ AI-powered extraction of revenue recognition terms using Claude API
 
 import anthropic
 import json
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from decimal import Decimal
 import os
@@ -394,4 +394,220 @@ if __name__ == "__main__":
         
     except Exception as e:
         print(f"\nError: {e}")
+
+
+def read_contract_file_to_text(file_path: str) -> str:
+    """
+    Read raw contract text from supported file types (same extensions as extract_from_file).
+    Used for clause detection without altering extraction behaviour.
+    """
+    file_path_obj = Path(file_path)
+    if not file_path_obj.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    if file_path_obj.suffix.lower() == ".txt":
+        with open(file_path_obj, "r", encoding="utf-8") as f:
+            return f.read()
+
+    if file_path_obj.suffix.lower() == ".pdf":
+        try:
+            from PyPDF2 import PdfReader
+
+            reader = PdfReader(str(file_path_obj))
+            parts: List[str] = []
+            for page in reader.pages:
+                parts.append(page.extract_text() or "")
+            return "\n".join(parts)
+        except ImportError:
+            raise ImportError("PyPDF2 not installed. Run: pip install PyPDF2")
+
+    if file_path_obj.suffix.lower() in [".docx", ".doc"]:
+        try:
+            from docx import Document
+
+            doc = Document(str(file_path_obj))
+            return "\n".join([para.text for para in doc.paragraphs])
+        except ImportError:
+            raise ImportError("python-docx not installed. Run: pip install python-docx")
+
+    if file_path_obj.suffix.lower() in [".xlsx", ".xls"]:
+        try:
+            import pandas as pd
+
+            excel_file = pd.ExcelFile(str(file_path_obj))
+            contract_text = ""
+            for sheet_name in excel_file.sheet_names:
+                contract_text += f"\n=== Sheet: {sheet_name} ===\n"
+                df = pd.read_excel(excel_file, sheet_name=sheet_name)
+                contract_text += " | ".join(str(col) for col in df.columns) + "\n"
+                contract_text += "-" * 80 + "\n"
+                for _, row in df.iterrows():
+                    row_text = " | ".join(str(val) if pd.notna(val) else "" for val in row.values)
+                    contract_text += row_text + "\n"
+                contract_text += "\n"
+            return contract_text
+        except ImportError:
+            raise ImportError("pandas and openpyxl not installed. Run: pip install pandas openpyxl")
+
+    raise ValueError(f"Unsupported file type: {file_path_obj.suffix}")
+
+
+def _enforce_overall_risk(clauses: List[Dict[str, Any]]) -> str:
+    if not clauses:
+        return "CLEAN"
+    sev = [str((c or {}).get("severity", "")).upper() for c in clauses]
+    if any(s == "HIGH" for s in sev):
+        return "HIGH"
+    if any(s == "MEDIUM" for s in sev):
+        return "MEDIUM"
+    if any(s == "LOW" for s in sev):
+        return "LOW"
+    return "CLEAN"
+
+
+def detect_nonstandard_clauses(contract_text: str, api_key: Optional[str] = None) -> Dict[str, Any]:
+    """
+    AI scan for IFRS 15–relevant non-standard clauses. Returns counts and overall_risk.
+    """
+    key = (api_key or os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        return {
+            "clauses": [],
+            "clauses_found": 0,
+            "high_severity": 0,
+            "medium_severity": 0,
+            "low_severity": 0,
+            "overall_risk": "CLEAN",
+            "summary": "Clause detection unavailable: ANTHROPIC_API_KEY not configured.",
+        }
+
+    client = anthropic.Anthropic(api_key=key)
+
+    system_prompt = """
+You are an IFRS 15 technical accounting expert.
+Read the contract text and identify every clause
+that could affect revenue recognition under IFRS 15.
+
+Return ONLY valid JSON in exactly this structure.
+No preamble. No markdown. No explanation.
+Just the JSON object.
+
+{
+  "clauses": [
+    {
+      "clause_type": "FREE_PERIOD",
+      "severity": "HIGH",
+      "exact_quote": "max 50 words from contract",
+      "ifrs15_impact": "what this means for revenue",
+      "recommended_treatment": "how to account for it",
+      "paragraph_reference": "IFRS 15.XX"
+    }
+  ],
+  "overall_risk": "HIGH",
+  "summary": "one sentence summary"
+}
+
+Clause types to detect:
+FREE_PERIOD — free months, trial periods,
+  promotional pricing
+REFUND_RIGHT — money-back, satisfaction clauses,
+  refund on cancellation
+PRICE_CAP — maximum price escalation limits,
+  rate locks
+PRICE_ESCALATION — CPI-linked, annual increases
+IMPLICIT_PROMISE — support, upgrades, updates
+  mentioned but not separately priced
+CUSTOMER_OPTION — rights to purchase additional
+  goods at discounted or free price
+VARIABLE_USAGE — usage-based billing,
+  pay-per-use components
+PENALTY_CLAUSE — liquidated damages, SLA penalties
+  that reduce consideration
+EXTENDED_PAYMENT — payment terms beyond 12 months
+  (significant financing component test)
+LICENCE_RESTRICTION — territory limits, user caps
+  affecting distinct PO assessment
+PRINCIPAL_AGENT_INDICATOR — third-party involvement,
+  reseller or distribution arrangements
+CANCELLATION_RIGHT — customer cancellation rights,
+  notice periods, exit clauses
+
+Severity rules:
+HIGH — directly changes the amount or timing
+  of revenue that would otherwise be recognised
+MEDIUM — requires judgment but likely manageable
+LOW — minor consideration, document and monitor
+
+overall_risk:
+  Any HIGH clause → "HIGH"
+  Any MEDIUM, no HIGH → "MEDIUM"
+  Only LOW or none → "LOW"
+  No clauses found → "CLEAN"
+
+If no non-standard clauses found:
+  return {"clauses": [], "overall_risk": "CLEAN",
+          "summary": "No non-standard clauses detected.
+          Standard IFRS 15 treatment applies."}
+"""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2000,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Contract text:\n\n{(contract_text or '')[:8000]}",
+                }
+            ],
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            raw = raw.strip()
+            if raw.lower().startswith("json"):
+                raw = raw[4:].lstrip()
+        result = json.loads(raw.strip())
+        clauses = list(result.get("clauses") or [])
+        if not clauses:
+            out = {
+                "clauses": [],
+                "clauses_found": 0,
+                "high_severity": 0,
+                "medium_severity": 0,
+                "low_severity": 0,
+                "overall_risk": "CLEAN",
+                "summary": (
+                    result.get("summary")
+                    or "No non-standard clauses detected. Standard IFRS 15 treatment applies."
+                ),
+            }
+            return out
+
+        high = len([c for c in clauses if str((c or {}).get("severity", "")).upper() == "HIGH"])
+        medium = len([c for c in clauses if str((c or {}).get("severity", "")).upper() == "MEDIUM"])
+        low = len([c for c in clauses if str((c or {}).get("severity", "")).upper() == "LOW"])
+        overall = _enforce_overall_risk(clauses)
+        result["clauses"] = clauses
+        result["overall_risk"] = overall
+        result["clauses_found"] = len(clauses)
+        result["high_severity"] = high
+        result["medium_severity"] = medium
+        result["low_severity"] = low
+        if not (result.get("summary") or "").strip():
+            result["summary"] = f"{len(clauses)} clause(s) flagged for IFRS 15 review."
+        return result
+
+    except Exception as e:
+        return {
+            "clauses": [],
+            "clauses_found": 0,
+            "high_severity": 0,
+            "medium_severity": 0,
+            "low_severity": 0,
+            "overall_risk": "CLEAN",
+            "summary": f"Clause detection unavailable: {str(e)}",
+        }
 

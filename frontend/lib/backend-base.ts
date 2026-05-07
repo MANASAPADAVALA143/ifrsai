@@ -9,6 +9,10 @@ export function getBackendBaseUrl(): string {
   const explicit = process.env.NEXT_PUBLIC_API_URL?.trim();
   if (explicit) return explicit.replace(/\/$/, "");
 
+  /** Server-only: Vercel / Node proxy to Python (Render, Railway, Fly, etc.). Leave NEXT_PUBLIC_API_URL unset so the browser uses same-origin /api/*. */
+  const internalBackend = process.env.BACKEND_URL?.trim();
+  if (internalBackend) return internalBackend.replace(/\/$/, "");
+
   const fromEnvPort = process.env.BACKEND_PORT?.trim();
   if (fromEnvPort && /^\d+$/.test(fromEnvPort)) {
     return `http://127.0.0.1:${fromEnvPort}`;

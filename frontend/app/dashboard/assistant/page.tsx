@@ -13,6 +13,11 @@ interface Message {
   sources?: unknown[];
 }
 
+interface AskResponse {
+  answer: string;
+  sources: string[];
+}
+
 export default function AssistantPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -44,13 +49,14 @@ export default function AssistantPage() {
         throw new Error(error);
       }
 
-      if (data) {
+      const typedData = data as AskResponse | undefined;
+      if (typedData) {
         setMessages((prev) => [
           ...prev,
           {
             role: 'assistant',
-            content: data.answer,
-            sources: data.sources,
+            content: typedData.answer,
+            sources: typedData.sources,
           },
         ]);
       }
@@ -70,7 +76,7 @@ export default function AssistantPage() {
   };
 
   return (
-    <SidebarLayout>
+    <SidebarLayout pageTitle="AI Assistant" pageSubtitle="Ask questions about your IFRS data">
       <div className="flex flex-col h-[calc(100vh-8rem)] max-w-3xl mx-auto">
         <h1 className="text-xl font-semibold text-text-primary mb-2">AI Assistant</h1>
         <p className="text-sm text-text-muted mb-6">

@@ -26,4 +26,5 @@ export {
   ScatterChart,
   ReferenceLine,
   ReferenceArea,
+  LabelList,
 } from 'recharts';

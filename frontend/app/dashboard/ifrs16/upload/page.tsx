@@ -12,6 +12,11 @@ import { useRouter } from 'next/navigation';
 import toast from 'react-hot-toast';
 import { isCustomerFacingBuild } from '@/lib/service-messages';
 
+interface LeaseCalculateResponse {
+  results: Record<string, unknown>;
+  excel_file_id: string;
+}
+
 function getVal(obj: any): any {
   if (obj == null) return null;
   if (typeof obj === 'object' && 'value' in obj) return obj.value;
@@ -131,6 +136,7 @@ export default function BulkUploadPage() {
         initial_direct_costs: parseFloat(formData.initial_direct_costs),
       };
       const { data, error } = await ifrs16Api.calculate(payload);
+      const typedData = data as LeaseCalculateResponse | undefined;
       if (error) {
         toast.error(String(error));
         return;
@@ -144,8 +150,8 @@ export default function BulkUploadPage() {
         currency: formData.currency,
         lessee_name: formData.lessee_name,
         lessor_name: formData.lessor_name,
-        results: data?.results || {},
-        excel_file_id: data?.excel_file_id,
+        results: typedData?.results || {},
+        excel_file_id: typedData?.excel_file_id,
       });
       saveToLeaseRepository(entry);
       toast.success('Saved to repository');

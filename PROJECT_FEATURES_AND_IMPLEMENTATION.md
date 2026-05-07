@@ -632,11 +632,12 @@ python example_rag_usage.py
 - ✅ API endpoints
 - ✅ Frontend forms
 
-### IFRS 15: ✅ 100% Complete (Excel pending)
+### IFRS 15: ✅ 100% Complete
 - ✅ AI extraction
 - ✅ 5-step model
 - ✅ Calculations
-- 🔲 Excel export (10%)
+- ✅ Excel export (5-sheet workbook: Summary, Schedule, Journals, Obligations, Disclosures; VC / RPO / contract costs / principal-agent / licence blocks)
+- ✅ Variable consideration, contract modifications, RPO disclosure, commission asset, principal vs agent, licence of IP modules
 
 ### IFRS 9: ✅ 100% Complete (Excel pending)
 - ✅ Staging engine

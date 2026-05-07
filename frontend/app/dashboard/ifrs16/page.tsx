@@ -245,7 +245,7 @@ export default function IFRS16DashboardPage() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="month" tick={{ fontSize: 11 }} stroke="#64748b" />
                 <YAxis tick={{ fontSize: 11 }} stroke="#64748b" tickFormatter={(v) => `${(v / 1e6).toFixed(1)}M`} />
-                <Tooltip formatter={(v: number) => [formatIndianCurrency(v), 'Liability']} />
+                <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? [formatIndianCurrency(Number(value)), 'Liability'] : '')} />
                 <Area type="monotone" dataKey="liability" stroke="#f97316" fill="url(#liabilityGrad)" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
@@ -268,7 +268,7 @@ export default function IFRS16DashboardPage() {
                     <Cell key={i} fill={ORANGE_SHADES[i % ORANGE_SHADES.length]} />
                   ))}
                 </Pie>
-                <Tooltip formatter={(v: number, n: string) => [v, n]} />
+                <Tooltip formatter={(value: number | string | undefined, name: string | undefined) => (value !== undefined ? [Number(value), name ?? ''] : '')} />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -281,7 +281,7 @@ export default function IFRS16DashboardPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
               <XAxis dataKey="month" tick={{ fontSize: 11 }} stroke="#64748b" />
               <YAxis tick={{ fontSize: 11 }} stroke="#64748b" tickFormatter={(v) => `${(v / 1e5).toFixed(1)}L`} />
-              <Tooltip formatter={(v: number) => [formatIndianCurrency(v), 'Payment']} />
+              <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? [formatIndianCurrency(Number(value)), 'Payment'] : '')} />
               <Bar dataKey="payment" fill="#f97316" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>

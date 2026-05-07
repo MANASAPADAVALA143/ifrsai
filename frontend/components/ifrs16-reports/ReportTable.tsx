@@ -14,6 +14,8 @@ interface ReportTableProps {
   freezeColumns?: number;
   rowClassName?: (row: Record<string, React.ReactNode>, index: number) => string;
   leaseIdKey?: string;
+  linkColumnKey?: string;
+  linkHrefKey?: string;
 }
 
 export function ReportTable({

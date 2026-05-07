@@ -18,6 +18,7 @@ import {
   CheckCircle,
   Copy,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { ifrs9Api } from '@/lib/api';
 import {
   getEclPortfolioById,
@@ -37,7 +38,7 @@ import toast from 'react-hot-toast';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from '@/components/Charts';
 
 const TAB_IDS = ['instrument', 'classification', 'staging', 'ecl', 'scenario', 'results'] as const;
-const TABS: { id: (typeof TAB_IDS)[number]; label: string; icon: any }[] = [
+const TABS: { id: (typeof TAB_IDS)[number]; label: string; icon: LucideIcon }[] = [
   { id: 'instrument', label: 'Instrument Details', icon: FileText },
   { id: 'classification', label: 'Classification', icon: BarChart3 },
   { id: 'staging', label: 'Staging', icon: AlertTriangle },
@@ -61,6 +62,24 @@ const CURRENCIES = ['INR', 'USD', 'EUR', 'GBP', 'AED', 'SGD'];
 const inputClass =
   'w-full px-4 py-2.5 bg-white border border-[#e2e8f0] rounded-lg focus:ring-2 focus:ring-[#f97316]/30 focus:border-[#f97316] text-[#1e293b] font-mono';
 const labelClass = 'block text-xs font-medium text-[#64748b] uppercase tracking-wide mb-1.5';
+
+function coerceChartNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'number' && !Number.isNaN(value)) return value;
+  if (typeof value === 'string' && value !== '') {
+    const n = Number(value);
+    return Number.isNaN(n) ? undefined : n;
+  }
+  if (Array.isArray(value) && value.length > 0) return coerceChartNumber(value[0]);
+  return undefined;
+}
+
+function formatScenarioTooltip(value: unknown, name?: unknown): [string, string] {
+  const n = coerceChartNumber(value);
+  const v = n !== undefined ? `$${n.toLocaleString()}` : '';
+  const nm = typeof name === 'string' ? name : name != null ? String(name) : 'ECL';
+  return [v, nm];
+}
 
 function StageBadge({ stage }: { stage: 1 | 2 | 3 }) {
   const labels = { 1: 'Stage 1 — 12M ECL', 2: 'Stage 2 — Lifetime ECL', 3: 'Stage 3 — Credit Impaired' };
@@ -184,27 +203,39 @@ export default function PortfolioDetailPage() {
         return;
       }
       const d = res.data;
-      update({
+      console.log('IFRS9 API RESPONSE:', JSON.stringify(d, null, 2));
+      const notes =
+        typeof d.disclosure_notes === 'string'
+          ? d.disclosure_notes
+          : d.disclosure_notes != null
+            ? JSON.stringify(d.disclosure_notes)
+            : undefined;
+      const patch: Partial<ECLPortfolioEntry> = {
         ecl12m: d.ecl_12m ?? undefined,
         eclLifetime: d.ecl_lifetime ?? undefined,
-        applicableEcl: d.applicable_ecl,
-        coverageRatio: d.coverage_ratio,
-        scenarioResults: d.scenario_results,
-        journalEntries: d.journal_entries,
-        disclosureNotes: d.disclosure_notes,
-      });
+        applicableEcl: d.applicable_ecl as number | undefined,
+        coverageRatio: d.coverage_ratio as number | undefined,
+        scenarioResults: d.scenario_results as ECLPortfolioEntry['scenarioResults'],
+        journalEntries: d.journal_entries as ECLPortfolioEntry['journalEntries'],
+        disclosureNotes: notes,
+      };
+      let next: ECLPortfolioEntry = { ...portfolio, ...patch };
       if (portfolio.provisionMatrix && d.bucket_results?.length) {
-        const matrix = portfolio.provisionMatrix.map((row, i) => {
-          const b = d.bucket_results[i];
-          return b ? { ...row, eclAmount: b.ecl ?? row.eclAmount } : row;
-        });
-        update({ provisionMatrix: matrix });
+        next = {
+          ...next,
+          provisionMatrix: portfolio.provisionMatrix.map((row, i) => {
+            const b = d.bucket_results?.[i];
+            return b ? { ...row, eclAmount: Number(b.ecl ?? row.eclAmount ?? 0) } : row;
+          }),
+        };
       }
-      toast.success('ECL calculated');
+      saveToEclPortfolioRepository(next);
+      setPortfolio(next);
+      toast.success('ECL calculated and saved to portfolio');
     } finally {
       setCalculating(false);
     }
-  }, [portfolio, update]);
+  }, [portfolio]);
 
   const handleSave = useCallback(() => {
     if (!portfolio) return;
@@ -848,7 +879,7 @@ export default function PortfolioDetailPage() {
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                     <XAxis dataKey="name" tick={{ fontSize: 11 }} />
                     <YAxis tickFormatter={(v) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : `${(v / 1e3).toFixed(0)}K`)} />
-                    <Tooltip formatter={(v: number) => [formatIndianCurrency(v), 'ECL']} />
+                    <Tooltip formatter={(v, n) => formatScenarioTooltip(v, n)} />
                     <Bar dataKey="ecl" radius={[4, 4, 0, 0]} />
                     <ReferenceLine y={p.scenarioResults.weighted} stroke="#f97316" strokeDasharray="4 4" label="Weighted" />
                   </BarChart>

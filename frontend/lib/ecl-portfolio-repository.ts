@@ -96,9 +96,9 @@ export interface ECLPortfolioEntry {
   disclosureNotes?: string;
   /** Scenario analysis */
   scenarios?: {
-    base: { gdp: number; unemployment: number; interestRate: number; weight: number; pd?: number; ecl?: number };
-    optimistic: { gdp: number; unemployment: number; interestRate: number; weight: number; pd?: number; ecl?: number };
-    pessimistic: { gdp: number; unemployment: number; interestRate: number; weight: number; pd?: number; ecl?: number };
+    base?: { gdp: number; unemployment: number; interestRate: number; weight: number; pd?: number; ecl?: number };
+    optimistic?: { gdp: number; unemployment: number; interestRate: number; weight: number; pd?: number; ecl?: number };
+    pessimistic?: { gdp: number; unemployment: number; interestRate: number; weight: number; pd?: number; ecl?: number };
   };
   /** Audit */
   status: 'Draft' | 'Pending Review' | 'Approved' | 'Archived';

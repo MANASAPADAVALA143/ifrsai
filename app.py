@@ -319,10 +319,133 @@ class IFRS15CalculateRequest(BaseModel):
     can_estimate_volume: bool = True
     sla_items: list = Field(default_factory=list)
     performance_obligations: List[PerformanceObligationRequest]
+    payment_terms: str = ""
 
 
 class IFRS15ClassifyContractRequest(BaseModel):
     contract_text: str = Field(..., min_length=1)
+
+
+class IFRS15ModificationRequest(BaseModel):
+    original_contract_id: str
+    modification_date: str
+    new_goods_services: List[str]
+    price_change: float
+    revenue_recognised_to_date: float
+    remaining_periods: int
+    original_price: float
+    new_goods_are_distinct: bool
+    price_reflects_standalone: bool
+    remaining_goods_are_distinct: bool
+
+
+class IFRS15DownloadExcelRequest(BaseModel):
+    contract_id: str
+    customer_name: Optional[str] = ""
+    effective_date: Optional[str] = None
+    contract_term_months: Optional[int] = 0
+    currency: Optional[str] = "USD"
+    results: Dict[str, Any]
+    master_report_data: Optional[Dict[str, Any]] = None
+
+
+class VariableScenario(BaseModel):
+    outcome: str
+    amount: float
+    probability: float = 0.0  # 0.0 to 1.0
+
+
+class IFRS15VariableConsiderationRequest(BaseModel):
+    method: str  # "expected_value" | "scenario_weighted" | "most_likely"
+    scenarios: List[VariableScenario]
+    constraint_factors: List[bool]  # exactly 5 items
+    contract_id: Optional[str] = None
+    total_contract_value: Optional[float] = None
+
+
+class IFRS15ReversalRiskRequest(BaseModel):
+    contract_id: Optional[str] = None
+    constraint_level: str
+    contract_term_months: int
+    customer_type: str
+    variable_consideration: float
+    total_contract_value: float
+    refund_type: str = "none"  # none | partial | full
+    recognition_type: str  # over_time | point_in_time
+    historical_attainment_pct: Optional[float] = None
+    has_external_dependency: bool = False
+    dependency_level: str = "low"  # low | medium | high
+
+
+class RPOObligation(BaseModel):
+    obligation_name: str
+    allocated_amount: float
+    recognised_to_date: float
+    expected_end_date: str  # ISO date string
+    original_expected_duration_months: Optional[float] = None
+    is_right_to_invoice: bool = False
+
+
+class IFRS15RPORequest(BaseModel):
+    obligations: List[RPOObligation]
+    contract_id: Optional[str] = None
+
+
+class IFRS15ContractCostsRequest(BaseModel):
+    commission_amount: float
+    contract_term_months: int
+    contract_total_value: float
+    contract_id: Optional[str] = None
+
+
+class IFRS15PrincipalAgentRequest(BaseModel):
+    transaction_price: float
+    cost_paid_to_supplier: float
+    obtains_before_transfer: bool
+    sets_price_independently: bool
+    primarily_responsible: bool
+    contract_id: Optional[str] = None
+
+
+class IFRS15LicenseRequest(BaseModel):
+    transaction_price: float
+    licence_term_months: int
+    licence_start_date: str
+    significantly_affects_ip: bool
+    customer_exposed_as_occurs: bool
+    activities_not_separate_good: bool
+    includes_usage_royalties: bool
+    contract_id: Optional[str] = None
+
+
+class IFRS15MasterReportRequest(BaseModel):
+    contract_id: str
+    customer_name: str = ""
+    core_results: Dict[str, Any]
+    modification_result: Optional[Dict[str, Any]] = None
+    variable_consideration_result: Optional[Dict[str, Any]] = None
+    rpo_result: Optional[Dict[str, Any]] = None
+    contract_costs_result: Optional[Dict[str, Any]] = None
+    principal_agent_result: Optional[Dict[str, Any]] = None
+    license_result: Optional[Dict[str, Any]] = None
+
+
+class IFRS15MasterReportExcelRequest(BaseModel):
+    master_report: Dict[str, Any]
+
+
+class IFRS15ClientReportRequest(BaseModel):
+    contract_id: str
+    customer_name: str
+    calculation_results: Dict[str, Any]
+    master_report_data: Optional[Dict[str, Any]] = None
+    include_auditor_qa: bool = True
+    prepared_by: str = "IFRS AI"
+
+
+class IFRS15DisclosureScorerRequest(BaseModel):
+    disclosure_text: str
+    calculation_results: Optional[Dict[str, Any]] = None
 
 
 # Helper Functions
@@ -1180,18 +1303,40 @@ class IFRS15ExtractRequest(BaseModel):
     contract_text: str = Field(..., description="Contract text to extract")
 
 
+class IFRS15ClauseDetectionRequest(BaseModel):
+    contract_text: str
+
+
+@app.post("/api/ifrs15/detect-clauses")
+async def ifrs15_detect_clauses(request: IFRS15ClauseDetectionRequest):
+    """Standalone IFRS 15 non-standard clause scan (same engine as upload)."""
+    try:
+        from ifrs15_extractor import detect_nonstandard_clauses
+
+        return detect_nonstandard_clauses(request.contract_text, api_key=ANTHROPIC_API_KEY)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/ifrs15/extract")
 async def ifrs15_extract(request: IFRS15ExtractRequest):
     """Extract IFRS 15 terms from pasted contract text"""
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=503, detail="Claude API not configured.")
     try:
-        from ifrs15_extractor import IFRS15ContractExtractor
+        from ifrs15_extractor import IFRS15ContractExtractor, detect_nonstandard_clauses
+
         extractor = IFRS15ContractExtractor(api_key=ANTHROPIC_API_KEY)
         extracted_data = extractor.extract_contract_terms(request.contract_text)
         validation = extractor.validate_ifrs15_extraction(extracted_data)
+        clause_detection = detect_nonstandard_clauses(request.contract_text, api_key=ANTHROPIC_API_KEY)
         gc.collect()
-        return {"status": "success", "extracted_data": extracted_data, "validation": validation}
+        return {
+            "status": "success",
+            "extracted_data": extracted_data,
+            "validation": validation,
+            "clause_detection": clause_detection,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1215,19 +1360,26 @@ async def ifrs15_upload_contract(file: UploadFile = File(...)):
         upload_path = UPLOAD_DIR / f"ifrs15_{file_id}_{file.filename}"
         with open(upload_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        from ifrs15_extractor import IFRS15ContractExtractor
+        from ifrs15_extractor import IFRS15ContractExtractor, detect_nonstandard_clauses, read_contract_file_to_text
+
         extractor = IFRS15ContractExtractor(api_key=ANTHROPIC_API_KEY)
         extracted_data = extractor.extract_from_file(str(upload_path))
         validation = extractor.validate_ifrs15_extraction(extracted_data)
         extraction_file = OUTPUT_DIR / f"ifrs15_extraction_{file_id}.json"
         extractor.save_extraction(extracted_data, str(extraction_file))
+        try:
+            contract_text = read_contract_file_to_text(str(upload_path))
+        except Exception:
+            contract_text = ""
+        clause_detection = detect_nonstandard_clauses(contract_text, api_key=ANTHROPIC_API_KEY)
         gc.collect()
         return {
             "status": "success",
             "file_id": file_id,
             "filename": file.filename,
             "extracted_data": extracted_data,
-            "validation": validation
+            "validation": validation,
+            "clause_detection": clause_detection,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1284,7 +1436,8 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
             estimated_annual_volume=Decimal(str(request.estimated_annual_volume)),
             can_estimate_volume=request.can_estimate_volume,
             sla_items=request.sla_items,
-            performance_obligations=obligations
+            performance_obligations=obligations,
+            payment_terms=(request.payment_terms or "").strip(),
         )
         calc = IFRS15Calculator()
         results = calc.calculate_full_ifrs15(contract, cash_received=Decimal(str(request.cash_received)))
@@ -1295,9 +1448,19 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
         safe_id = "".join(c for c in request.contract_id if c.isalnum() or c in "-_")[:30]
         excel_path = OUTPUT_DIR / f"IFRS15_{safe_id}_{file_id}.xlsx"
         try:
-            import pandas as pd
-            df = pd.DataFrame(results_json.get('recognition_schedule', []))
-            df.to_excel(str(excel_path), index=False, sheet_name='Revenue Schedule')
+            from ifrs15_excel_export import IFRS15ExcelExporter
+            exporter = IFRS15ExcelExporter()
+            exporter.export_ifrs15_workbook(
+                results=results_json,
+                contract_meta={
+                    "contract_id": request.contract_id,
+                    "customer_name": request.customer_name,
+                    "effective_date": request.effective_date,
+                    "contract_term_months": request.contract_term_months,
+                    "currency": request.currency,
+                },
+                filename=str(excel_path),
+            )
         except Exception:
             pass
         gc.collect()
@@ -1309,6 +1472,267 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/download-excel")
+async def ifrs15_download_excel(request: IFRS15DownloadExcelRequest):
+    """Generate IFRS 15 six-sheet audit workbook (master summary + five core sheets) from calculation results."""
+    try:
+        from ifrs15_excel_export import IFRS15ExcelExporter
+
+        file_id = str(uuid.uuid4())
+        safe_id = "".join(c for c in request.contract_id if c.isalnum() or c in "-_")[:30]
+        excel_path = OUTPUT_DIR / f"IFRS15_{safe_id}_{file_id}.xlsx"
+
+        exporter = IFRS15ExcelExporter()
+        res = request.results or {}
+        exporter.export_ifrs15_workbook(
+            results=res,
+            contract_meta={
+                "contract_id": request.contract_id,
+                "customer_name": request.customer_name or "",
+                "effective_date": request.effective_date or "",
+                "contract_term_months": request.contract_term_months or 0,
+                "currency": request.currency or "USD",
+                "variable_consideration_assessment": res.get("variable_consideration_assessment"),
+                "rpo_disclosure": res.get("rpo_disclosure"),
+                "contract_costs_assessment": res.get("contract_costs_assessment"),
+                "principal_agent_assessment": res.get("principal_agent_assessment"),
+                "license_classification": res.get("license_classification"),
+            },
+            filename=str(excel_path),
+            master_report=request.master_report_data,
+        )
+
+        gc.collect()
+        return {"status": "success", "file_id": file_id, "filename": excel_path.name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/modification")
+async def ifrs15_modification(request: IFRS15ModificationRequest):
+    """Assess IFRS 15 contract modification type and accounting impact."""
+    try:
+        from ifrs15_calculator import IFRS15ModificationEngine
+
+        engine = IFRS15ModificationEngine()
+        result = engine.assess_modification(request.model_dump())
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/variable-consideration")
+async def ifrs15_variable_consideration(request: IFRS15VariableConsiderationRequest):
+    """Estimate and constrain variable consideration (IFRS 15.50–58)."""
+    if len(request.constraint_factors) != 5:
+        raise HTTPException(status_code=400, detail="constraint_factors must have exactly 5 values")
+    try:
+        from ifrs15_calculator import IFRS15VariableConsiderationEngine
+
+        body: Dict[str, Any] = {
+            "method": request.method,
+            "scenarios": [s.model_dump() for s in request.scenarios],
+            "constraint_factors": list(request.constraint_factors),
+        }
+        if request.total_contract_value is not None:
+            body["total_contract_value"] = request.total_contract_value
+        engine = IFRS15VariableConsiderationEngine()
+        return engine.estimate(body)
+    except ValueError as e:
+        msg = str(e)
+        if "Probabilities must sum" in msg or "100%" in msg:
+            raise HTTPException(status_code=400, detail="Probabilities must sum to 100%")
+        raise HTTPException(status_code=400, detail=msg)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/reversal-risk")
+async def ifrs15_reversal_risk(request: IFRS15ReversalRiskRequest):
+    """Revenue reversal risk score from VC constraint and contract profile."""
+    try:
+        from ifrs15_calculator import IFRS15ReversalRiskEngine
+
+        engine = IFRS15ReversalRiskEngine()
+        return engine.score(request.model_dump())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/rpo")
+async def ifrs15_rpo(request: IFRS15RPORequest):
+    """Remaining performance obligations disclosure (IFRS 15.120–122)."""
+    try:
+        from ifrs15_calculator import IFRS15RPOEngine
+
+        body = {"obligations": [o.model_dump() for o in request.obligations]}
+        return IFRS15RPOEngine().calculate_rpo(body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/contract-costs")
+async def ifrs15_contract_costs(request: IFRS15ContractCostsRequest):
+    """Costs to obtain a contract / commission asset (IFRS 15.91–94)."""
+    try:
+        from ifrs15_calculator import IFRS15ContractCostsEngine
+
+        body = {
+            "commission_amount": request.commission_amount,
+            "contract_term_months": request.contract_term_months,
+            "contract_total_value": request.contract_total_value,
+        }
+        return IFRS15ContractCostsEngine().calculate(body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/principal-agent")
+async def ifrs15_principal_agent(request: IFRS15PrincipalAgentRequest):
+    """Principal vs agent (gross vs net) assessment (IFRS 15.B34–B38)."""
+    try:
+        from ifrs15_calculator import IFRS15PrincipalAgentEngine
+
+        return IFRS15PrincipalAgentEngine().assess(request.model_dump())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/license-classification")
+async def ifrs15_license_classification(request: IFRS15LicenseRequest):
+    """Licence of IP: right to access vs right to use (IFRS 15.B52–B63)."""
+    try:
+        from ifrs15_calculator import IFRS15LicenseEngine
+
+        return IFRS15LicenseEngine().classify(request.model_dump())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/master-report")
+async def ifrs15_master_report(request: IFRS15MasterReportRequest):
+    """Aggregate IFRS 15 core + optional modules into a master compliance report."""
+    try:
+        from ifrs15_calculator import IFRS15MasterSummaryEngine
+
+        body = request.model_dump()
+        rep = IFRS15MasterSummaryEngine().generate(body)
+
+        narrative = ""
+        if ANTHROPIC_API_KEY:
+            try:
+                import anthropic
+
+                ctx = json.dumps(
+                    {
+                        "contract_overview": rep.get("contract_overview"),
+                        "financial_summary": rep.get("financial_summary"),
+                        "five_step_status": rep.get("five_step_status"),
+                        "assessments": rep.get("assessments"),
+                        "risk_flags": rep.get("risk_flags"),
+                        "audit_readiness": rep.get("audit_readiness"),
+                    },
+                    indent=2,
+                    default=str,
+                )[:12000]
+                prompt = (
+                    "You are an IFRS 15 technical accounting expert. Write a 3-paragraph executive summary of this "
+                    "contract's revenue recognition treatment (max 400 words). Use the actual numbers from the JSON.\n"
+                    "Paragraph 1: Contract overview and revenue recognised.\n"
+                    "Paragraph 2: Key judgements made and their impact.\n"
+                    "Paragraph 3: Outstanding risks and recommended actions.\n"
+                    "Write in the style of a Big 4 technical memo. Plain text only, no markdown.\n\n"
+                    f"Data:\n{ctx}"
+                )
+                client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                response = client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=1500,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                narrative = (response.content[0].text if response.content else "").strip()
+            except Exception:
+                narrative = (
+                    "AI narrative could not be generated (Claude API error). "
+                    "Review the structured sections in this report and draft the executive summary manually."
+                )
+        else:
+            narrative = (
+                "AI narrative is not available (ANTHROPIC_API_KEY not configured). "
+                "Configure the API key to generate a three-paragraph executive summary automatically."
+            )
+        rep["ai_narrative"] = narrative
+        gc.collect()
+        return rep
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/master-report/download-excel")
+async def ifrs15_master_report_download_excel(request: IFRS15MasterReportExcelRequest):
+    """Generate standalone IFRS 15 Master Summary Excel workbook."""
+    try:
+        from ifrs15_excel_export import IFRS15ExcelExporter
+
+        file_id = str(uuid.uuid4())
+        excel_path = OUTPUT_DIR / f"IFRS15_Master_{file_id}.xlsx"
+        exporter = IFRS15ExcelExporter()
+        exporter.export_ifrs15_master_report(request.master_report, str(excel_path))
+        gc.collect()
+        return {"status": "success", "file_id": file_id, "filename": excel_path.name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/score-disclosure")
+async def ifrs15_score_disclosure(request: IFRS15DisclosureScorerRequest):
+    """Score IFRS 15 narrative disclosure quality (keywords + optional Claude suggestions)."""
+    try:
+        from ifrs15_calculator import IFRS15DisclosureScorer
+
+        scorer = IFRS15DisclosureScorer()
+        return scorer.score(
+            request.disclosure_text,
+            request.calculation_results or {},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/client-report")
+async def ifrs15_client_report(request: IFRS15ClientReportRequest):
+    """Generate client-facing IFRS 15 PDF report (10 pages)."""
+    try:
+        from ifrs15_client_report import generate_client_report
+
+        payload = request.model_dump()
+        out = generate_client_report(payload, api_key=ANTHROPIC_API_KEY)
+        gc.collect()
+        return {
+            "status": "success",
+            "file_id": out.get("file_id"),
+            "filename": out.get("filename"),
+            "pages": out.get("pages", 10),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ifrs15/client-report/{file_id}")
+async def ifrs15_client_report_download(file_id: str):
+    """Download generated client-facing IFRS 15 PDF report."""
+    matching = list(OUTPUT_DIR.glob(f"{file_id}_*.pdf"))
+    if not matching:
+        raise HTTPException(status_code=404, detail="File not found")
+    path = matching[0]
+    return FileResponse(
+        path=str(path),
+        filename=path.name,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
+    )
 
 
 @app.post("/api/ifrs15/classify-contract")
@@ -1746,6 +2170,108 @@ PD_BY_RATING = {
 }
 
 
+class IFRS9ClassificationRequest(BaseModel):
+    instrument_name: str
+    instrument_type: str
+    business_model_indicators: List[str]
+    sppi_features: List[str]
+    prepayment_penalty_reasonable: bool = True
+    fair_value_option_elected: bool = False
+    fvo_reason: Optional[str] = None
+    business_model_changed: bool = False
+    nominal_rate: Optional[float] = None
+    issue_price: Optional[float] = None
+    face_value: Optional[float] = None
+    term_months: Optional[int] = None
+
+
+class MacroScenario(BaseModel):
+    gdp_growth: float
+    unemployment_rate: float
+    interest_rate: float
+    property_price_change: float = 0.0
+    credit_spread: float = 0.0
+    probability: float
+
+
+class IFRS9MacroOverlayRequest(BaseModel):
+    portfolio_name: str
+    base_pd: float
+    lgd: float
+    ead: float
+    base_scenario: MacroScenario
+    optimistic_scenario: MacroScenario
+    pessimistic_scenario: MacroScenario
+    loans: Optional[List[Any]] = None
+
+
+class ReceivableItem(BaseModel):
+    invoice_id: str
+    customer: str
+    gross_amount: float
+    days_past_due: int
+    currency: str = "USD"
+
+
+class BucketTotal(BaseModel):
+    label: str
+    gross_amount: float
+    historical_loss_rate: Optional[float] = None
+
+
+class HistoricalData(BaseModel):
+    bucket_label: str
+    historical_balance: float
+    historical_writeoffs: float
+
+
+class IFRS9ProvisionMatrixRequest(BaseModel):
+    portfolio_name: str
+    reporting_date: Optional[str] = None
+    receivable_type: str = "trade_receivables"
+    receivables: Optional[List[ReceivableItem]] = None
+    bucket_totals: Optional[List[BucketTotal]] = None
+    loss_rates: Optional[Dict[str, Any]] = None
+    historical_data: Optional[List[HistoricalData]] = None
+    macro_adjustment_factor: Optional[float] = 0.0
+    writeoffs_this_period: Optional[float] = 0.0
+    custom_buckets: Optional[List[Dict[str, Any]]] = None
+
+
+class IFRS9DownloadExcelRequest(BaseModel):
+    portfolio_name: str = "Portfolio"
+    entity_name: Optional[str] = ""
+    reporting_date: Optional[str] = None
+    applicable_ecl: Optional[float] = 0
+    ecl_12m: Optional[float] = 0
+    ecl_lifetime: Optional[float] = 0
+    total_ead: Optional[float] = 0
+    pd_used: Optional[float] = 0
+    lgd_used: Optional[float] = 0
+    coverage_ratio: Optional[float] = 0
+    weighted_avg_pd: Optional[float] = 0
+    stage_summary: Optional[Dict[str, Any]] = None
+    loans: Optional[List[Any]] = None
+    ecl_movement: Optional[Dict[str, Any]] = None
+    journal_entries: Optional[List[Any]] = None
+    disclosure_notes: Optional[Any] = None
+    scenario_results: Optional[Dict[str, Any]] = None
+    bucket_results: Optional[List[Any]] = None
+    macro_sensitivity: Optional[str] = None
+    discount_rate: Optional[float] = None
+    master_report_data: Optional[Dict[str, Any]] = None
+
+
+class IFRS9MasterReportRequest(BaseModel):
+    portfolio_name: str
+    entity_name: Optional[str] = ""
+    reporting_date: Optional[str] = None
+    core_results: Optional[Dict[str, Any]] = None
+    classification_result: Optional[Dict[str, Any]] = None
+    macro_overlay_result: Optional[Dict[str, Any]] = None
+    provision_matrix_result: Optional[Dict[str, Any]] = None
+
+
 @app.get("/api/ifrs9/pd-rates")
 async def get_ifrs9_pd_rates():
     """Return standard PD rates by credit rating (AAA to D)."""
@@ -1978,17 +2504,55 @@ async def macro_sensitivity_history(tenant_id: str = "default", portfolio_type: 
 
 
 @app.post("/api/ifrs9/classify")
-async def classify_instrument(data: dict):
-    """Run SPPI test and business model. Return classification: AC / FVOCI / FVTPL."""
-    sppi_pass = data.get("sppi_pass", True)
-    business_model = data.get("business_model", "hold_to_collect")  # hold_to_collect | hold_collect_sell | trading
-    if not sppi_pass:
-        return {"classification": "FVTPL", "ecl_applicable": False, "reason": "SPPI test failed"}
-    if business_model == "trading":
-        return {"classification": "FVTPL", "ecl_applicable": False, "reason": "Trading model"}
-    if business_model == "hold_collect_sell":
-        return {"classification": "FVOCI", "ecl_applicable": True, "reason": "Hold to collect and sell"}
-    return {"classification": "AC", "ecl_applicable": True, "reason": "Amortised Cost - ECL applicable"}
+async def classify_instrument(request: IFRS9ClassificationRequest):
+    """IFRS 9 classification & measurement (business model, SPPI, optional EIR)."""
+    from ifrs9_ecl_calculator import IFRS9ClassificationEngine
+
+    engine = IFRS9ClassificationEngine()
+    return engine.classify(request.model_dump())
+
+
+@app.post("/api/ifrs9/macro-overlay")
+async def ifrs9_macro_overlay(request: IFRS9MacroOverlayRequest):
+    """Forward-looking macro scenario overlay for ECL (IFRS 9.5.5.17)."""
+    from ifrs9_ecl_calculator import IFRS9MacroOverlayEngine
+
+    try:
+        engine = IFRS9MacroOverlayEngine()
+        payload = request.model_dump()
+        if payload.get("loans") is None:
+            payload["loans"] = []
+        return engine.calculate(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/ifrs9/provision-matrix")
+async def ifrs9_provision_matrix(request: IFRS9ProvisionMatrixRequest):
+    """IFRS 9.5.5.15 simplified provision matrix (ageing buckets × loss rates)."""
+    from ifrs9_ecl_calculator import IFRS9ProvisionMatrixEngine
+
+    try:
+        engine = IFRS9ProvisionMatrixEngine()
+        payload = request.model_dump()
+        if payload.get("receivables") is None:
+            payload["receivables"] = []
+        if payload.get("bucket_totals") is None:
+            payload["bucket_totals"] = []
+        if payload.get("historical_data") is None:
+            payload["historical_data"] = []
+        return engine.calculate(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/ifrs9/master-report")
+async def ifrs9_master_report(request: IFRS9MasterReportRequest):
+    """Aggregate IFRS 9 ECL, classification, macro overlay, and provision matrix into one master report."""
+    from ifrs9_ecl_calculator import IFRS9MasterSummaryEngine
+
+    engine = IFRS9MasterSummaryEngine()
+    return engine.generate(request.model_dump())
 
 
 @app.post("/api/ifrs9/download-report")
@@ -2010,13 +2574,38 @@ async def download_ecl_report(data: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/ifrs9/download-excel")
+async def ifrs9_download_excel(request: IFRS9DownloadExcelRequest):
+    """IFRS 9 ECL audit pack (openpyxl); optional first sheet when master_report_data is supplied."""
+    try:
+        from ifrs9_excel_export import export_ifrs9_excel
+
+        payload = request.model_dump()
+        master = payload.pop("master_report_data", None)
+        file_id = export_ifrs9_excel(payload, master_report=master)
+        safe_name = (request.portfolio_name or "Portfolio").replace(" ", "_").replace("/", "_")
+        date_str = (request.reporting_date or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
+        filename = f"IFRS9_ECL_{safe_name}_{date_str}_{file_id}.xlsx"
+        gc.collect()
+        n_sheets = 6 if master else 5
+        return {"file_id": file_id, "filename": filename, "sheets": n_sheets}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/ifrs9/download/{file_id}")
 async def download_ifrs9_file(file_id: str):
-    """Download generated IFRS 9 Excel report."""
-    matching = list(OUTPUT_DIR.glob(f"ecl_report_{file_id}*.xlsx"))
+    """Download IFRS 9 Excel (audit pack or legacy ecl_report)."""
+    matching = list(OUTPUT_DIR.glob(f"*{file_id}*.xlsx"))
     if not matching:
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path=str(matching[0]), filename=matching[0].name, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    path = sorted(matching, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+    return FileResponse(
+        path=str(path),
+        filename=path.name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
+    )
 
 
 @app.delete("/api/rag/document/{company_id}/{document_id}")

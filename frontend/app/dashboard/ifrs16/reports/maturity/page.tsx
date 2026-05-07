@@ -205,7 +205,7 @@ export default function LiabilityMaturityReportPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
               <XAxis dataKey="name" tick={{ fontSize: 10 }} />
               <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `₹${(v / 100000).toFixed(0)}L`} />
-              <Tooltip formatter={(v: number) => formatReportCurrency(v)} />
+              <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? formatReportCurrency(Number(value)) : '')} />
               <Bar dataKey="y1" stackId="a" fill={BUCKET_COLORS[0]} name={BUCKETS[0].label} radius={[0, 0, 0, 0]} />
               <Bar dataKey="y1_2" stackId="a" fill={BUCKET_COLORS[1]} name={BUCKETS[1].label} radius={[0, 0, 0, 0]} />
               <Bar dataKey="y2_5" stackId="a" fill={BUCKET_COLORS[2]} name={BUCKETS[2].label} radius={[0, 0, 0, 0]} />

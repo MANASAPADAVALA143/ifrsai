@@ -132,7 +132,7 @@ export default function InterestScheduleReportPage() {
             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
             <XAxis dataKey="name" tick={{ fontSize: 10 }} />
             <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `₹${(v / 100000).toFixed(0)}L`} />
-            <Tooltip formatter={(v: number) => formatReportCurrency(v)} />
+            <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? formatReportCurrency(Number(value)) : '')} />
             <Bar dataKey="amount" fill="#f97316" radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>

@@ -12,6 +12,11 @@ interface Message {
   sources?: any[];
 }
 
+interface AskResponse {
+  answer: string;
+  sources: string[];
+}
+
 export function ChatWidget() {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -44,13 +49,14 @@ export function ChatWidget() {
         throw new Error(error);
       }
 
-      if (data) {
+      const typedData = data as AskResponse | undefined;
+      if (typedData) {
         setMessages((prev) => [
           ...prev,
           {
             role: 'assistant',
-            content: data.answer,
-            sources: data.sources,
+            content: typedData.answer,
+            sources: typedData.sources,
           },
         ]);
       }

@@ -76,6 +76,11 @@ const MODIFICATION_TYPE_OPTIONS: { value: string; label: string; badge: string }
 ];
 const DEPRECIATION_METHODS = ['Straight Line', 'Declining Balance'];
 
+interface LeaseCalculateResponse {
+  results: Record<string, unknown>;
+  excel_file_id: string;
+}
+
 function pvOfAnnuity(monthlyPayment: number, annualRatePct: number, numMonths: number): number {
   if (numMonths <= 0 || monthlyPayment <= 0) return 0;
   const r = annualRatePct / 100 / 12;
@@ -882,11 +887,12 @@ function getReportingDateForFY(fy: string): Date {
         rvg_expected_payment: parseFloat(form.rvgExpectedPayment ?? '0') || 0,
       };
       const { data, error } = await ifrs16Api.calculate(payload);
+      const typedData = data as LeaseCalculateResponse | undefined;
       if (error) {
         toast.error(error);
         return;
       }
-      setCalcResults({ ...data?.results, excel_file_id: data?.excel_file_id });
+      setCalcResults({ ...typedData?.results, excel_file_id: typedData?.excel_file_id });
       setLastCalculatedAt(new Date().toISOString());
       setForm((p) => {
         const nextVer = p.version && /^V(\d+)$/i.test(p.version) ? `V${parseInt(p.version.slice(1), 10) + 1}` : 'V2';
@@ -926,7 +932,7 @@ function getReportingDateForFY(fy: string): Date {
     try {
       const start = form.startDate || form.effectiveDate;
       const termMonths = form.lease_term_months ? parseInt(form.lease_term_months) : 12;
-      const costCenters = form.costCenterTags.map((name) => ({ name, percent: form.costCenterAllocation[name] ?? 0 }));
+      const costCenters = form.costCenterTags.map((name: string) => ({ name, percent: form.costCenterAllocation[name] ?? 0 }));
       const entry = buildLeaseEntryFromForm(
         { ...form, costCenters },
         existingLease,
@@ -971,7 +977,7 @@ function getReportingDateForFY(fy: string): Date {
     toast.success('Schedule exported');
   };
 
-  const allocationTotal = form.costCenterTags.reduce((s, t) => s + (form.costCenterAllocation[t] ?? 0), 0);
+  const allocationTotal = form.costCenterTags.reduce((s: number, t: string) => s + (form.costCenterAllocation[t] ?? 0), 0);
   const displayTitle = form.title || form.assetDescription || (isNew ? 'New Lease' : form.leaseId);
   const statusLabel = form.leaseStatus || 'Draft';
 
@@ -1479,17 +1485,17 @@ function getReportingDateForFY(fy: string): Date {
                   />
                 </div>
                 <div className="flex flex-wrap gap-2 mb-2">
-                  {form.costCenterTags.map((tag) => (
+                  {form.costCenterTags.map((tag: string) => (
                     <span key={tag} className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-[#fff7ed] border border-[#fed7aa] text-[#c2410c] font-medium text-sm">
                       {tag}
-                      <button type="button" onClick={() => setForm((p) => ({ ...p, costCenterTags: p.costCenterTags.filter((t) => t !== tag), costCenterAllocation: Object.fromEntries(Object.entries(p.costCenterAllocation).filter(([k]) => k !== tag)) }))} className="text-[#f97316] hover:opacity-80"><X className="w-3.5 h-3.5" /></button>
+                      <button type="button" onClick={() => setForm((p) => ({ ...p, costCenterTags: p.costCenterTags.filter((t: string) => t !== tag), costCenterAllocation: Object.fromEntries(Object.entries(p.costCenterAllocation).filter(([k]) => k !== tag)) }))} className="text-[#f97316] hover:opacity-80"><X className="w-3.5 h-3.5" /></button>
                     </span>
                   ))}
                 </div>
                 {form.costCenterTags.length > 0 && (
                   <>
                     <div className="flex flex-wrap gap-3 items-center mb-2">
-                      {form.costCenterTags.map((tag) => (
+                      {form.costCenterTags.map((tag: string) => (
                         <span key={tag} className="inline-flex items-center gap-2">
                           <span className="text-sm text-[#64748b]">{tag}</span>
                           <select
@@ -2493,7 +2499,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                               <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-20} textAnchor="end" height={48} />
                               <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `₹${(v / 100000).toFixed(0)}L`} />
-                              <Tooltip formatter={(v: number) => formatIndianCurrency(v)} />
+                              <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? formatIndianCurrency(Number(value)) : '')} />
                               <Bar dataKey="amount" fill="#f97316" radius={[4, 4, 0, 0]} />
                             </BarChart>
                           </ResponsiveContainer>
@@ -3063,7 +3069,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                         ) : null}
                         <Button variant="secondary" className="border border-[#e2e8f0]" onClick={handlePrintReport}>📥 Download PDF</Button>
                         <Button variant="secondary" className="border border-[#e2e8f0]" onClick={handleDownloadTallyXml}>📥 Tally XML Export</Button>
-                        <Button variant="secondary" className="border border-[#e2e8f0]" onClick={() => { toast.info('SAP format: use Journal Entries export'); }}>📥 SAP Journal Upload Format</Button>
+                        <Button variant="secondary" className="border border-[#e2e8f0]" onClick={() => { toast('SAP format: use Journal Entries export'); }}>📥 SAP Journal Upload Format</Button>
                         <Button variant="secondary" className="border border-[#e2e8f0]" onClick={handleDownloadCsvRaw}>📥 CSV Raw Data</Button>
                       </div>
                     </div>
