@@ -137,6 +137,32 @@ export const ifrs16Api = {
     return `${API_URL}/api/download/${fileId}`;
   },
 
+  /**
+   * Single-shot Excel from bulk-calculate JSON (no file_id; works when /api/calculate fails on RAG/Excel on same request).
+   */
+  exportLeaseWorkbookFromResults: async (leaseId: string, calculationResults: Record<string, unknown>) => {
+    const url = `${API_URL}/api/ifrs16/export-excel`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lease_id: leaseId, calculation_results: calculationResults }),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      let msg = `Excel export failed (${response.status})`;
+      try {
+        const err = JSON.parse(text) as { detail?: unknown };
+        if (typeof err.detail === 'string') msg = err.detail;
+        else if (err.detail != null) msg = JSON.stringify(err.detail);
+      } catch {
+        const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 300);
+        if (snippet) msg = `${msg}. ${snippet}`;
+      }
+      throw new Error(msg);
+    }
+    return response.blob();
+  },
+
   bulkTemplateUrl: () => `${API_URL}/api/ifrs16/bulk-template`,
 
   bulkCalculate: async (leases: unknown[]) =>
@@ -163,6 +189,17 @@ export const ifrs16Api = {
     }>('/api/ifrs16/bulk-calculate', {
       method: 'POST',
       body: JSON.stringify({ leases }),
+    }),
+
+  cfoInsights: async (payload: {
+    leases: unknown[];
+    total_assets?: number;
+    annual_revenue?: number;
+    budget_lease_cost?: number;
+  }) =>
+    apiCall<Record<string, unknown>>('/api/ifrs16/cfo-insights', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
 };
 
@@ -360,43 +397,23 @@ export const ifrs15Api = {
     });
   },
 
-  rpo: async (payload: {
-    obligations: Array<{
-      obligation_name: string;
-      allocated_amount: number;
-      recognised_to_date: number;
-      expected_end_date: string;
-      original_expected_duration_months?: number | null;
-      is_right_to_invoice?: boolean;
-    }>;
-    contract_id?: string;
-  }) => {
+  /** Legacy: `{ obligations }`. IFRS 15.120–122: `{ contracts: [...] }` — returns `{ success, rpo }` for contracts payload. */
+  rpo: async (payload: Record<string, unknown>) => {
     return apiCall<Record<string, unknown>>('/api/ifrs15/rpo', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
   },
 
-  contractCosts: async (payload: {
-    commission_amount: number;
-    contract_term_months: number;
-    contract_total_value: number;
-    contract_id?: string;
-  }) => {
+  contractCosts: async (payload: Record<string, unknown>) => {
     return apiCall<Record<string, unknown>>('/api/ifrs15/contract-costs', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
   },
 
-  principalAgent: async (payload: {
-    transaction_price: number;
-    cost_paid_to_supplier: number;
-    obtains_before_transfer: boolean;
-    sets_price_independently: boolean;
-    primarily_responsible: boolean;
-    contract_id?: string;
-  }) => {
+  /** Legacy gross/net engine, or extended B37 assessment when `arrangement_id` + five indicators are sent (`{ success, assessment }`). */
+  principalAgent: async (payload: Record<string, unknown>) => {
     return apiCall<Record<string, unknown>>('/api/ifrs15/principal-agent', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -443,6 +460,117 @@ export const ifrs15Api = {
     });
   },
 
+  licensesIpAssess: async (payload: Record<string, unknown>) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/licenses-ip', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  auditLog: async (params?: { contract_id?: string; action?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.contract_id) q.set('contract_id', params.contract_id);
+    if (params?.action) q.set('action', params.action);
+    if (params?.limit != null) q.set('limit', String(params.limit));
+    const qs = q.toString();
+    return apiCall<Record<string, unknown>>(`/api/ifrs15/audit-log${qs ? `?${qs}` : ''}`);
+  },
+
+  auditLogSignOff: async (payload: { entry_id: string; reviewer: string; notes?: string }) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/audit-log/sign-off', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  materialRightsAssess: async (payload: { options: Record<string, unknown>[] }) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/material-rights', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  warrantiesClassify: async (payload: { warranties: Record<string, unknown>[] }) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/warranties', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  billAndHoldAssess: async (payload: { arrangements: Record<string, unknown>[] }) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/bill-and-hold', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  financingComponentCalculate: async (payload: { contracts: Record<string, unknown>[] }) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/financing-component', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  transactionPriceAdjustments: async (payload: {
+    non_cash_items?: Record<string, unknown>[];
+    consideration_payable_items?: Record<string, unknown>[];
+  }) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/transaction-price-adjustments', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  portfolioAddContract: async (payload: Record<string, unknown>) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/portfolio/add', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  portfolioSummary: async () => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/portfolio/summary');
+  },
+
+  portfolioRemoveContract: async (contractId: string) => {
+    return apiCall<Record<string, unknown>>(`/api/ifrs15/portfolio/${encodeURIComponent(contractId)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  portfolioExportExcelHref: () => `${API_URL}/api/ifrs15/portfolio/export-excel`,
+
+  /** Standalone audit workbook (filtered); not JSON — returns Blob or error string. */
+  auditLogExportExcel: async (params?: { contract_id?: string; action?: string }): Promise<{ data?: Blob; error?: string }> => {
+    const q = new URLSearchParams();
+    if (params?.contract_id?.trim()) q.set('contract_id', params.contract_id.trim());
+    if (params?.action?.trim()) q.set('action', params.action.trim());
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    try {
+      const response = await fetch(`${API_URL}/api/ifrs15/audit-log/export-excel${suffix}`, { method: 'POST' });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Audit log export failed' }));
+        const errorMessage = errorData.detail
+          ? typeof errorData.detail === 'string'
+            ? errorData.detail
+            : JSON.stringify(errorData.detail)
+          : `HTTP error! status: ${response.status}`;
+        throw new Error(errorMessage);
+      }
+      const blob = await response.blob();
+      return { data: blob };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'An error occurred';
+      const net =
+        msg === 'Failed to fetch' ||
+        msg.includes('NetworkError') ||
+        msg.includes('Load failed') ||
+        msg.includes('connection') ||
+        msg.includes('reset');
+      return { error: net ? getBackendUnreachableHelp() : msg };
+    }
+  },
+
   variableConsideration: async (payload: {
     method: string;
     scenarios: Array<{ outcome: string; amount: number; probability: number }>;
@@ -478,30 +606,37 @@ export const ifrs15Api = {
   assessModification: async (payload: {
     original_contract_id: string;
     modification_date: string;
-    new_goods_services: string[];
+    modification_description?: string;
+    new_goods_services?: string[];
     price_change: number;
-    revenue_recognised_to_date: number;
-    remaining_periods: number;
-    original_price: number;
-    new_goods_are_distinct: boolean;
-    price_reflects_standalone: boolean;
-    remaining_goods_are_distinct: boolean;
+    remaining_transaction_price?: number;
+    remaining_performance_obligations?: string[];
+    original_ssps?: Record<string, number>;
   }) => {
-    return apiCall<{
-      modification_type: 'new_contract' | 'prospective' | 'catch_up';
-      modification_type_label: string;
-      catch_up_amount: number;
-      catch_up_direction: 'additional_revenue' | 'revenue_reversal' | 'none';
-      revised_schedule: any[];
-      original_schedule_preview: any[];
-      journal_entries: any[];
-      explanation: string;
-      risk_flag: boolean;
-      risk_message: string;
-    }>('/api/ifrs15/modification', {
+    return apiCall<{ success?: boolean; modification?: Record<string, unknown> }>('/api/ifrs15/modification', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  deferredRevenueRollforward: async (payload: {
+    period: string;
+    opening_balance: number;
+    new_bookings: number;
+    revenue_released: number;
+    cancellations?: number;
+    modifications_impact?: number;
+    fx_impact?: number;
+    gl_closing_balance: number;
+    currency?: string;
+  }) => {
+    return apiCall<{ success?: boolean; rollforward?: Record<string, unknown> }>(
+      '/api/ifrs15/deferred-revenue-rollforward',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
   },
 
   downloadReport: (fileId: string) => {
@@ -789,6 +924,20 @@ export const macroSensitivityApi = {
     apiCall<Array<Record<string, unknown>>>(
       `/api/admin/macro-sensitivity/history?tenant_id=${encodeURIComponent(tenantId)}&portfolio_type=${encodeURIComponent(portfolioType)}`
     ),
+};
+
+export const revRecApi = {
+  sspAllocationCheck: async (payload: Record<string, unknown>) =>
+    apiCall<Record<string, unknown>>('/api/rev-rec/ssp-allocation-check', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  contractBalanceTracker: async (payload: Record<string, unknown>) =>
+    apiCall<Record<string, unknown>>('/api/rev-rec/contract-balance-tracker', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };
 
 export const consolidationApi = {

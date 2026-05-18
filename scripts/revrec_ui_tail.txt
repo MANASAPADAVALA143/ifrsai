@@ -1,0 +1,5 @@
+
+            <motionFormGrid>
+              <label className="block text-xs font-medium text-text-muted mb-1">Period</label>
+              <input className={inputClass} value={sspForm.period} onChange={(e) => setSspForm((f) => ({ ...f, period: e.target.value }))} />
+            </motionFormGrid>

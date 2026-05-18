@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 
 /**
  * Proxies Claude requests server-side (browser cannot call api.anthropic.com with API key due to CORS).
- * Set ANTHROPIC_API_KEY in .env.local (not NEXT_PUBLIC_*).
+ * Set ANTHROPIC_API_KEY in frontend/.env.local (local) or Vercel → Settings → Environment Variables (production).
+ * Root IFRSAI/.env is for the Python backend only.
  *
  * Body options:
  * - { prompt: string } — free-form (e.g. Explain portfolio)
@@ -271,7 +272,10 @@ export async function POST(req: Request) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) {
     return NextResponse.json(
-      { error: 'ANTHROPIC_API_KEY is not configured. Add it to .env.local for CFO insights.' },
+      {
+        error:
+          'ANTHROPIC_API_KEY is not configured. Local dev: add it to frontend/.env.local and restart npm run dev. Vercel: Project → Settings → Environment Variables → ANTHROPIC_API_KEY, then redeploy.',
+      },
       { status: 503 }
     );
   }

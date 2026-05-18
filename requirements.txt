@@ -30,6 +30,7 @@ reportlab==4.2.5
 # Database
 psycopg2-binary==2.9.9
 sqlalchemy==2.0.35
+supabase>=2.0.0
 
 # Environment Management
 python-dotenv==1.0.1

@@ -1446,28 +1446,52 @@ Do not use bullet points.`;
     }
     const t = toast.loading('Preparing downloads…');
     try {
-      const resolved: { lease_id: string; fileId: string }[] = [];
-      for (const br of successes) {
-        const fid = await resolveExcelFileId(br);
-        if (fid) resolved.push({ lease_id: br.lease_id, fileId: fid });
-      }
-      for (let i = 0; i < resolved.length; i++) {
-        const { lease_id, fileId } = resolved[i];
-        const url = ifrs16Api.downloadReport(fileId);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `IFRS16_${lease_id}.xlsx`;
-        link.rel = 'noopener';
-        link.target = '_blank';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        if (i < resolved.length - 1) {
+      let count = 0;
+      for (let i = 0; i < successes.length; i++) {
+        const br = successes[i];
+        const cr = br.calculation_results;
+        if (cr && typeof cr === 'object' && Object.keys(cr as object).length > 0) {
+          try {
+            const blob = await ifrs16Api.exportLeaseWorkbookFromResults(br.lease_id, cr as Record<string, unknown>);
+            const objUrl = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = objUrl;
+            link.download = `IFRS16_${br.lease_id}.xlsx`;
+            link.rel = 'noopener';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(objUrl);
+            count += 1;
+          } catch (e) {
+            toast.dismiss(t);
+            toast.error(e instanceof Error ? e.message : 'Excel export failed');
+            return;
+          }
+        } else {
+          const fid = await resolveExcelFileId(br);
+          if (!fid) {
+            toast.dismiss(t);
+            toast.error(`Could not prepare Excel for ${br.lease_id}`);
+            return;
+          }
+          const url = ifrs16Api.downloadReport(fid);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = `IFRS16_${br.lease_id}.xlsx`;
+          link.rel = 'noopener';
+          link.target = '_blank';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          count += 1;
+        }
+        if (i < successes.length - 1) {
           await new Promise((r) => setTimeout(r, 800));
         }
       }
       toast.dismiss(t);
-      toast.success(`Downloaded ${resolved.length} IFRS 16 reports`);
+      toast.success(`Downloaded ${count} IFRS 16 reports`);
     } catch (e) {
       toast.dismiss(t);
       toast.error(e instanceof Error ? e.message : 'Download failed');
@@ -1933,6 +1957,28 @@ Do not use bullet points.`;
                 const downloadThisLease = async () => {
                   setDownloadingLeaseId(r.lease_id);
                   try {
+                    const cr =
+                      calc && typeof calc === 'object' && Object.keys(calc as object).length > 0
+                        ? (calc as Record<string, unknown>)
+                        : null;
+                    if (cr) {
+                      try {
+                        const blob = await ifrs16Api.exportLeaseWorkbookFromResults(r.lease_id, cr);
+                        const objUrl = URL.createObjectURL(blob);
+                        const link = document.createElement('a');
+                        link.href = objUrl;
+                        link.download = `IFRS16_${r.lease_id}.xlsx`;
+                        link.rel = 'noopener';
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        URL.revokeObjectURL(objUrl);
+                        toast.success('Download started');
+                      } catch (e) {
+                        toast.error(e instanceof Error ? e.message : 'Excel export failed');
+                      }
+                      return;
+                    }
                     const fid = await resolveExcelFileId(r);
                     if (!fid) {
                       toast.error('Could not prepare Excel for this lease');

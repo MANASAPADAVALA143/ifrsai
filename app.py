@@ -3,12 +3,12 @@ IFRS 16 Lease Accounting Automation - FastAPI Application
 Enterprise REST API for IFRS 16 calculations and reporting
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse, Response, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import io
 import os
@@ -47,6 +47,167 @@ UPLOAD_DIR = Path("uploads")
 OUTPUT_DIR = Path("outputs")
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+from backend.app.services.ifrs15_db import ifrs15_db
+
+
+def _ifrs15_firm_id(request: Optional[Request] = None) -> str:
+    """Tenant id for IFRS 15 persistence (header X-Firm-Id or IFRS15_FIRM_ID env)."""
+    if request is not None:
+        fid = request.headers.get("x-firm-id") or request.headers.get("X-Firm-Id")
+        if fid and str(fid).strip():
+            return str(fid).strip()
+    return os.getenv("IFRS15_FIRM_ID", "default")
+
+
+def _ifrs15_portfolio_contracts_from_db(firm_id: str) -> List[Dict[str, Any]]:
+    rows = ifrs15_db.get_portfolio(firm_id)
+    return [dict(row.get("contract_data") or {}) for row in rows]
+
+
+def _ifrs15_portfolio_summary_data(contract_dict: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "arr": float(contract_dict.get("arr") or 0),
+        "mrr": float(contract_dict.get("mrr") or 0),
+        "total_tp": float(contract_dict.get("total_tp") or 0),
+        "status": str(contract_dict.get("status") or "active"),
+        "contract_type": str(contract_dict.get("contract_type") or "other"),
+        "deferred_balance": float(contract_dict.get("deferred_balance") or 0),
+        "rpo_amount": float(contract_dict.get("rpo_amount") or 0),
+        "recognised_to_date": float(contract_dict.get("recognised_to_date") or 0),
+        "risk": contract_dict.get("risk"),
+        "disclosure_score": contract_dict.get("disclosure_score"),
+    }
+
+
+def _ifrs15_portfolio_saas_summary(firm_id: Optional[str] = None) -> Dict[str, Any]:
+    """Roll-up metrics for IFRS 15 SaaS-style portfolio (Supabase)."""
+    fid = firm_id or _ifrs15_firm_id()
+    contracts = _ifrs15_portfolio_contracts_from_db(fid)
+    if not contracts:
+        return {"success": True, "summary": {}, "contracts": []}
+
+    active = [c for c in contracts if c.get("status") != "churned"]
+    churned = [c for c in contracts if c.get("status") == "churned"]
+    at_risk = [c for c in contracts if c.get("status") == "at_risk"]
+
+    total_arr = sum(float(c.get("arr") or 0) for c in active)
+    total_mrr = sum(float(c.get("mrr") or 0) for c in active)
+    total_deferred = sum(float(c.get("deferred_balance") or 0) for c in contracts)
+    total_rpo = sum(float(c.get("rpo_amount") or 0) for c in contracts)
+    total_recognised = sum(float(c.get("recognised_to_date") or 0) for c in contracts)
+
+    n = len(contracts)
+    churn_rate = (len(churned) / n * 100.0) if n else 0.0
+
+    by_type: Dict[str, Any] = {}
+    for c in contracts:
+        ct = str(c.get("contract_type") or "other")
+        if ct not in by_type:
+            by_type[ct] = {"count": 0, "arr": 0.0, "deferred": 0.0}
+        by_type[ct]["count"] += 1
+        by_type[ct]["arr"] += float(c.get("arr") or 0)
+        by_type[ct]["deferred"] += float(c.get("deferred_balance") or 0)
+
+    summary = {
+        "total_contracts": n,
+        "active_contracts": len(active),
+        "at_risk_contracts": len(at_risk),
+        "churned_contracts": len(churned),
+        "total_arr": round(total_arr, 2),
+        "total_mrr": round(total_mrr, 2),
+        "total_deferred_revenue": round(total_deferred, 2),
+        "total_rpo": round(total_rpo, 2),
+        "total_recognised_to_date": round(total_recognised, 2),
+        "churn_rate_pct": round(churn_rate, 2),
+        "at_risk_rate_pct": round((len(at_risk) / n * 100.0) if n else 0.0, 2),
+        "revenue_backlog": round(total_deferred + total_rpo, 2),
+        "by_contract_type": by_type,
+    }
+    return {"success": True, "summary": summary, "contracts": contracts}
+
+
+def _ifrs15_audit_append(
+    action: str,
+    contract_id: str,
+    description: str,
+    before_value: Dict[str, Any],
+    after_value: Dict[str, Any],
+    ifrs_reference: str,
+    changed_amount: float = 0.0,
+    user: str = "System",
+    firm_id: Optional[str] = None,
+    portfolio_row_id: Optional[str] = None,
+) -> None:
+    from ifrs15_calculator import IFRS15Calculator
+
+    calc = IFRS15Calculator()
+    entry = calc.create_audit_entry(
+        action=action,
+        contract_id=contract_id or "N/A",
+        description=description,
+        before_value=before_value,
+        after_value=after_value,
+        ifrs_reference=ifrs_reference,
+        user=user,
+        changed_amount=float(changed_amount or 0),
+    )
+    fid = firm_id or _ifrs15_firm_id()
+    ifrs15_db.log_action(
+        firm_id=fid,
+        action=action,
+        details=entry,
+        contract_id=portfolio_row_id,
+        user_id=user,
+    )
+
+
+def _ifrs15_audit_entries_from_db(
+    firm_id: str,
+    limit: int = 500,
+    contract_id: str = "",
+    action: str = "",
+) -> List[Dict[str, Any]]:
+    rows = ifrs15_db.get_audit_log(
+        firm_id,
+        limit=limit,
+        business_contract_id=contract_id or None,
+    )
+    entries: List[Dict[str, Any]] = []
+    for row in rows:
+        details = row.get("details")
+        if isinstance(details, dict) and details.get("entry_id"):
+            entries.append(details)
+        else:
+            entries.append(
+                {
+                    "entry_id": str(row.get("id", ""))[:8].upper(),
+                    "timestamp": row.get("created_at", ""),
+                    "user": row.get("user_id") or "System",
+                    "action": row.get("action", ""),
+                    "contract_id": (details or {}).get("contract_id", "N/A")
+                    if isinstance(details, dict)
+                    else "N/A",
+                    "description": str((details or {}).get("description", row.get("action", ""))),
+                    "before_value": (details or {}).get("before_value", {})
+                    if isinstance(details, dict)
+                    else {},
+                    "after_value": (details or {}).get("after_value", {})
+                    if isinstance(details, dict)
+                    else {},
+                    "ifrs_reference": (details or {}).get("ifrs_reference", "")
+                    if isinstance(details, dict)
+                    else "",
+                    "sign_off_required": False,
+                    "signed_off_by": "",
+                    "signed_off_at": "",
+                    "notes": "",
+                }
+            )
+    if action:
+        entries = [e for e in entries if str(e.get("action", "")) == action]
+    entries.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
+    return entries
 
 # Initialize services
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -264,6 +425,22 @@ class IFRS16BulkCalculateRequest(BaseModel):
     leases: List[LeaseRequest] = Field(..., description="Leases to calculate")
 
 
+class IFRS16ExportExcelRequest(BaseModel):
+    """Build IFRS 16 .xlsx from calculator JSON (e.g. bulk-calculate) — single response, no file_id / disk coupling."""
+
+    lease_id: str = Field(default="lease", description="Sanitized into download filename")
+    calculation_results: Dict[str, Any] = Field(..., description="Full IFRS16Calculator output (JSON shape)")
+
+
+class IFRS16CFOInsightsRequest(BaseModel):
+    """CFO strategic insights — lease portfolio from client repository."""
+
+    leases: List[Dict[str, Any]] = Field(default_factory=list)
+    total_assets: float = 0
+    annual_revenue: float = 0
+    budget_lease_cost: float = 0
+
+
 class ModificationAdviceRequest(BaseModel):
     """IFRS 16 §44 vs §45 modification advisor — extractor hints + live modification inputs."""
     extractor_hints: Dict[str, Any] = Field(default_factory=dict)
@@ -296,6 +473,15 @@ class IFRS15CalculateRequest(BaseModel):
     contract_term_months: int
     fixed_consideration: float
     variable_consideration: float = 0
+    vc_constraint_factors: dict = Field(
+        default_factory=lambda: {
+            "susceptible_to_external": False,
+            "long_resolution_period": False,
+            "wide_range_of_outcomes": False,
+            "limited_experience": False,
+            "broad_price_concession_practice": False,
+        }
+    )
     # IFRS 15 §56-58 variable consideration constraint
     variable_consideration_constrained: float = Field(default=0, ge=0, description="Explicitly constrained VC amount (used when constraint_method='amount')")
     constraint_percentage: float = Field(default=100, ge=0, le=100, description="% of variable consideration that is highly probable (0–100). Default 100 = no constraint.")
@@ -329,16 +515,24 @@ class IFRS15ClassifyContractRequest(BaseModel):
 class IFRS15ModificationRequest(BaseModel):
     original_contract_id: str
     modification_date: str
-    new_goods_services: List[str]
+    modification_description: str = ""
+    new_goods_services: List[str] = Field(default_factory=list)
     price_change: float
-    revenue_recognised_to_date: float
-    remaining_periods: int
-    original_price: float
-    new_goods_are_distinct: bool
-    price_reflects_standalone: bool
-    remaining_goods_are_distinct: bool
+    remaining_transaction_price: float = 0.0
+    remaining_performance_obligations: List[str] = Field(default_factory=list)
+    original_ssps: Dict[str, float] = Field(default_factory=dict)
 
 
+class DeferredRevenueRequest(BaseModel):
+    period: str
+    opening_balance: float
+    new_bookings: float
+    revenue_released: float
+    cancellations: float = 0.0
+    modifications_impact: float = 0.0
+    fx_impact: float = 0.0
+    gl_closing_balance: float
+    currency: str = "USD"
 class IFRS15DownloadExcelRequest(BaseModel):
     contract_id: str
     customer_name: Optional[str] = ""
@@ -386,25 +580,213 @@ class RPOObligation(BaseModel):
     is_right_to_invoice: bool = False
 
 
+class RPOPerformanceObligation(BaseModel):
+    name: str
+    allocated_amount: float
+    recognised_to_date: float
+    expected_recognition_pattern: str = "within_1_year"
+    recognition_type: str = "over_time"
+
+
+class RPOContractRequest(BaseModel):
+    contract_id: str
+    customer_name: str
+    contract_start: str
+    contract_end: str
+    total_transaction_price: float
+    revenue_recognised_to_date: float
+    performance_obligations: List[RPOPerformanceObligation]
+    practical_expedient_applied: bool = False
+
+
 class IFRS15RPORequest(BaseModel):
-    obligations: List[RPOObligation]
+    obligations: List[RPOObligation] = Field(default_factory=list)
     contract_id: Optional[str] = None
+    contracts: List[RPOContractRequest] = Field(default_factory=list)
+
+
+class ContractCostLineRequest(BaseModel):
+    cost_id: str
+    contract_id: str
+    description: str
+    cost_type: str = "incremental_obtaining"
+    cost_amount: float
+    incurred_date: str
+    contract_start: str
+    contract_end: str
+    expected_renewal: bool = False
+    expected_renewal_months: int = 0
+    currency: str = "USD"
 
 
 class IFRS15ContractCostsRequest(BaseModel):
-    commission_amount: float
-    contract_term_months: int
-    contract_total_value: float
+    """Legacy commission asset calculator OR batch IFRS 15.91–95 contract cost lines."""
+
+    commission_amount: Optional[float] = None
+    contract_term_months: Optional[int] = None
+    contract_total_value: Optional[float] = None
     contract_id: Optional[str] = None
+    costs: List[ContractCostLineRequest] = Field(default_factory=list)
+
+
+class LicenseIPItemRequest(BaseModel):
+    license_id: str
+    product_name: str
+    license_description: str = ""
+    license_fee: float
+    license_start: str
+    license_end: str = ""
+    is_perpetual: bool = False
+    entity_activities_affect_ip: bool
+    customer_exposed_to_effect: bool
+    no_separate_functional_utility: bool
+    currency: str = "USD"
+
+
+class LicensesIPRequest(BaseModel):
+    licenses: List[LicenseIPItemRequest]
+
+
+class CustomerOptionRequest(BaseModel):
+    option_id: str
+    contract_id: str
+    description: str
+    option_type: str = "renewal_discount"
+    original_contract_value: float
+    original_ssp: float
+    option_price: float
+    option_ssp: float
+    exercise_probability: float
+    points_granted: float = 0.0
+    point_value: float = 0.0
+    currency: str = "USD"
+
+
+class CustomerOptionsRequest(BaseModel):
+    options: List[CustomerOptionRequest]
+
+
+class WarrantyRequest(BaseModel):
+    warranty_id: str
+    contract_id: str
+    product_description: str = ""
+    warranty_description: str
+    warranty_period_months: int
+    warranty_value: float
+    required_by_law: bool = False
+    covers_specs_only: bool
+    customer_can_purchase_separately: bool
+    provides_additional_service: bool
+    allocated_fee: float = 0
+    currency: str = "USD"
+
+
+class WarrantiesRequest(BaseModel):
+    warranties: List[WarrantyRequest]
+
+
+class BillAndHoldRequest(BaseModel):
+    arrangement_id: str
+    contract_id: str
+    customer_name: str
+    product_description: str
+    contract_value: float
+    expected_delivery_date: str
+    billing_date: str
+    reason_is_substantive: bool
+    product_separately_identified: bool
+    product_ready_for_transfer: bool
+    entity_cannot_redirect: bool
+    currency: str = "USD"
+
+
+class BillAndHoldsRequest(BaseModel):
+    arrangements: List[BillAndHoldRequest]
+
+
+class FinancingComponentRequest(BaseModel):
+    contract_id: str
+    description: str = ""
+    contract_value: float
+    payment_date: str
+    transfer_date: str
+    payment_timing: str  # "advance" | "deferred"
+    discount_rate: float
+    currency: str = "USD"
+
+
+class FinancingComponentsRequest(BaseModel):
+    contracts: List[FinancingComponentRequest]
+
+
+class NonCashItem(BaseModel):
+    item_id: str
+    contract_id: str
+    description: str = ""
+    consideration_type: str = "goods"
+    fair_value_determinable: bool = True
+    fair_value: float = 0
+    fallback_ssp: float = 0
+    currency: str = "USD"
+
+
+class ConsiderationPayableItem(BaseModel):
+    item_id: str
+    contract_id: str
+    description: str = ""
+    payment_type: str = "cash"
+    amount: float
+    distinct_benefit_received: bool = False
+    fair_value_of_benefit: float = 0
+    currency: str = "USD"
+
+
+class TransactionPriceAdjustmentsRequest(BaseModel):
+    non_cash_items: List[NonCashItem] = Field(default_factory=list)
+    consideration_payable_items: List[ConsiderationPayableItem] = Field(default_factory=list)
+
+
+class PortfolioContractRequest(BaseModel):
+    contract_id: str
+    customer_name: str
+    contract_type: str = "subscription"
+    arr: float = 0
+    mrr: float = 0
+    start_date: str
+    end_date: str
+    total_tp: float = 0
+    recognised_to_date: float = 0
+    deferred_balance: float = 0
+    rpo_amount: float = 0
+    status: str = "active"
+    currency: str = "USD"
+
+
+class AuditSignOffRequest(BaseModel):
+    entry_id: str
+    reviewer: str
+    notes: str = ""
 
 
 class IFRS15PrincipalAgentRequest(BaseModel):
-    transaction_price: float
-    cost_paid_to_supplier: float
-    obtains_before_transfer: bool
-    sets_price_independently: bool
-    primarily_responsible: bool
     contract_id: Optional[str] = None
+    # Legacy IFRS15PrincipalAgentEngine payload
+    transaction_price: Optional[float] = None
+    cost_paid_to_supplier: Optional[float] = None
+    obtains_before_transfer: Optional[bool] = None
+    sets_price_independently: Optional[bool] = None
+    primarily_responsible: Optional[bool] = None
+    # IFRS 15.B34–B38 extended assessment (IFRS15Calculator)
+    arrangement_id: Optional[str] = None
+    description: str = ""
+    third_party_involved: bool = True
+    gross_contract_value: Optional[float] = None
+    third_party_cost: Optional[float] = None
+    controls_before_transfer: Optional[bool] = None
+    primary_obligor: Optional[bool] = None
+    inventory_risk: Optional[bool] = None
+    pricing_discretion: Optional[bool] = None
+    credit_risk: Optional[bool] = None
 
 
 class IFRS15LicenseRequest(BaseModel):
@@ -522,14 +904,10 @@ async def ifrs16_page():
     else:
         raise HTTPException(status_code=404, detail="IFRS 16 page not found")
 
-@app.get("/ifrs15", response_class=HTMLResponse)
-async def ifrs15_page():
-    """IFRS 15 Revenue Recognition Form"""
-    html_file = Path("templates/ifrs15.html")
-    if html_file.exists():
-        return html_file.read_text(encoding='utf-8')
-    else:
-        raise HTTPException(status_code=404, detail="IFRS 15 page not found")
+@app.get("/ifrs15")
+async def ifrs15_redirect():
+    """Legacy HTML route → Next.js dashboard."""
+    return RedirectResponse(url="/dashboard/ifrs15", status_code=301)
 
 
 @app.get("/api/health")
@@ -1140,6 +1518,30 @@ async def ifrs16_bulk_calculate(body: IFRS16BulkCalculateRequest):
     }
 
 
+@app.post("/api/ifrs16/export-excel")
+async def ifrs16_export_excel(body: IFRS16ExportExcelRequest):
+    """
+    Return IFRS 16 workbook bytes from existing calculation_results.
+    Use after bulk-calculate so Quick Analysis can download without a second /api/calculate
+    (avoids Excel+RAG path failures and ephemeral file IDs on multi-instance hosts).
+    """
+    try:
+        from ifrs16_excel_export import IFRS16ExcelExporter
+
+        exporter = IFRS16ExcelExporter()
+        data = exporter.export_ifrs16_workbook_bytes(body.calculation_results)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Excel export failed: {str(e)}")
+    raw = (body.lease_id or "lease").strip()
+    safe = "".join(c for c in raw if c.isalnum() or c in "._-")[:80] or "lease"
+    fname = f"IFRS16_{safe}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @app.get("/api/ifrs16/bulk-template")
 async def ifrs16_bulk_template():
     """Download Excel template for portfolio bulk upload (3 sample rows)."""
@@ -1297,6 +1699,218 @@ async def ifrs16_bulk_template():
     )
 
 
+def _ifrs16_lease_liability(lease: Dict[str, Any]) -> float:
+    res = lease.get("results") if isinstance(lease.get("results"), dict) else {}
+    return float(
+        lease.get("lease_liability")
+        or lease.get("liability")
+        or (res or {}).get("lease_liability")
+        or 0
+    )
+
+
+def _ifrs16_rou_asset(lease: Dict[str, Any]) -> float:
+    res = lease.get("results") if isinstance(lease.get("results"), dict) else {}
+    return float(lease.get("rou_asset") or lease.get("rou") or (res or {}).get("rou_asset") or 0)
+
+
+def _ifrs16_monthly_payment(lease: Dict[str, Any]) -> float:
+    payments = lease.get("payments") if isinstance(lease.get("payments"), dict) else {}
+    return float(lease.get("monthly_payment") or payments.get("monthly") or 0)
+
+
+def _ifrs16_end_date(lease: Dict[str, Any]) -> str:
+    dates = lease.get("dates") if isinstance(lease.get("dates"), dict) else {}
+    return str(lease.get("end_date") or dates.get("end") or "")
+
+
+def _ifrs16_lease_active(lease: Dict[str, Any]) -> bool:
+    status = str(lease.get("status", "active")).lower()
+    return status not in ("expired", "draft", "terminated", "churned")
+
+
+@app.post("/api/ifrs16/cfo-insights")
+async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
+    """IFRS 16 CFO strategic insights — portfolio metrics + Claude analysis."""
+    try:
+        from datetime import date
+
+        leases = req.leases
+        today = date.today()
+
+        if not leases:
+            return {
+                "success": True,
+                "insights": [],
+                "metrics": {},
+                "risk_score": 0,
+            }
+
+        if not ANTHROPIC_API_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="Claude API not configured. Set ANTHROPIC_API_KEY in .env",
+            )
+
+        total_liability = sum(_ifrs16_lease_liability(l) for l in leases)
+        total_rou = sum(_ifrs16_rou_asset(l) for l in leases)
+        total_annual_payments = sum(_ifrs16_monthly_payment(l) * 12 for l in leases)
+        active_leases = [l for l in leases if _ifrs16_lease_active(l)]
+
+        leverage_ratio = (
+            total_liability / req.total_assets * 100 if req.total_assets > 0 else 0
+        )
+        lease_intensity = (
+            total_annual_payments / req.annual_revenue * 100 if req.annual_revenue > 0 else 0
+        )
+        budget_variance = (
+            total_annual_payments - req.budget_lease_cost if req.budget_lease_cost > 0 else 0
+        )
+
+        expiring_90: List[Dict[str, Any]] = []
+        expiring_365: List[Dict[str, Any]] = []
+        for l in active_leases:
+            end_str = _ifrs16_end_date(l)
+            if not end_str:
+                continue
+            try:
+                end = datetime.strptime(end_str[:10], "%Y-%m-%d").date()
+                days_left = (end - today).days
+                if 0 < days_left <= 90:
+                    expiring_90.append(l)
+                elif 90 < days_left <= 365:
+                    expiring_365.append(l)
+            except Exception:
+                continue
+
+        top_leases = sorted(
+            active_leases,
+            key=lambda x: _ifrs16_lease_liability(x),
+            reverse=True,
+        )[:5]
+
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+        portfolio_summary = f"""
+Lease Portfolio for CFO Analysis:
+- Total Leases: {len(leases)} ({len(active_leases)} active)
+- Total Lease Liability: ${total_liability:,.0f}
+- Total ROU Assets: ${total_rou:,.0f}
+- Annual Lease Payments: ${total_annual_payments:,.0f}
+- Leases Expiring in 90 days: {len(expiring_90)}
+- Leases Expiring in 12 months: {len(expiring_365)}
+- Leverage Ratio (liability/assets): {leverage_ratio:.1f}%
+- Lease Intensity (payments/revenue): {lease_intensity:.1f}%
+- Budget Variance: ${budget_variance:+,.0f}
+
+Top 5 Leases by Liability:
+{chr(10).join([
+    f"  - {l.get('title', l.get('contract_id', l.get('id', 'Unknown')))}: "
+    f"${_ifrs16_lease_liability(l):,.0f} liability, "
+    f"ends {_ifrs16_end_date(l) or 'N/A'}"
+    for l in top_leases
+])}
+
+Expiring in 90 days:
+{chr(10).join([
+    f"  - {l.get('title', l.get('asset', 'Unknown'))}: "
+    f"${_ifrs16_monthly_payment(l):,.0f}/month"
+    for l in expiring_90
+]) or "  None"}
+"""
+
+        ai_response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1500,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"""You are a CFO advisor analysing a company's lease portfolio under IFRS 16.
+
+{portfolio_summary}
+
+Generate exactly 4 strategic insights for the CFO.
+Each insight must be specific, actionable, and reference actual numbers.
+
+Format your response as JSON only — no other text:
+{{
+  "insights": [
+    {{
+      "id": "1",
+      "category": "LEVERAGE" | "RENEWAL_RISK" | "COST_OPTIMISATION" | "BUDGET" | "CONCENTRATION_RISK",
+      "severity": "HIGH" | "MEDIUM" | "LOW",
+      "title": "Short title (max 8 words)",
+      "finding": "One sentence with specific numbers",
+      "recommendation": "One specific actionable recommendation",
+      "impact": "Estimated financial impact or risk amount"
+    }}
+  ],
+  "overall_health": "STRONG" | "ADEQUATE" | "AT_RISK" | "CRITICAL",
+  "health_score": 0-100,
+  "one_line_summary": "One sentence CFO-level portfolio summary"
+}}""",
+                }
+            ],
+        )
+
+        ai_text = "".join(
+            b.text for b in ai_response.content if getattr(b, "type", None) == "text"
+        ).strip()
+        if ai_text.startswith("```"):
+            ai_text = ai_text.split("```")[1]
+            if ai_text.startswith("json"):
+                ai_text = ai_text[4:]
+        ai_data = json.loads(ai_text.strip())
+
+        metrics = {
+            "total_liability": round(total_liability, 2),
+            "total_rou_assets": round(total_rou, 2),
+            "total_annual_payments": round(total_annual_payments, 2),
+            "active_lease_count": len(active_leases),
+            "expiring_90_days": len(expiring_90),
+            "expiring_12_months": len(expiring_365),
+            "leverage_ratio_pct": round(leverage_ratio, 2),
+            "lease_intensity_pct": round(lease_intensity, 2),
+            "budget_variance": round(budget_variance, 2),
+            "top_leases_by_liability": [
+                {
+                    "title": l.get("title", l.get("asset", "Unknown")),
+                    "liability": _ifrs16_lease_liability(l),
+                    "monthly_payment": _ifrs16_monthly_payment(l),
+                    "end_date": _ifrs16_end_date(l) or "N/A",
+                }
+                for l in top_leases
+            ],
+            "expiring_soon": [
+                {
+                    "title": l.get("title", l.get("asset", "Unknown")),
+                    "end_date": _ifrs16_end_date(l) or "N/A",
+                    "monthly_payment": _ifrs16_monthly_payment(l),
+                }
+                for l in expiring_90
+            ],
+        }
+
+        gc.collect()
+        return {
+            "success": True,
+            "insights": ai_data.get("insights", []),
+            "overall_health": ai_data.get("overall_health", "ADEQUATE"),
+            "health_score": ai_data.get("health_score", 50),
+            "one_line_summary": ai_data.get("one_line_summary", ""),
+            "metrics": metrics,
+        }
+
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== IFRS 15 Endpoints ====================
 
 class IFRS15ExtractRequest(BaseModel):
@@ -1419,6 +2033,7 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
             variable_consideration_constrained=Decimal(str(request.variable_consideration_constrained)),
             constraint_percentage=Decimal(str(request.constraint_percentage)),
             constraint_method=request.constraint_method,
+            vc_constraint_factors=dict(request.vc_constraint_factors or {}),
             discounts=Decimal(str(request.discounts)),
             rebates=Decimal(str(request.rebates)),
             financing_adjustment=Decimal(str(request.financing_adjustment)),
@@ -1463,6 +2078,18 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
             )
         except Exception:
             pass
+        tr = float(results_json.get("total_recognised") or 0)
+        td = float(results_json.get("total_deferred") or 0)
+        tpv = float(results_json.get("transaction_price") or results_json.get("total_contract_value") or 0)
+        _ifrs15_audit_append(
+            "CALCULATE",
+            request.contract_id,
+            f"Revenue calculation — ${tr:,.2f} recognised, ${td:,.2f} deferred",
+            {},
+            {"total_recognised": tr, "total_deferred": td, "transaction_price": tpv},
+            "IFRS 15 — 5-Step Model",
+            changed_amount=tr,
+        )
         gc.collect()
         return {
             "status": "success",
@@ -1499,6 +2126,17 @@ async def ifrs15_download_excel(request: IFRS15DownloadExcelRequest):
                 "contract_costs_assessment": res.get("contract_costs_assessment"),
                 "principal_agent_assessment": res.get("principal_agent_assessment"),
                 "license_classification": res.get("license_classification"),
+                "deferred_revenue_rollforward": res.get("deferred_revenue_rollforward"),
+                "rpo_disclosure_ifrs120": res.get("rpo_disclosure_ifrs120"),
+                "principal_agent_history": res.get("principal_agent_history"),
+                "contract_costs_ifrs9194": res.get("contract_costs_ifrs9194"),
+                "licenses_ip_export": res.get("licenses_ip_export"),
+                "audit_entries": res.get("audit_entries"),
+                "material_rights_ifrs1540": res.get("material_rights_ifrs1540"),
+                "warranties_ifrs1528": res.get("warranties_ifrs1528"),
+                "bill_and_hold_ifrs1579": res.get("bill_and_hold_ifrs1579"),
+                "financing_component_ifrs1560": res.get("financing_component_ifrs1560"),
+                "tp_adjustments_ifrs1566": res.get("tp_adjustments_ifrs1566"),
             },
             filename=str(excel_path),
             master_report=request.master_report_data,
@@ -1512,13 +2150,68 @@ async def ifrs15_download_excel(request: IFRS15DownloadExcelRequest):
 
 @app.post("/api/ifrs15/modification")
 async def ifrs15_modification(request: IFRS15ModificationRequest):
-    """Assess IFRS 15 contract modification type and accounting impact."""
+    """Assess IFRS 15 contract modification type (IFRS 15.18–21)."""
     try:
-        from ifrs15_calculator import IFRS15ModificationEngine
+        from ifrs15_calculator import ContractModification, IFRS15Calculator
 
-        engine = IFRS15ModificationEngine()
-        result = engine.assess_modification(request.model_dump())
-        return result
+        mod = ContractModification(
+            original_contract_id=request.original_contract_id,
+            modification_date=request.modification_date,
+            modification_description=request.modification_description,
+            new_goods_services=list(request.new_goods_services or []),
+            price_change=float(request.price_change),
+            remaining_transaction_price=float(request.remaining_transaction_price),
+            remaining_performance_obligations=list(request.remaining_performance_obligations or []),
+            original_ssps=dict(request.original_ssps or {}),
+        )
+        calculator = IFRS15Calculator()
+        result = calculator.assess_modification(mod)
+        _ifrs15_audit_append(
+            "MODIFICATION",
+            request.original_contract_id,
+            f"Modification assessed — {result.get('modification_type_name') or result.get('modification_type_label') or ''}",
+            {},
+            {
+                "modification_type": result.get("modification_type"),
+                "catch_up_amount": float(result.get("catch_up_amount") or 0),
+            },
+            "IFRS 15.18-21",
+            changed_amount=float(result.get("catch_up_amount") or 0),
+        )
+        return {"success": True, "modification": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/deferred-revenue-rollforward")
+async def ifrs15_deferred_revenue_rollforward(req: DeferredRevenueRequest):
+    try:
+        from ifrs15_calculator import DeferredRevenueInput, IFRS15Calculator
+
+        data = DeferredRevenueInput(
+            period=req.period,
+            opening_balance=req.opening_balance,
+            new_bookings=req.new_bookings,
+            revenue_released=req.revenue_released,
+            cancellations=req.cancellations,
+            modifications_impact=req.modifications_impact,
+            fx_impact=req.fx_impact,
+            gl_closing_balance=req.gl_closing_balance,
+            currency=req.currency,
+        )
+        calculator = IFRS15Calculator()
+        result = calculator.deferred_revenue_rollforward(data)
+        cid = f"DEFERRED-{req.period}"
+        _ifrs15_audit_append(
+            "DEFERRED_REC",
+            cid,
+            f"Deferred revenue roll-forward — period {req.period}, reconciled={result.get('reconciled')}",
+            {},
+            {"variance": float(result.get("variance") or 0), "gl_closing_balance": float(req.gl_closing_balance)},
+            "IFRS 15.116",
+            changed_amount=float(result.get("variance") or 0),
+        )
+        return {"success": True, "rollforward": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1565,18 +2258,117 @@ async def ifrs15_reversal_risk(request: IFRS15ReversalRiskRequest):
 async def ifrs15_rpo(request: IFRS15RPORequest):
     """Remaining performance obligations disclosure (IFRS 15.120–122)."""
     try:
+        if request.contracts:
+            from ifrs15_calculator import IFRS15Calculator, RPOContract
+
+            contracts = [
+                RPOContract(
+                    contract_id=c.contract_id,
+                    customer_name=c.customer_name,
+                    contract_start=c.contract_start,
+                    contract_end=c.contract_end,
+                    total_transaction_price=c.total_transaction_price,
+                    revenue_recognised_to_date=c.revenue_recognised_to_date,
+                    performance_obligations=[po.model_dump() for po in c.performance_obligations],
+                    practical_expedient_applied=c.practical_expedient_applied,
+                )
+                for c in request.contracts
+            ]
+            calculator = IFRS15Calculator()
+            result = calculator.calculate_rpo(contracts)
+            ac = (
+                request.contracts[0].contract_id
+                if request.contracts
+                else (request.contract_id or "MULTI")
+            )
+            _ifrs15_audit_append(
+                "RPO",
+                ac,
+                f"RPO disclosure (IFRS 15.120–122) — total RPO ${float(result.get('total_rpo') or 0):,.2f}",
+                {},
+                {"total_rpo": result.get("total_rpo"), "contract_count": result.get("contract_count")},
+                "IFRS 15.120-122",
+                changed_amount=float(result.get("total_rpo") or 0),
+            )
+            return {"success": True, "rpo": result}
+
+        if not request.obligations:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either contracts (IFRS 15.120–122) or obligations (legacy RPO engine).",
+            )
+
         from ifrs15_calculator import IFRS15RPOEngine
 
         body = {"obligations": [o.model_dump() for o in request.obligations]}
-        return IFRS15RPOEngine().calculate_rpo(body)
+        leg = IFRS15RPOEngine().calculate_rpo(body)
+        _ifrs15_audit_append(
+            "RPO",
+            request.contract_id or "N/A",
+            "RPO disclosure (legacy obligations engine)",
+            {},
+            {"total_rpo": leg.get("total_rpo"), "keys": list(leg.keys())[:12]},
+            "IFRS 15.120-122",
+            changed_amount=float(leg.get("total_rpo") or 0),
+        )
+        return leg
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/ifrs15/contract-costs")
 async def ifrs15_contract_costs(request: IFRS15ContractCostsRequest):
-    """Costs to obtain a contract / commission asset (IFRS 15.91–94)."""
+    """Costs to obtain / fulfil contracts (IFRS 15.91–95) — batch lines or legacy commission engine."""
     try:
+        if request.costs:
+            from ifrs15_calculator import IFRS15Calculator, ContractCostInput
+
+            inputs = [
+                ContractCostInput(
+                    cost_id=c.cost_id,
+                    contract_id=c.contract_id,
+                    description=c.description,
+                    cost_type=c.cost_type,
+                    cost_amount=float(c.cost_amount),
+                    incurred_date=c.incurred_date,
+                    contract_start=c.contract_start,
+                    contract_end=c.contract_end,
+                    expected_renewal=bool(c.expected_renewal),
+                    expected_renewal_months=int(c.expected_renewal_months or 0),
+                    currency=c.currency or "USD",
+                )
+                for c in request.costs
+            ]
+            calculator = IFRS15Calculator()
+            result = calculator.calculate_contract_costs(inputs)
+            cid = request.costs[0].contract_id if request.costs else "MULTI"
+            summ = result.get("summary") or {}
+            _ifrs15_audit_append(
+                "CONTRACT_COSTS",
+                cid,
+                (
+                    f"Contract costs assessed — capitalised ${float(summ.get('total_capitalised', 0) or 0):,.2f}, "
+                    f"expensed ${float(summ.get('total_expensed_immediately', 0) or 0):,.2f}"
+                ),
+                {},
+                dict(summ),
+                "IFRS 15.91-94",
+                changed_amount=float(summ.get("total_capitalised", 0) or 0),
+            )
+            return {"success": True, "contract_costs": result}
+
+        if (
+            request.commission_amount is None
+            or request.contract_term_months is None
+            or request.contract_total_value is None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either costs[] (IFRS 15.91–95 batch) or commission_amount, contract_term_months, and contract_total_value (legacy).",
+            )
+
         from ifrs15_calculator import IFRS15ContractCostsEngine
 
         body = {
@@ -1584,7 +2376,22 @@ async def ifrs15_contract_costs(request: IFRS15ContractCostsRequest):
             "contract_term_months": request.contract_term_months,
             "contract_total_value": request.contract_total_value,
         }
-        return IFRS15ContractCostsEngine().calculate(body)
+        legacy = IFRS15ContractCostsEngine().calculate(body)
+        _ifrs15_audit_append(
+            "CONTRACT_COSTS",
+            request.contract_id or "N/A",
+            (
+                f"Legacy commission asset — capitalise={legacy.get('capitalise')}, "
+                f"amount ${float(legacy.get('commission_amount', 0) or 0):,.2f}"
+            ),
+            {},
+            {"capitalise": legacy.get("capitalise"), "commission_amount": legacy.get("commission_amount")},
+            "IFRS 15.91-94",
+            changed_amount=float(legacy.get("commission_amount") or 0),
+        )
+        return legacy
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1593,9 +2400,89 @@ async def ifrs15_contract_costs(request: IFRS15ContractCostsRequest):
 async def ifrs15_principal_agent(request: IFRS15PrincipalAgentRequest):
     """Principal vs agent (gross vs net) assessment (IFRS 15.B34–B38)."""
     try:
+        ext_id = (request.arrangement_id or "").strip()
+        if ext_id:
+            missing = []
+            if request.gross_contract_value is None:
+                missing.append("gross_contract_value")
+            if request.third_party_cost is None:
+                missing.append("third_party_cost")
+            for fld, val in [
+                ("controls_before_transfer", request.controls_before_transfer),
+                ("primary_obligor", request.primary_obligor),
+                ("inventory_risk", request.inventory_risk),
+                ("pricing_discretion", request.pricing_discretion),
+                ("credit_risk", request.credit_risk),
+            ]:
+                if val is None:
+                    missing.append(fld)
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Extended principal-agent assessment missing: {', '.join(missing)}",
+                )
+            from ifrs15_calculator import IFRS15Calculator, PrincipalAgentInput
+
+            data = PrincipalAgentInput(
+                arrangement_id=ext_id,
+                description=request.description or "",
+                third_party_involved=bool(request.third_party_involved),
+                gross_contract_value=float(request.gross_contract_value),
+                third_party_cost=float(request.third_party_cost),
+                controls_before_transfer=bool(request.controls_before_transfer),
+                primary_obligor=bool(request.primary_obligor),
+                inventory_risk=bool(request.inventory_risk),
+                pricing_discretion=bool(request.pricing_discretion),
+                credit_risk=bool(request.credit_risk),
+            )
+            calculator = IFRS15Calculator()
+            result = calculator.assess_principal_agent(data)
+            _ifrs15_audit_append(
+                "PRINCIPAL_AGENT",
+                ext_id,
+                f"Principal vs agent — {result.get('conclusion')} ({result.get('revenue_treatment')})",
+                {},
+                {"conclusion": result.get("conclusion"), "revenue_treatment": result.get("revenue_treatment")},
+                "IFRS 15.B34-B38",
+                changed_amount=float(result.get("gross_contract_value") or 0),
+            )
+            return {"success": True, "assessment": result}
+
+        if (
+            request.transaction_price is None
+            or request.cost_paid_to_supplier is None
+            or request.obtains_before_transfer is None
+            or request.sets_price_independently is None
+            or request.primarily_responsible is None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Legacy principal-agent requires transaction_price, cost_paid_to_supplier, and three boolean indicators.",
+            )
+
         from ifrs15_calculator import IFRS15PrincipalAgentEngine
 
-        return IFRS15PrincipalAgentEngine().assess(request.model_dump())
+        legacy_body = {
+            "transaction_price": request.transaction_price,
+            "cost_paid_to_supplier": request.cost_paid_to_supplier,
+            "obtains_before_transfer": request.obtains_before_transfer,
+            "sets_price_independently": request.sets_price_independently,
+            "primarily_responsible": request.primarily_responsible,
+            "contract_id": request.contract_id,
+        }
+        leg = IFRS15PrincipalAgentEngine().assess(legacy_body)
+        _ifrs15_audit_append(
+            "PRINCIPAL_AGENT",
+            request.contract_id or "N/A",
+            f"Principal vs agent (legacy) — {leg.get('role') or leg.get('conclusion') or leg.get('basis', '')}",
+            {},
+            {"transaction_price": request.transaction_price, "payload_keys": list(leg.keys())[:12]},
+            "IFRS 15.B34-B38",
+            changed_amount=float(request.transaction_price or 0),
+        )
+        return leg
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1609,6 +2496,599 @@ async def ifrs15_license_classification(request: IFRS15LicenseRequest):
         return IFRS15LicenseEngine().classify(request.model_dump())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/licenses-ip")
+async def ifrs15_licenses_ip(req: LicensesIPRequest):
+    """IFRS 15.B52–B63 — licence of IP (calculator assessment; batch)."""
+    try:
+        from ifrs15_calculator import IFRS15Calculator, LicenseIPInput
+
+        calculator = IFRS15Calculator()
+        results: List[Dict[str, Any]] = []
+        for lic in req.licenses:
+            data = LicenseIPInput(
+                license_id=lic.license_id,
+                product_name=lic.product_name,
+                license_description=lic.license_description or "",
+                license_fee=float(lic.license_fee),
+                license_start=lic.license_start,
+                license_end=lic.license_end or "",
+                is_perpetual=bool(lic.is_perpetual),
+                entity_activities_affect_ip=bool(lic.entity_activities_affect_ip),
+                customer_exposed_to_effect=bool(lic.customer_exposed_to_effect),
+                no_separate_functional_utility=bool(lic.no_separate_functional_utility),
+                currency=lic.currency or "USD",
+            )
+            results.append(calculator.assess_license_ip(data))
+        summary = {
+            "total_licenses": len(results),
+            "right_to_access": sum(1 for r in results if r.get("license_type") == "RIGHT_TO_ACCESS"),
+            "right_to_use": sum(1 for r in results if r.get("license_type") == "RIGHT_TO_USE"),
+            "judgement_required": sum(1 for r in results if r.get("license_type") == "JUDGEMENT_REQUIRED"),
+        }
+        cid = req.licenses[0].license_id if req.licenses else "N/A"
+        _ifrs15_audit_append(
+            "LICENSE_IP",
+            cid,
+            f"Licences of IP assessed — {summary['total_licenses']} licence(s), "
+            f"RTA {summary['right_to_access']}, RTU {summary['right_to_use']}, judgement {summary['judgement_required']}",
+            {},
+            summary,
+            "IFRS 15.B52-B63",
+            changed_amount=float(sum(float(r.get("license_fee", 0) or 0) for r in results)),
+        )
+        return {"success": True, "licenses": results, "summary": summary}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/material-rights")
+async def ifrs15_material_rights(req: CustomerOptionsRequest):
+    """IFRS 15.B40–B43 — customer options / material rights (batch)."""
+    try:
+        from ifrs15_calculator import IFRS15Calculator, CustomerOptionInput
+
+        calculator = IFRS15Calculator()
+        results: List[Dict[str, Any]] = []
+        for opt in req.options:
+            data = CustomerOptionInput(
+                option_id=opt.option_id,
+                contract_id=opt.contract_id,
+                description=opt.description,
+                option_type=opt.option_type,
+                original_contract_value=float(opt.original_contract_value),
+                original_ssp=float(opt.original_ssp),
+                option_price=float(opt.option_price),
+                option_ssp=float(opt.option_ssp),
+                exercise_probability=float(opt.exercise_probability),
+                points_granted=float(opt.points_granted or 0),
+                point_value=float(opt.point_value or 0),
+                currency=opt.currency or "USD",
+            )
+            result = calculator.assess_material_right(data)
+            results.append(result)
+            _ifrs15_audit_append(
+                "MATERIAL_RIGHTS",
+                opt.contract_id or "N/A",
+                f"Material rights — {opt.description}: "
+                f"{'SEPARATE PO identified' if result.get('material_right_exists') else 'No material right'}",
+                {},
+                {
+                    "material_right": result.get("material_right_exists"),
+                    "allocated_to_option": result.get("allocated_to_option", 0),
+                    "option_id": opt.option_id,
+                },
+                "IFRS 15.B40-B43",
+                changed_amount=float(result.get("allocated_to_option") or 0),
+            )
+        material_right_count = sum(1 for r in results if r.get("material_right_exists"))
+        total_deferred = sum(float(r.get("allocated_to_option") or 0) for r in results)
+        summary = {
+            "total_options_assessed": len(results),
+            "material_rights_found": material_right_count,
+            "no_material_right": len(results) - material_right_count,
+            "total_deferred_to_options": round(total_deferred, 2),
+        }
+        return {"success": True, "options": results, "summary": summary}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/warranties")
+async def classify_warranties(req: WarrantiesRequest):
+    """IFRS 15.B28–B33 / IAS 37 — warranty classification (batch)."""
+    try:
+        from ifrs15_calculator import IFRS15Calculator, WarrantyInput
+
+        calculator = IFRS15Calculator()
+        results: List[Dict[str, Any]] = []
+        for w in req.warranties:
+            data = WarrantyInput(
+                warranty_id=w.warranty_id,
+                contract_id=w.contract_id,
+                product_description=w.product_description or "",
+                warranty_description=w.warranty_description,
+                warranty_period_months=int(w.warranty_period_months),
+                warranty_value=float(w.warranty_value),
+                required_by_law=bool(w.required_by_law),
+                covers_specs_only=bool(w.covers_specs_only),
+                customer_can_purchase_separately=bool(w.customer_can_purchase_separately),
+                provides_additional_service=bool(w.provides_additional_service),
+                allocated_fee=float(w.allocated_fee or 0),
+                currency=w.currency or "USD",
+            )
+            result = calculator.classify_warranty(data)
+            results.append(result)
+            _ifrs15_audit_append(
+                "WARRANTY",
+                w.contract_id or "N/A",
+                (
+                    f"Warranty classification — {w.warranty_description}: "
+                    f"{result['warranty_type']} ({result['accounting_standard']})"
+                ),
+                {},
+                {
+                    "type": result["warranty_type"],
+                    "standard": result["accounting_standard"],
+                    "deferred": result["deferred_revenue_amount"],
+                },
+                "IFRS 15.B28-B33",
+                changed_amount=float(result["deferred_revenue_amount"] or 0),
+            )
+        by_id = {str(r.get("warranty_id")): r for r in results}
+        total_ias37 = sum(
+            float(w.warranty_value)
+            for w in req.warranties
+            if by_id.get(w.warranty_id, {}).get("warranty_type") == "ASSURANCE"
+        )
+        return {
+            "success": True,
+            "warranties": results,
+            "summary": {
+                "total": len(results),
+                "assurance_type": sum(1 for r in results if r.get("warranty_type") == "ASSURANCE"),
+                "service_type": sum(1 for r in results if r.get("warranty_type") == "SERVICE"),
+                "judgement_required": sum(
+                    1 for r in results if r.get("warranty_type") == "JUDGEMENT_REQUIRED"
+                ),
+                "total_ias37_provision": round(total_ias37, 2),
+                "total_ifrs15_deferred": round(
+                    sum(float(r.get("deferred_revenue_amount") or 0) for r in results), 2
+                ),
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/bill-and-hold")
+async def assess_bill_and_hold(req: BillAndHoldsRequest):
+    """IFRS 15.B79–B82 — bill-and-hold arrangements (batch)."""
+    try:
+        from ifrs15_calculator import IFRS15Calculator, BillAndHoldInput
+
+        calculator = IFRS15Calculator()
+        results: List[Dict[str, Any]] = []
+        for arr in req.arrangements:
+            data = BillAndHoldInput(
+                arrangement_id=arr.arrangement_id,
+                contract_id=arr.contract_id,
+                customer_name=arr.customer_name,
+                product_description=arr.product_description,
+                contract_value=float(arr.contract_value),
+                expected_delivery_date=arr.expected_delivery_date,
+                billing_date=arr.billing_date,
+                reason_is_substantive=bool(arr.reason_is_substantive),
+                product_separately_identified=bool(arr.product_separately_identified),
+                product_ready_for_transfer=bool(arr.product_ready_for_transfer),
+                entity_cannot_redirect=bool(arr.entity_cannot_redirect),
+                currency=arr.currency or "USD",
+            )
+            result = calculator.assess_bill_and_hold(data)
+            results.append(result)
+            _ifrs15_audit_append(
+                "BILL_AND_HOLD",
+                arr.contract_id or "N/A",
+                (
+                    f"Bill-and-hold assessment — {arr.product_description}: "
+                    f"{result['conclusion']} ({result['criteria_met_count']}/4 criteria met)"
+                ),
+                {},
+                {
+                    "conclusion": result["conclusion"],
+                    "criteria_met": result["criteria_met_count"],
+                    "deferred": result["revenue_deferred"],
+                },
+                "IFRS 15.B79-B82",
+                changed_amount=float(result["revenue_deferred"] or 0),
+            )
+        return {
+            "success": True,
+            "arrangements": results,
+            "summary": {
+                "total": len(results),
+                "recognisable_now": sum(
+                    1 for r in results if r.get("conclusion") == "REVENUE_RECOGNISABLE"
+                ),
+                "deferred_until_delivery": sum(
+                    1 for r in results if r.get("conclusion") == "DEFER_UNTIL_DELIVERY"
+                ),
+                "total_revenue_deferred": round(
+                    sum(float(r.get("revenue_deferred") or 0) for r in results), 2
+                ),
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/financing-component")
+async def financing_component_calculate(req: FinancingComponentsRequest):
+    """IFRS 15.60–65 — significant financing component (batch)."""
+    try:
+        from ifrs15_calculator import IFRS15Calculator, FinancingComponentInput
+
+        calculator = IFRS15Calculator()
+        results: List[Dict[str, Any]] = []
+        for c in req.contracts:
+            data = FinancingComponentInput(
+                contract_id=c.contract_id,
+                description=c.description or "",
+                contract_value=float(c.contract_value),
+                payment_date=c.payment_date,
+                transfer_date=c.transfer_date,
+                payment_timing=c.payment_timing,
+                discount_rate=float(c.discount_rate),
+                currency=c.currency or "USD",
+            )
+            result = calculator.calculate_financing_component(data)
+            results.append(result)
+            _ifrs15_audit_append(
+                "FINANCING_COMPONENT",
+                c.contract_id or "N/A",
+                (
+                    f"Financing component ({c.payment_timing}) — "
+                    f"PV ${float(result.get('pv_of_payment') or 0):,.2f} vs nominal "
+                    f"${float(c.contract_value):,.2f}; "
+                    f"financing ${float(result.get('financing_amount') or 0):,.2f}"
+                ),
+                {"nominal": float(c.contract_value)},
+                {
+                    "revenue": result.get("revenue_amount"),
+                    "financing": result.get("financing_amount"),
+                    "type": result.get("financing_type"),
+                },
+                "IFRS 15.60-65",
+                changed_amount=float(result.get("financing_amount") or 0),
+            )
+        expedient_applied = sum(1 for r in results if r.get("practical_expedient_applied"))
+        return {
+            "success": True,
+            "contracts": results,
+            "summary": {
+                "total": len(results),
+                "expedient_applied": expedient_applied,
+                "financing_adjusted": len(results) - expedient_applied,
+                "total_financing_amount": round(
+                    sum(float(r.get("financing_amount") or 0) for r in results), 2
+                ),
+                "interest_income_total": round(
+                    sum(
+                        float(r.get("financing_amount") or 0)
+                        for r in results
+                        if r.get("financing_type") == "INTEREST_INCOME"
+                    ),
+                    2,
+                ),
+                "interest_expense_total": round(
+                    sum(
+                        float(r.get("financing_amount") or 0)
+                        for r in results
+                        if r.get("financing_type") == "INTEREST_EXPENSE"
+                    ),
+                    2,
+                ),
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/transaction-price-adjustments")
+async def transaction_price_adjustments(req: TransactionPriceAdjustmentsRequest):
+    """IFRS 15.66–72 — non-cash consideration and consideration payable (transaction price)."""
+    try:
+        from ifrs15_calculator import (
+            IFRS15Calculator,
+            NonCashConsiderationInput,
+            ConsiderationPayableInput,
+        )
+
+        calculator = IFRS15Calculator()
+        result: Dict[str, Any] = {}
+
+        if req.non_cash_items:
+            nc_inputs = [
+                NonCashConsiderationInput(**i.model_dump()) for i in req.non_cash_items
+            ]
+            nc_result = calculator.calculate_non_cash_consideration(nc_inputs)
+            result["non_cash"] = nc_result
+            cid0 = req.non_cash_items[0].contract_id if req.non_cash_items else "N/A"
+            tp_nc = float(nc_result.get("total_tp_from_non_cash") or 0)
+            _ifrs15_audit_append(
+                "NON_CASH_CONSIDERATION",
+                cid0,
+                f"Non-cash consideration: ${tp_nc:,.2f} added to transaction price",
+                {},
+                {"total_tp_from_non_cash": tp_nc, "items": len(nc_result.get("items") or [])},
+                "IFRS 15.66-69",
+                changed_amount=tp_nc,
+            )
+
+        if req.consideration_payable_items:
+            cp_inputs = [
+                ConsiderationPayableInput(**i.model_dump()) for i in req.consideration_payable_items
+            ]
+            cp_result = calculator.calculate_consideration_payable(cp_inputs)
+            result["consideration_payable"] = cp_result
+            cid1 = req.consideration_payable_items[0].contract_id if req.consideration_payable_items else "N/A"
+            tr = float(cp_result.get("total_revenue_reduction") or 0)
+            tc = float(cp_result.get("total_cost_recognition") or 0)
+            _ifrs15_audit_append(
+                "CONSIDERATION_PAYABLE",
+                cid1,
+                f"Consideration payable: ${tr:,.2f} reduces revenue; ${tc:,.2f} as cost",
+                {},
+                {
+                    "total_revenue_reduction": tr,
+                    "total_cost_recognition": tc,
+                    "items": len(cp_result.get("items") or []),
+                },
+                "IFRS 15.70-72",
+                changed_amount=tr,
+            )
+
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/portfolio/add")
+async def add_portfolio_contract(req: PortfolioContractRequest, request: Request):
+    """Upsert a contract into the IFRS 15 portfolio store."""
+    firm_id = _ifrs15_firm_id(request)
+    try:
+        contract_dict = req.model_dump()
+        summary = _ifrs15_portfolio_summary_data(contract_dict)
+        contract_name = req.customer_name or req.contract_id
+        existing_row = ifrs15_db.find_portfolio_by_business_contract_id(firm_id, req.contract_id)
+        portfolio_row_id: Optional[str] = None
+        if existing_row:
+            portfolio_row_id = str(existing_row["id"])
+            ifrs15_db.update_contract(
+                firm_id,
+                portfolio_row_id,
+                contract_data=contract_dict,
+                summary_data=summary,
+                contract_name=contract_name,
+            )
+        else:
+            row = ifrs15_db.add_contract(firm_id, contract_name, contract_dict, summary)
+            portfolio_row_id = str(row.get("id", ""))
+        portfolio_size = len(_ifrs15_portfolio_contracts_from_db(firm_id))
+        _ifrs15_audit_append(
+            "PORTFOLIO_ADD",
+            req.contract_id,
+            f"Portfolio upsert — {req.customer_name} ({req.contract_type})",
+            {},
+            {"portfolio_size": portfolio_size, "arr": float(req.arr or 0)},
+            "IFRS 15 Portfolio",
+            changed_amount=float(req.total_tp or 0),
+            firm_id=firm_id,
+            portfolio_row_id=portfolio_row_id,
+        )
+        return {"success": True, "portfolio_size": portfolio_size}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "Database error", "detail": str(e)})
+
+
+@app.get("/api/ifrs15/portfolio/summary")
+async def get_portfolio_summary(request: Request):
+    """Aggregated SaaS / revenue metrics across portfolio contracts."""
+    try:
+        return _ifrs15_portfolio_saas_summary(_ifrs15_firm_id(request))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "Database error", "detail": str(e)})
+
+
+@app.delete("/api/ifrs15/portfolio/{contract_id}")
+async def remove_portfolio_contract(contract_id: str, request: Request):
+    firm_id = _ifrs15_firm_id(request)
+    try:
+        before = len(_ifrs15_portfolio_contracts_from_db(firm_id))
+        deleted = ifrs15_db.delete_contract_by_business_id(firm_id, contract_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"{contract_id} not found")
+        portfolio_size = len(_ifrs15_portfolio_contracts_from_db(firm_id))
+        _ifrs15_audit_append(
+            "PORTFOLIO_REMOVE",
+            contract_id,
+            "Removed contract from portfolio",
+            {"portfolio_size": before},
+            {"portfolio_size": portfolio_size},
+            "IFRS 15 Portfolio",
+            changed_amount=0.0,
+            firm_id=firm_id,
+        )
+        return {"success": True, "removed": contract_id, "portfolio_size": portfolio_size}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "Database error", "detail": str(e)})
+
+
+@app.get("/api/ifrs15/portfolio/export-excel")
+async def export_portfolio_excel(request: Request):
+    """Download portfolio workbook (summary KPIs + contract detail)."""
+    from ifrs15_excel_export import IFRS15ExcelExporter
+
+    try:
+        payload = _ifrs15_portfolio_saas_summary(_ifrs15_firm_id(request))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "Database error", "detail": str(e)})
+    contracts = payload.get("contracts") or []
+    if not contracts:
+        raise HTTPException(status_code=400, detail="Portfolio is empty")
+    summary = payload.get("summary") or {}
+    buf = IFRS15ExcelExporter().export_portfolio_saas_to_bytes(summary, contracts)
+    fn = f"IFRS15_Portfolio_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fn}"'},
+    )
+
+
+@app.get("/api/ifrs15/audit-log")
+async def get_ifrs15_audit_log(
+    request: Request,
+    contract_id: str = Query("", description="Filter by contract id"),
+    action: str = Query("", description="Filter by action"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    try:
+        firm_id = _ifrs15_firm_id(request)
+        filtered = _ifrs15_audit_entries_from_db(
+            firm_id, limit=limit, contract_id=contract_id, action=action
+        )[:limit]
+        pending = sum(
+            1
+            for e in filtered
+            if e.get("sign_off_required") and not (e.get("signed_off_by") or "").strip()
+        )
+        return {
+            "success": True,
+            "entries": filtered,
+            "total": len(filtered),
+            "pending_sign_off": pending,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "Database error", "detail": str(e)})
+
+
+@app.post("/api/ifrs15/audit-log/sign-off")
+async def sign_off_ifrs15_audit_entry(req: AuditSignOffRequest, request: Request):
+    firm_id = _ifrs15_firm_id(request)
+    try:
+        rows = ifrs15_db.get_audit_log(firm_id, limit=500)
+        for row in rows:
+            details = row.get("details") or {}
+            if str(details.get("entry_id")) == req.entry_id:
+                from ifrs15_calculator import IFRS15Calculator
+
+                updated = IFRS15Calculator().sign_off_entry(details, req.reviewer, req.notes)
+                ifrs15_db.update_audit_log_entry(firm_id, str(row["id"]), updated)
+                return {"success": True, "entry": updated}
+        raise HTTPException(status_code=404, detail=f"Entry {req.entry_id} not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "Database error", "detail": str(e)})
+
+
+@app.post("/api/ifrs15/audit-log/export-excel")
+async def export_ifrs15_audit_log_excel(
+    request: Request,
+    contract_id: str = Query("", description="Filter by contract id"),
+    action: str = Query("", description="Filter by action"),
+):
+    """Minimal workbook: audit log only (same filters as GET audit-log, no row limit)."""
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+    from datetime import timezone
+
+    try:
+        firm_id = _ifrs15_firm_id(request)
+        filtered = _ifrs15_audit_entries_from_db(
+            firm_id, limit=500, contract_id=contract_id, action=action
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "Database error", "detail": str(e)})
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "IFRS 15 Audit Log"
+
+    orange = PatternFill("solid", fgColor="F97316")
+    amber = PatternFill("solid", fgColor="FEF3C7")
+    green = PatternFill("solid", fgColor="D1FAE5")
+
+    headers = [
+        "Entry ID",
+        "Timestamp",
+        "Action",
+        "Contract ID",
+        "Description",
+        "IFRS Reference",
+        "Sign-Off Required",
+        "Signed Off By",
+        "Signed Off At",
+        "Notes",
+    ]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.fill = orange
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center")
+
+    for e in filtered:
+        row = [
+            e.get("entry_id", ""),
+            e.get("timestamp", ""),
+            e.get("action", ""),
+            e.get("contract_id", ""),
+            e.get("description", ""),
+            e.get("ifrs_reference", ""),
+            "YES" if e.get("sign_off_required") else "NO",
+            e.get("signed_off_by", ""),
+            e.get("signed_off_at", ""),
+            e.get("notes", ""),
+        ]
+        ws.append(row)
+        last = ws.max_row
+        req = bool(e.get("sign_off_required"))
+        done = bool(str(e.get("signed_off_by", "") or "").strip())
+        fill = green if req and done else amber if req and not done else None
+        if fill:
+            for cell in ws[last]:
+                cell.fill = fill
+
+    max_col = len(headers)
+    for col_idx in range(1, max_col + 1):
+        letter = get_column_letter(col_idx)
+        max_len = 10
+        for row_idx in range(1, ws.max_row + 1):
+            v = ws.cell(row=row_idx, column=col_idx).value
+            max_len = max(max_len, len(str(v or "")))
+        ws.column_dimensions[letter].width = min(max_len + 4, 50)
+
+    last_row = max(ws.max_row, 1)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(max_col)}{last_row}"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    data = buf.getvalue()
+
+    filename = f"IFRS15_AuditLog_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.xlsx"
+    return StreamingResponse(
+        iter([data]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/ifrs15/master-report")
@@ -2633,6 +4113,14 @@ async def delete_rag_document(company_id: str, document_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Delete error: {str(e)}")
+
+
+try:
+    from backend.app.routers.rev_rec_recon import router as _rev_rec_recon_router
+
+    app.include_router(_rev_rec_recon_router)
+except ImportError as _rev_rec_import_err:
+    print(f"WARNING: Rev-rec reconciliation router not loaded: {_rev_rec_import_err}")
 
 
 # Run application (local dev). Tries PORT/API_PORT then scans for a free port if busy (Windows 10048, etc.).

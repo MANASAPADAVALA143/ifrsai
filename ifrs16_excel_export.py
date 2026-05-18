@@ -3,16 +3,32 @@ IFRS 16 Excel Export Module
 Professional Excel workbook generation with multiple sheets
 """
 
+from io import BytesIO
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, Color
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.chart import BarChart, Reference, LineChart
 import pandas as pd
-from typing import Dict
+from typing import Any, Dict
 from datetime import datetime
 from pathlib import Path
 
 from currency_format import format_currency_value, excel_money_number_format, currency_display_symbol
+
+
+def normalize_results_for_excel_export(results: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    API/JSON payloads use amortization_schedule as list[dict]; exporter expects a DataFrame.
+    """
+    out = dict(results)
+    am = out.get("amortization_schedule")
+    if am is not None and not isinstance(am, pd.DataFrame):
+        if isinstance(am, list):
+            out["amortization_schedule"] = pd.DataFrame(am)
+        elif isinstance(am, dict):
+            out["amortization_schedule"] = pd.DataFrame(am)
+    return out
 
 
 class IFRS16ExcelExporter:
@@ -37,6 +53,18 @@ class IFRS16ExcelExporter:
             bottom=Side(style='medium', color='000000')
         )
     
+    def _build_workbook(self, results: Dict[str, Any]) -> Workbook:
+        results = normalize_results_for_excel_export(results)
+        wb = Workbook()
+        if "Sheet" in wb.sheetnames:
+            wb.remove(wb["Sheet"])
+        self._create_summary_sheet(wb, results)
+        self._create_amortization_sheet(wb, results)
+        self._create_journal_entries_sheet(wb, results)
+        self._create_maturity_sheet(wb, results)
+        self._create_disclosure_sheet(wb, results)
+        return wb
+
     def export_ifrs16_workbook(self, results: Dict, filename: str):
         """
         Create complete IFRS 16 Excel workbook with multiple sheets
@@ -52,27 +80,18 @@ class IFRS16ExcelExporter:
             results: Dictionary from IFRS16Calculator.calculate_full_ifrs16()
             filename: Output filename (path)
         """
-        
-        # Ensure output directory exists
         output_path = Path(filename)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        wb = Workbook()
-        
-        # Remove default sheet
-        if 'Sheet' in wb.sheetnames:
-            wb.remove(wb['Sheet'])
-        
-        # Create sheets
-        self._create_summary_sheet(wb, results)
-        self._create_amortization_sheet(wb, results)
-        self._create_journal_entries_sheet(wb, results)
-        self._create_maturity_sheet(wb, results)
-        self._create_disclosure_sheet(wb, results)
-        
-        # Save workbook
+        wb = self._build_workbook(results)
         wb.save(filename)
         print(f"Excel workbook saved: {filename}")
+
+    def export_ifrs16_workbook_bytes(self, results: Dict[str, Any]) -> bytes:
+        """Build workbook in memory (no disk). For direct HTTP download after bulk-calculate JSON."""
+        wb = self._build_workbook(dict(results))
+        buf = BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
     
     def _create_summary_sheet(self, wb: Workbook, results: Dict):
         """Summary sheet with key metrics and overview"""

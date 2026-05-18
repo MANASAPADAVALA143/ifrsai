@@ -182,6 +182,7 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
     { name: 'FX Schedule Report', href: '/dashboard/ifrs16/reports/fx', icon: FileText },
     { name: 'Liability Maturity Report', href: '/dashboard/ifrs16/reports/maturity', icon: FileText },
     { name: 'IFRS 15 Revenue Recognition', href: '/dashboard/ifrs15', icon: DollarSign },
+    { name: 'Rev Rec Reconciliation', href: '/dashboard/r2r/rev-rec', icon: FileCheck },
     { name: 'IFRS 9 Overview', href: '/dashboard/ifrs9', icon: TrendingUp },
     { name: 'ECL Portfolios', href: '/dashboard/ifrs9/portfolios', icon: FolderOpen, badge: eclPortfolioCount, badgeStyle: 'count' },
     { name: 'New Portfolio', href: '/dashboard/ifrs9/portfolios/new', icon: Plus },
