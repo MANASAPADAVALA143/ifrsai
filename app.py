@@ -3915,6 +3915,11 @@ async def ifrs15_realestate_upload_spa(file: UploadFile = File(...)):
         )
     try:
         import uuid
+        from backend.app.services.arabic_pdf_handler import (
+            extract_spa_fields,
+            extraction_meta_dict,
+            legacy_extracted_from_result,
+        )
         from backend.app.services.ifrs15_realestate import map_spa_to_ifrs15_inputs
         from backend.app.services.spa_parser import SPAParser
 
@@ -3923,12 +3928,36 @@ async def ifrs15_realestate_upload_spa(file: UploadFile = File(...)):
         content = await file.read()
         upload_path.write_bytes(content)
         parser = SPAParser(api_key=ANTHROPIC_API_KEY)
-        extracted = parser.extract_from_file(str(upload_path))
-        ifrs15_inputs = map_spa_to_ifrs15_inputs(extracted)
+        extraction = extract_spa_fields(
+            content,
+            parser._client,
+            filename=file.filename or "upload.pdf",
+            model=parser._model,
+        )
+        extracted = legacy_extracted_from_result(extraction)
+        ifrs15_inputs = (
+            {} if extraction.fallback_triggered else map_spa_to_ifrs15_inputs(extracted)
+        )
+        meta = extraction_meta_dict(extraction)
         extraction_file = OUTPUT_DIR / f"spa_extraction_{file_id}.json"
         extraction_file.write_text(
-            json.dumps({"extracted": extracted, "ifrs15_inputs": ifrs15_inputs}, indent=2),
+            json.dumps(
+                {"extracted": extracted, "ifrs15_inputs": ifrs15_inputs, "extraction_meta": meta},
+                indent=2,
+            ),
             encoding="utf-8",
+        )
+        _ifrs15_audit_append(
+            action="SPA_UPLOAD",
+            contract_id=str(extracted.get("property_unit_number") or "RE-SPA"),
+            description=(
+                f"SPA uploaded — language: {meta['language_detected']}, "
+                f"method: {meta['extraction_method']}, "
+                f"confidence: {meta['confidence_score']:.0%}"
+            ),
+            before_value={},
+            after_value={"filename": file.filename, "extraction_meta": meta},
+            ifrs_reference="IFRS 15 — UAE SPA extraction",
         )
         return {
             "status": "success",
@@ -3936,6 +3965,7 @@ async def ifrs15_realestate_upload_spa(file: UploadFile = File(...)):
             "filename": file.filename,
             "extracted": extracted,
             "ifrs15_inputs": ifrs15_inputs,
+            "extraction_meta": meta,
         }
     except HTTPException:
         raise

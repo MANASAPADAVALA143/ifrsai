@@ -16,6 +16,14 @@ import {
   type DisplayCurrency,
   UAE_PEG,
 } from '@/lib/realestate-format';
+import {
+  type ExtractionMeta,
+  fieldVerifyClass,
+  highlightLowConfidenceField,
+  languageBadgeLabel,
+  lowConfidenceFieldLabel,
+  successBadgeLabel,
+} from '@/lib/spa-extraction-ui';
 import toast from 'react-hot-toast';
 import {
   Upload,
@@ -76,6 +84,9 @@ export default function RealEstateIFRS15Page() {
   const [syncLoading, setSyncLoading] = useState(false);
   const [spaExtracted, setSpaExtracted] = useState<Record<string, unknown> | null>(null);
   const [spaInputs, setSpaInputs] = useState<Record<string, unknown> | null>(null);
+  const [extractionMeta, setExtractionMeta] = useState<ExtractionMeta | null>(null);
+  const [spaFilename, setSpaFilename] = useState<string | null>(null);
+  const [clearedVerifyFields, setClearedVerifyFields] = useState<Set<string>>(new Set());
 
   const [contractValue, setContractValue] = useState('2000000');
   const [constructionStart, setConstructionStart] = useState('2023-01-01');
@@ -361,22 +372,80 @@ export default function RealEstateIFRS15Page() {
         }))
       );
     }
+    if (inputs.project_name) setProjectName(String(inputs.project_name));
+    const rera = (inputs as { rera_registration_number?: string }).rera_registration_number;
+    if (rera) setReraNumber(String(rera));
   }, []);
+
+  const markFieldVerified = useCallback((backendField: string) => {
+    setClearedVerifyFields((prev) => {
+      const next = new Set(prev);
+      next.add(backendField);
+      return next;
+    });
+  }, []);
+
+  const isVerifyHighlight = useCallback(
+    (backendField: string) =>
+      highlightLowConfidenceField(
+        backendField,
+        extractionMeta?.low_confidence_fields || [],
+        clearedVerifyFields
+      ),
+    [extractionMeta?.low_confidence_fields, clearedVerifyFields]
+  );
 
   const handleSpaUpload = async (file: File) => {
     setSpaLoading(true);
+    setExtractionMeta(null);
+    setSpaExtracted(null);
+    setSpaInputs(null);
+    setClearedVerifyFields(new Set());
+    setSpaFilename(file.name);
     const { data, error } = await ifrs15Api.realestateUploadSpa(file);
     setSpaLoading(false);
     if (error) {
       toast.error(error);
       return;
     }
+    const meta = (data?.extraction_meta as ExtractionMeta) || {};
+    setExtractionMeta(meta);
+
+    if (meta.success === false) {
+      setSpaExtracted(null);
+      setSpaInputs(null);
+      toast.error(meta.fallback_reason || 'PDF could not be read');
+      return;
+    }
+
     const extracted = (data?.extracted as Record<string, unknown>) || {};
     const inputs = (data?.ifrs15_inputs as Record<string, unknown>) || {};
-    setSpaExtracted(extracted);
+    setSpaExtracted(Object.keys(extracted).length ? extracted : null);
     setSpaInputs(inputs);
-    applySpaInputs(inputs);
-    toast.success('SPA extracted — calculator pre-filled');
+
+    if (meta.fallback_triggered) {
+      toast('Arabic PDF — please enter fields manually', { icon: '⚠️' });
+      return;
+    }
+
+    if (Object.keys(inputs).length) {
+      applySpaInputs(inputs);
+    }
+    if (extracted.rera_registration_number) {
+      setReraNumber(String(extracted.rera_registration_number));
+    }
+    if (extracted.project_name) {
+      setProjectName(String(extracted.project_name));
+    }
+    if (extracted.handover_date) {
+      setSpaHandoverDate(String(extracted.handover_date).slice(0, 10));
+    }
+
+    if (meta.warnings?.length) {
+      toast(meta.warnings[0], { icon: '⚠️' });
+    } else {
+      toast.success('SPA extracted — calculator pre-filled');
+    }
   };
 
   const runCalculations = async () => {
@@ -834,23 +903,35 @@ export default function RealEstateIFRS15Page() {
             <label className="text-sm">
               <span className="text-text-muted block mb-1">Project name</span>
               <input
-                className="w-full border border-border-default rounded px-3 py-2"
+                className={`w-full rounded px-3 py-2 ${fieldVerifyClass(isVerifyHighlight('project_name'))}`}
                 value={projectName}
-                onChange={(e) => setProjectName(e.target.value)}
+                onChange={(e) => {
+                  setProjectName(e.target.value);
+                  markFieldVerified('project_name');
+                }}
                 placeholder="e.g. Marina Heights Tower B"
               />
+              {isVerifyHighlight('project_name') ? (
+                <p className="text-xs text-amber-700 mt-1">⚠️ Please verify</p>
+              ) : null}
             </label>
             <label className="text-sm">
               <span className="text-text-muted block mb-1">RERA Registration Number *</span>
               <input
-                className={`w-full border rounded px-3 py-2 ${reraError ? 'border-red-500' : 'border-border-default'}`}
+                className={`w-full rounded px-3 py-2 ${
+                  reraError ? 'border-red-500 border-2' : fieldVerifyClass(isVerifyHighlight('rera_registration_number'))
+                }`}
                 value={reraNumber}
                 onChange={(e) => {
                   setReraNumber(e.target.value);
+                  markFieldVerified('rera_registration_number');
                   if (reraError) setReraError('');
                 }}
                 placeholder="e.g. RERA-2024-DXB-00123"
               />
+              {isVerifyHighlight('rera_registration_number') ? (
+                <p className="text-xs text-amber-700 mt-1">⚠️ Please verify</p>
+              ) : null}
               {reraError ? (
                 <p className="text-xs text-red-600 mt-1">{reraError}</p>
               ) : null}
@@ -1013,6 +1094,85 @@ export default function RealEstateIFRS15Page() {
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <Upload className="w-5 h-5 text-orange-primary" /> Upload SPA
           </h2>
+          {spaFilename && (
+            <div className="flex items-center gap-2 mb-3 text-sm text-text-secondary">
+              <FileText className="w-4 h-4" />
+              <span>{spaFilename}</span>
+              {languageBadgeLabel(
+                extractionMeta?.language_detected,
+                Boolean(extractionMeta?.warnings?.length && !extractionMeta?.fallback_triggered)
+              ) && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                  {languageBadgeLabel(
+                    extractionMeta?.language_detected,
+                    Boolean(extractionMeta?.warnings?.length && !extractionMeta?.fallback_triggered)
+                  )}
+                </span>
+              )}
+              {extractionMeta &&
+                !extractionMeta.fallback_triggered &&
+                !extractionMeta.warnings?.length &&
+                successBadgeLabel(extractionMeta.language_detected) && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                    {successBadgeLabel(extractionMeta.language_detected)}
+                  </span>
+                )}
+            </div>
+          )}
+          {extractionMeta?.success === false && (
+            <div
+              className="mb-4 p-4 rounded-lg border border-red-300 bg-red-50 text-red-900 text-sm"
+              role="alert"
+            >
+              <p className="font-semibold">PDF could not be read</p>
+              <p className="mt-1">{extractionMeta.fallback_reason}</p>
+            </div>
+          )}
+          {extractionMeta?.fallback_triggered && extractionMeta.success !== false && (
+            <div
+              className="mb-4 p-4 rounded-lg border border-amber-300 bg-amber-50 text-amber-950 text-sm"
+              role="alert"
+            >
+              <p className="font-semibold">⚠️ Arabic PDF — Manual Entry Required</p>
+              <hr className="my-2 border-amber-200" />
+              <p>
+                Language detected:{' '}
+                {extractionMeta.language_detected === 'arabic'
+                  ? 'Arabic'
+                  : extractionMeta.language_detected === 'bilingual'
+                    ? 'Bilingual'
+                    : extractionMeta.language_detected || 'Unknown'}
+              </p>
+              <p>Extraction confidence: {Math.round((extractionMeta.confidence_score || 0) * 100)}%</p>
+              <p className="mt-2">Could not reliably extract:</p>
+              <ul className="list-disc list-inside">
+                {(extractionMeta.low_confidence_fields || []).map((f) => (
+                  <li key={f}>{lowConfidenceFieldLabel(f)}</li>
+                ))}
+              </ul>
+              <hr className="my-2 border-amber-200" />
+              <p>
+                Please fill in the form fields below manually. Your PDF has been accepted — only auto-fill has
+                been skipped to prevent incorrect data.
+              </p>
+            </div>
+          )}
+          {extractionMeta &&
+            !extractionMeta.fallback_triggered &&
+            (extractionMeta.warnings?.length ?? 0) > 0 && (
+              <p className="mb-3 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded p-3">
+                ⚠️ Partial extraction — please verify highlighted fields
+              </p>
+            )}
+          {extractionMeta &&
+            !extractionMeta.fallback_triggered &&
+            !(extractionMeta.warnings?.length ?? 0) &&
+            extractionMeta.success !== false &&
+            spaExtracted && (
+              <p className="mb-3 text-sm text-green-800 bg-green-50 border border-green-200 rounded p-3">
+                ✓ SPA extracted successfully
+              </p>
+            )}
           <label className="flex flex-col items-center justify-center border-2 border-dashed border-border-default rounded-lg p-10 cursor-pointer hover:border-orange-primary transition-colors">
             <input
               type="file"
@@ -1024,7 +1184,10 @@ export default function RealEstateIFRS15Page() {
               }}
             />
             {spaLoading ? (
-              <Loader2 className="w-8 h-8 animate-spin text-orange-primary" />
+              <div className="flex flex-col items-center gap-2">
+                <Loader2 className="w-8 h-8 animate-spin text-orange-primary" />
+                <span className="text-sm text-text-secondary">Detecting language and extracting fields...</span>
+              </div>
             ) : (
               <>
                 <FileText className="w-10 h-10 text-text-muted mb-2" />
@@ -1051,25 +1214,39 @@ export default function RealEstateIFRS15Page() {
         <section className="bg-white border border-border-default rounded-lg p-6">
           <h2 className="text-lg font-semibold mb-4">Off-plan revenue calculator</h2>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-            {[
-              ['Contract value (AED)', contractValue, setContractValue],
-              ['Costs incurred', costsIncurred, setCostsIncurred],
-              ['Total estimated costs', totalCosts, setTotalCosts],
-              ['Revenue prior period', revenuePrior, setRevenuePrior],
-              ['Construction start', constructionStart, setConstructionStart, 'date'],
-              ['Expected handover', expectedHandover, setExpectedHandover, 'date'],
-              ['Current date', currentDate, setCurrentDate, 'date'],
-            ].map(([label, val, setVal, type]) => (
-              <label key={String(label)} className="text-sm">
-                <span className="text-text-muted block mb-1">{label}</span>
-                <input
-                  type={(type as string) || 'text'}
-                  className="w-full border border-border-default rounded px-3 py-2"
-                  value={val as string}
-                  onChange={(e) => (setVal as (v: string) => void)(e.target.value)}
-                />
-              </label>
-            ))}
+            {(
+              [
+                ['Contract value (AED)', contractValue, setContractValue, undefined, 'contract_price_aed'],
+                ['Costs incurred', costsIncurred, setCostsIncurred],
+                ['Total estimated costs', totalCosts, setTotalCosts],
+                ['Revenue prior period', revenuePrior, setRevenuePrior],
+                ['Construction start', constructionStart, setConstructionStart, 'date'],
+                ['Expected handover', expectedHandover, setExpectedHandover, 'date', 'handover_date'],
+                ['Current date', currentDate, setCurrentDate, 'date'],
+              ] as const
+            ).map((row) => {
+              const label = row[0];
+              const val = row[1];
+              const setVal = row[2];
+              const type = row[3];
+              const verifyKey = row.length > 4 ? row[4] : undefined;
+              const highlight = verifyKey ? isVerifyHighlight(verifyKey) : false;
+              return (
+                <label key={String(label)} className="text-sm">
+                  <span className="text-text-muted block mb-1">{label}</span>
+                  <input
+                    type={(type as string) || 'text'}
+                    className={`w-full rounded px-3 py-2 ${fieldVerifyClass(highlight)}`}
+                    value={val as string}
+                    onChange={(e) => {
+                      (setVal as (v: string) => void)(e.target.value);
+                      if (verifyKey) markFieldVerified(verifyKey);
+                    }}
+                  />
+                  {highlight ? <p className="text-xs text-amber-700 mt-1">⚠️ Please verify</p> : null}
+                </label>
+              );
+            })}
           </div>
           {offPlanResult && (
             <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
