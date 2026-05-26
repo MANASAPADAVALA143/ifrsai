@@ -29,6 +29,7 @@ import {
   type RERACertificateUploadResult,
 } from '@/components/realestate/RERACertificateCard';
 import { mapReportToPDFInput } from '@/lib/realestate-pdf-mapper';
+import { RERADeadlineTracker } from '@/components/realestate/RERADeadlineTracker';
 import toast from 'react-hot-toast';
 import {
   Upload,
@@ -125,6 +126,10 @@ export default function RealEstateIFRS15Page() {
   const [periodSchedule, setPeriodSchedule] = useState<Record<string, unknown>[]>([]);
   const [excelLoading, setExcelLoading] = useState(false);
   const [portfolioLoading, setPortfolioLoading] = useState(false);
+  const [deadlineKpi, setDeadlineKpi] = useState<{ overdue: number; dueSoon: number } | null>(null);
+  const [deadlineTrackerReport, setDeadlineTrackerReport] = useState<Record<string, unknown> | null>(
+    null
+  );
 
   const [modType, setModType] = useState('price_change');
   const [modNewPrice, setModNewPrice] = useState('1950000');
@@ -311,9 +316,21 @@ export default function RealEstateIFRS15Page() {
       milestone_description: r.milestone_description || '',
       rera_approval_ref: r.rera_approval_ref || null,
     }));
+    let existingCompletions: Record<string, string> = {};
+    if (reraNumber.trim()) {
+      try {
+        const raw = localStorage.getItem(`deadline_completions_${reraNumber.trim()}`);
+        if (raw) existingCompletions = JSON.parse(raw) as Record<string, string>;
+      } catch {
+        existingCompletions = {};
+      }
+    }
     return {
       contract_value: parseFloat(contractValue) || 0,
       construction_start: constructionStart,
+      project_start_date: constructionStart,
+      completion_rate_per_month: 3.5,
+      existing_completions: existingCompletions,
       expected_handover: expectedHandover,
       current_date: currentDate,
       costs_incurred_to_date: parseFloat(costsIncurred) || 0,
@@ -581,6 +598,14 @@ export default function RealEstateIFRS15Page() {
     setPeriodSchedule((report.period_schedule as Record<string, unknown>[]) || []);
     setCostsResult((report.contract_costs as Record<string, unknown>) || null);
     setPaResult((report.principal_agent as Record<string, unknown>) || null);
+    const dt = (report.deadline_tracker as Record<string, unknown>) || null;
+    setDeadlineTrackerReport(dt);
+    if (dt) {
+      setDeadlineKpi({
+        overdue: Number(dt.overdue_count) || 0,
+        dueSoon: Number(dt.due_soon_count) || 0,
+      });
+    }
     toast.success('Full recognition report ready');
   };
 
@@ -612,6 +637,7 @@ export default function RealEstateIFRS15Page() {
         certMismatchResolved,
         certOverrideManual,
         cancelResult,
+        deadlineTracker: deadlineTrackerReport,
       },
       { reportingPeriod: period, reportDate: pdfReportDate, currency: displayCurrency }
     );
@@ -1251,7 +1277,7 @@ export default function RealEstateIFRS15Page() {
         </section>
 
         {offPlanResult && (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-8 gap-3">
             {[
               ['RERA', reraNumber || '—'],
               [
@@ -1323,6 +1349,37 @@ export default function RealEstateIFRS15Page() {
               <p className="text-[10px] uppercase tracking-wide">Pending Oqood Filings</p>
               <p className="text-sm font-bold">{pendingOqoodCount}</p>
             </div>
+            <button
+              type="button"
+              onClick={() =>
+                document.getElementById('rera-deadline-tracker')?.scrollIntoView({ behavior: 'smooth' })
+              }
+              className={`rounded-lg p-3 border text-left w-full ${
+                (deadlineKpi?.overdue ?? 0) > 0
+                  ? 'bg-red-100 text-red-800 border-red-300'
+                  : (deadlineKpi?.dueSoon ?? 0) > 0
+                    ? 'bg-amber-100 text-amber-800 border-amber-300'
+                    : deadlineKpi
+                      ? 'bg-green-100 text-green-800 border-green-300'
+                      : 'bg-slate-50 border-slate-200'
+              }`}
+            >
+              <p className="text-[10px] uppercase tracking-wide flex items-center gap-1">
+                Deadlines
+                {(deadlineKpi?.overdue ?? 0) > 0 && (
+                  <span className="inline-block w-2 h-2 rounded-full bg-red-600 animate-pulse" />
+                )}
+              </p>
+              <p className="text-sm font-bold">
+                {!deadlineKpi
+                  ? 'Not run'
+                  : (deadlineKpi.overdue ?? 0) > 0
+                    ? `${deadlineKpi.overdue} Overdue`
+                    : (deadlineKpi.dueSoon ?? 0) > 0
+                      ? `${deadlineKpi.dueSoon} Due Soon`
+                      : 'All Current'}
+              </p>
+            </button>
           </div>
         )}
 
@@ -2107,6 +2164,18 @@ export default function RealEstateIFRS15Page() {
             <p className="text-sm text-text-muted">Run recognition to generate VAT alignment from revenue schedule.</p>
           )}
         </section>
+
+        <RERADeadlineTracker
+          reraNumber={reraNumber}
+          projectName={projectName}
+          contractPrice={parseFloat(contractValue) || 0}
+          completionPct={Number(offPlanResult?.completion_pct) || completionPctLive}
+          constructionStart={constructionStart}
+          expectedHandover={expectedHandover}
+          currency={displayCurrency}
+          initialReport={deadlineTrackerReport}
+          onSummaryChange={setDeadlineKpi}
+        />
 
         <section className="bg-white border border-border-default rounded-lg p-6">
           <button

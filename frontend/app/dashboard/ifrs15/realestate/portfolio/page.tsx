@@ -60,6 +60,7 @@ function PortfolioPageInner() {
   const [sortBy, setSortBy] = useState('contract_value');
   const [page, setPage] = useState(1);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [deadlineDrawer, setDeadlineDrawer] = useState<ProjectRow | null>(null);
 
   const violationsOnly = searchParams.get('violations_only') === 'true';
   const healthIssuesOnly = searchParams.get('health_issues_only') === 'true';
@@ -225,6 +226,7 @@ function PortfolioPageInner() {
   const bundlingN = Number(data?.projects_with_bundling_alert) || 0;
   const healthIssues = Number(data?.projects_with_health_issues) || 0;
   const completionPct = Number(data?.portfolio_completion_pct) || 0;
+  const portfolioDeadlinesOverdue = Number(data?.portfolio_deadlines_overdue) || 0;
 
   return (
     <SidebarLayout>
@@ -247,7 +249,7 @@ function PortfolioPageInner() {
           </Button>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3">
           {[
             ['Total Projects', String(totalProjects), 'Off-plan contracts', ''],
             ['Total Contract Value', fmt(Number(data?.total_contract_value_aed)), 'Portfolio value', ''],
@@ -269,6 +271,12 @@ function PortfolioPageInner() {
               String(healthIssues),
               'Projects need attention',
               healthIssues > 0 ? 'amber' : '',
+            ],
+            [
+              'Portfolio Deadlines',
+              String(portfolioDeadlinesOverdue),
+              'Overdue milestones (all projects)',
+              portfolioDeadlinesOverdue > 0 ? 'violation' : '',
             ],
           ].map(([title, val, sub, flag]) => (
             <div
@@ -438,6 +446,7 @@ function PortfolioPageInner() {
                   <th>Escrow</th>
                   <th>Health</th>
                   <th>Oqood</th>
+                  <th>Deadlines</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -478,6 +487,24 @@ function PortfolioPageInner() {
                           >
                             {hs}/5
                           </button>
+                        </td>
+                        <td>
+                          {(() => {
+                            const od = Number(p.deadline_overdue) || 0;
+                            const ds = Number(p.deadline_due_soon) || 0;
+                            if (od === 0 && ds === 0) return <span className="text-xs text-slate-400">—</span>;
+                            return (
+                              <button
+                                type="button"
+                                className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                                  od > 0 ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-900'
+                                }`}
+                                onClick={() => setDeadlineDrawer(p)}
+                              >
+                                {od > 0 ? `${od} overdue` : `${ds} due soon`}
+                              </button>
+                            );
+                          })()}
                         </td>
                         <td>
                           <span
@@ -534,6 +561,49 @@ function PortfolioPageInner() {
             </div>
           )}
         </section>
+
+        {deadlineDrawer && (
+          <div
+            className="fixed inset-y-0 right-0 z-40 w-full max-w-md bg-white shadow-xl border-l p-6 overflow-y-auto"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="deadline-drawer-title"
+          >
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <h3 id="deadline-drawer-title" className="font-bold text-lg">
+                  {String(deadlineDrawer.project_name)}
+                </h3>
+                <p className="text-xs text-text-muted">{String(deadlineDrawer.rera_registration_number)}</p>
+              </div>
+              <button type="button" className="text-sm text-text-muted" onClick={() => setDeadlineDrawer(null)}>
+                Close
+              </button>
+            </div>
+            <ul className="text-sm space-y-2">
+              {((deadlineDrawer.deadline_milestones as Record<string, unknown>[]) || []).map((m) => (
+                <li
+                  key={String(m.milestone_id)}
+                  className={`border rounded p-2 ${
+                    m.status === 'overdue'
+                      ? 'bg-red-50 border-red-200'
+                      : m.status === 'due_soon'
+                        ? 'bg-amber-50 border-amber-200'
+                        : 'bg-slate-50'
+                  }`}
+                >
+                  <p className="font-medium text-xs">{String(m.title)}</p>
+                  <p className="text-[11px] text-text-muted">
+                    {String(m.status)} — {String(m.due_date || m.projected_date || '—')}
+                  </p>
+                </li>
+              ))}
+            </ul>
+            <Button className="mt-4 w-full" variant="secondary" onClick={() => openProject(deadlineDrawer)}>
+              Open in Real Estate module
+            </Button>
+          </div>
+        )}
       </div>
     </SidebarLayout>
   );

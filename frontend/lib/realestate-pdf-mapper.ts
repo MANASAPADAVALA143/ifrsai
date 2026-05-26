@@ -28,6 +28,7 @@ export type PDFFormState = {
   certMismatchResolved: string | null;
   certOverrideManual: boolean;
   cancelResult: Record<string, unknown> | null;
+  deadlineTracker?: Record<string, unknown> | null;
 };
 
 function currentQuarterLabel(): string {
@@ -120,5 +121,6 @@ export function mapReportToPDFInput(
     rera_certificate_verified: certVerified,
     rera_certificate_confidence: form.certResult?.confidence_score ?? null,
     journal_entries: (off.journal_entries as Record<string, unknown>[]) || [],
+    deadline_tracker: form.deadlineTracker || (report.deadline_tracker as Record<string, unknown>) || null,
   };
 }

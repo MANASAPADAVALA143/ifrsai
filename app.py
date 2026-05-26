@@ -62,6 +62,43 @@ def _ifrs15_firm_id(request: Optional[Request] = None) -> str:
     return os.getenv("IFRS15_FIRM_ID", "default")
 
 
+def _find_realestate_portfolio_row_by_rera(firm_id: str, rera_number: str) -> Optional[Dict[str, Any]]:
+    target = (rera_number or "").strip()
+    if not target:
+        return None
+    for row in ifrs15_db.get_portfolio(firm_id):
+        cd = dict(row.get("contract_data") or {})
+        if str(cd.get("contract_type") or "") != "real_estate_off_plan":
+            continue
+        snap = cd.get("realestate_snapshot") or {}
+        rn = str(snap.get("rera_registration_number") or cd.get("risk") or "").strip()
+        if rn == target:
+            return row
+    return None
+
+
+def _load_deadline_completions(firm_id: str, rera_number: str) -> Dict[str, Any]:
+    row = _find_realestate_portfolio_row_by_rera(firm_id, rera_number)
+    if not row:
+        return {}
+    snap = (row.get("contract_data") or {}).get("realestate_snapshot") or {}
+    return dict(snap.get("deadline_completions") or {})
+
+
+def _save_deadline_completions(
+    firm_id: str, rera_number: str, completions: Dict[str, Any]
+) -> bool:
+    row = _find_realestate_portfolio_row_by_rera(firm_id, rera_number)
+    if not row:
+        return False
+    cd = dict(row.get("contract_data") or {})
+    snap = dict(cd.get("realestate_snapshot") or {})
+    snap["deadline_completions"] = completions
+    cd["realestate_snapshot"] = snap
+    ifrs15_db.update_contract(firm_id, str(row["id"]), contract_data=cd)
+    return True
+
+
 def _ifrs15_portfolio_contracts_from_db(firm_id: str) -> List[Dict[str, Any]]:
     rows = ifrs15_db.get_portfolio(firm_id)
     return [dict(row.get("contract_data") or {}) for row in rows]
@@ -1020,6 +1057,30 @@ class RealEstateReportRequest(RealEstateContractInput):
     cancellation_refund: Optional[Dict[str, Any]] = None
     modifications: List[Dict[str, Any]] = Field(default_factory=list)
     units: List[Dict[str, Any]] = Field(default_factory=list)
+    completion_rate_per_month: Optional[float] = Field(default=None, ge=0)
+    project_start_date: Optional[str] = None
+    existing_completions: Optional[Dict[str, Any]] = None
+    deadline_tracker_today: Optional[str] = None
+
+
+class DeadlineTrackerRequest(BaseModel):
+    rera_registration_number: str
+    project_name: str = ""
+    contract_price_aed: float = 0.0
+    current_completion_pct: float = Field(ge=0, le=100)
+    completion_rate_per_month: float = Field(default=3.5, ge=0)
+    project_start_date: str = ""
+    expected_completion_date: str = ""
+    existing_completions: Dict[str, Any] = Field(default_factory=dict)
+    currency: str = "AED"
+    today: Optional[str] = None
+
+
+class DeadlineTrackerCompleteRequest(DeadlineTrackerRequest):
+    milestone_type: str
+    completed_date: str
+    completed_by: str = ""
+    notes: str = ""
 
 
 class CancellationRefundInput(BaseModel):
@@ -3921,6 +3982,40 @@ async def ifrs15_realestate_report(request: RealEstateReportRequest):
 
         if request.cancellation_refund:
             report["cancellation_refund"] = request.cancellation_refund
+
+        report["deadline_tracker"] = None
+        proj_start = request.project_start_date or request.construction_start
+        if proj_start:
+            from backend.app.services.rera_deadline_tracker import build_deadline_tracker
+
+            off_plan = report.get("off_plan") or {}
+            completions = dict(request.existing_completions or {})
+            if not completions:
+                completions = _load_deadline_completions(
+                    _ifrs15_firm_id(), request.rera_registration_number
+                )
+            dt_report = build_deadline_tracker(
+                {
+                    "rera_registration_number": request.rera_registration_number,
+                    "project_name": request.project_name,
+                    "current_completion_pct": float(
+                        off_plan.get("completion_pct") or completion_pct_gate
+                    ),
+                    "contract_price_aed": float(request.contract_value),
+                    "completion_rate_per_month": float(
+                        request.completion_rate_per_month
+                        if request.completion_rate_per_month is not None
+                        else 3.5
+                    ),
+                    "project_start_date": proj_start,
+                    "expected_completion_date": request.expected_handover,
+                    "existing_completions": completions,
+                    "currency": request.currency,
+                    "today": request.deadline_tracker_today,
+                }
+            )
+            report["deadline_tracker"] = dt_report.model_dump()
+
         cid = request.contract_id or "RE-REPORT"
         off = report.get("off_plan") or {}
         _ifrs15_audit_append(
@@ -4153,6 +4248,95 @@ async def ifrs15_realestate_upload_rera_certificate(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/ifrs15/realestate/deadline-tracker")
+async def ifrs15_realestate_deadline_tracker(request: DeadlineTrackerRequest):
+    """RERA milestones, FTA VAT, and IFRS 15 quarter-end deadline calendar."""
+    from backend.app.services.rera_deadline_tracker import build_deadline_tracker
+
+    try:
+        body = request.model_dump()
+        firm_id = _ifrs15_firm_id()
+        if not body.get("existing_completions"):
+            body["existing_completions"] = _load_deadline_completions(
+                firm_id, request.rera_registration_number
+            )
+        report = build_deadline_tracker(body)
+        _ifrs15_audit_append(
+            "RE_DEADLINE_TRACKER",
+            request.rera_registration_number,
+            (
+                f"Deadline tracker run — overdue: {report.overdue_count}, "
+                f"due soon: {report.due_soon_count}, completed: {report.completed_count}"
+            ),
+            {},
+            report.model_dump(),
+            "UAE Law No. 8 of 2007 — RERA milestones",
+        )
+        return {"success": True, "report": report.model_dump()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/ifrs15/realestate/deadline-tracker/complete")
+async def ifrs15_realestate_deadline_tracker_complete(
+    request: DeadlineTrackerCompleteRequest, http_request: Request
+):
+    """Mark a regulatory milestone complete and persist to portfolio."""
+    from backend.app.services.rera_deadline_tracker import build_deadline_tracker
+
+    try:
+        firm_id = _ifrs15_firm_id(http_request)
+        completions = dict(request.existing_completions or {})
+        if not completions:
+            completions = _load_deadline_completions(firm_id, request.rera_registration_number)
+        completions[request.milestone_type] = request.completed_date[:10]
+        _save_deadline_completions(firm_id, request.rera_registration_number, completions)
+
+        body = request.model_dump()
+        body["existing_completions"] = completions
+        report = build_deadline_tracker(body)
+        _ifrs15_audit_append(
+            "RE_DEADLINE_COMPLETE",
+            request.rera_registration_number,
+            (
+                f"Milestone completed — {request.milestone_type} on "
+                f"{request.completed_date} by {request.completed_by or 'user'}"
+            ),
+            {},
+            {"milestone_type": request.milestone_type, "notes": request.notes},
+            "UAE Law No. 8 of 2007",
+            firm_id=firm_id,
+        )
+        return {"success": True, "report": report.model_dump(), "deadline_completions": completions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/deadline-tracker/export-excel")
+async def ifrs15_realestate_deadline_tracker_export(request: DeadlineTrackerRequest):
+    """Export RERA deadline tracker workbook."""
+    from backend.app.services.rera_deadline_tracker import (
+        build_deadline_tracker,
+        export_deadline_tracker_excel,
+    )
+
+    try:
+        body = request.model_dump()
+        if not body.get("existing_completions"):
+            body["existing_completions"] = _load_deadline_completions(
+                _ifrs15_firm_id(), request.rera_registration_number
+            )
+        report = build_deadline_tracker(body)
+        xlsx_bytes, filename = export_deadline_tracker_excel(report)
+        return Response(
+            content=xlsx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/ifrs15/realestate/client-report-pdf")
 async def ifrs15_realestate_client_report_pdf(request: RealEstatePDFInput):
     """Generate branded UAE real estate IFRS 15 client PDF (A4, ~4 pages)."""
@@ -4161,16 +4345,16 @@ async def ifrs15_realestate_client_report_pdf(request: RealEstatePDFInput):
     try:
         pdf_bytes, pages = generate_realestate_pdf(request)
         safe_rera = "".join(
-            ch for ch in (data.rera_registration_number or "RE") if ch.isalnum() or ch in "-_"
+            ch for ch in (request.rera_registration_number or "RE") if ch.isalnum() or ch in "-_"
         )[:30]
-        date_part = (data.report_date or datetime.now().strftime("%Y-%m-%d"))[:10].replace("-", "")
+        date_part = (request.report_date or datetime.now().strftime("%Y-%m-%d"))[:10].replace("-", "")
         filename = f"IFRS15_RE_{safe_rera}_{date_part}.pdf"
         _ifrs15_audit_append(
             action="REALESTATE_CLIENT_PDF",
             contract_id=safe_rera,
             description=(
-                f"Client PDF report generated — RERA: {data.rera_registration_number}, "
-                f"period: {data.reporting_period}, pages: {pages}"
+                f"Client PDF report generated — RERA: {request.rera_registration_number}, "
+                f"period: {request.reporting_period}, pages: {pages}"
             ),
             before_value={},
             after_value={"filename": filename, "pages": pages},

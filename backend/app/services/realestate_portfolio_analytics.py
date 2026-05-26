@@ -36,6 +36,9 @@ class ProjectSummary(BaseModel):
     last_updated: str = ""
     completion_source: str = "manual_input"
     currency: str = "AED"
+    deadline_overdue: int = 0
+    deadline_due_soon: int = 0
+    deadline_milestones: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class PortfolioAnalytics(BaseModel):
@@ -51,6 +54,7 @@ class PortfolioAnalytics(BaseModel):
     projects_with_oqood_pending: int = 0
     projects_with_bundling_alert: int = 0
     projects_with_health_issues: int = 0
+    portfolio_deadlines_overdue: int = 0
     average_disclosure_score: float = 0.0
     completion_distribution: Dict[str, int] = Field(
         default_factory=lambda: {"0-25": 0, "26-50": 0, "51-75": 0, "76-100": 0}
@@ -160,6 +164,10 @@ def _map_contract_to_summary(
     escrow_status = _escrow_compliance_for_contract(contract)
     cid = str(contract.get("contract_id") or "RE-UNKNOWN")
 
+    from backend.app.services.rera_deadline_tracker import summarize_deadlines_for_contract
+
+    deadline_summary = summarize_deadlines_for_contract(contract)
+
     return ProjectSummary(
         contract_id=cid,
         project_name=str(
@@ -199,6 +207,9 @@ def _map_contract_to_summary(
             snap.get("completion_source") or contract.get("completion_source") or "manual_input"
         ),
         currency=display_currency.upper(),
+        deadline_overdue=int(deadline_summary.get("deadline_overdue") or 0),
+        deadline_due_soon=int(deadline_summary.get("deadline_due_soon") or 0),
+        deadline_milestones=list(deadline_summary.get("deadline_milestones") or []),
     )
 
 
@@ -249,6 +260,7 @@ def _aggregate_from_projects(
         projects_with_oqood_pending=sum(1 for p in projects if p.pending_oqood_filings > 0),
         projects_with_bundling_alert=sum(1 for p in projects if p.bundling_alert),
         projects_with_health_issues=sum(1 for p in projects if p.health_score < 4),
+        portfolio_deadlines_overdue=sum(p.deadline_overdue for p in projects),
         average_disclosure_score=round(sum(scores) / len(scores), 1) if scores else 0.0,
         completion_distribution=dist,
         projects=projects,

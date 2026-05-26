@@ -1016,6 +1016,42 @@ export const ifrs15Api = {
       '/api/ifrs15/realestate/modification/oqood-filed',
       { method: 'PATCH', body: JSON.stringify(payload) }
     ),
+
+  realestateDeadlineTracker: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; report?: Record<string, unknown> }>(
+      '/api/ifrs15/realestate/deadline-tracker',
+      { method: 'POST', body: JSON.stringify(payload) }
+    ),
+
+  realestateDeadlineTrackerComplete: async (payload: Record<string, unknown>) =>
+    apiCall<{
+      success?: boolean;
+      report?: Record<string, unknown>;
+      deadline_completions?: Record<string, string>;
+    }>('/api/ifrs15/realestate/deadline-tracker/complete', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
+  realestateDeadlineTrackerExport: async (payload: Record<string, unknown>) => {
+    try {
+      const response = await fetch(`${API_URL}/api/ifrs15/realestate/deadline-tracker/export-excel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        return { blob: null, filename: null, error: (err as { detail?: string }).detail || response.statusText };
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      return { blob, filename: match?.[1] || 'RERA_Deadlines.xlsx', error: null };
+    } catch (e) {
+      return { blob: null, filename: null, error: e instanceof Error ? e.message : 'Export failed' };
+    }
+  },
 };
 
 /** IFRS 9 classification & measurement (POST /api/ifrs9/classify) */

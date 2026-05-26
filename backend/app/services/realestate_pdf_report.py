@@ -67,6 +67,7 @@ class RealEstatePDFInput(BaseModel):
     rera_certificate_verified: bool = False
     rera_certificate_confidence: Optional[float] = None
     journal_entries: List[Dict[str, Any]] = Field(default_factory=list)
+    deadline_tracker: Optional[Dict[str, Any]] = None
 
 
 def format_money(amount: Any, currency: str = "AED") -> str:
@@ -561,6 +562,69 @@ def _draw_compliance_page(c: canvas.Canvas, data: RealEstatePDFInput) -> None:
     )
 
 
+def _draw_deadline_tracker_page(c: canvas.Canvas, data: RealEstatePDFInput) -> None:
+    dt = data.deadline_tracker or {}
+    if not dt:
+        return
+    c.showPage()
+    y = PAGE_H - MARGIN
+    y = _section_header(c, "RERA Milestone & Deadline Summary", y)
+
+    alerts = list(dt.get("critical_alerts") or [])
+    if alerts:
+        c.setFillColor(RED)
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(MARGIN, y, "Critical alerts")
+        y -= 0.5 * cm
+        c.setFillColor(colors.black)
+        c.setFont("Helvetica", 8)
+        for alert in alerts[:6]:
+            y = _draw_wrapped(c, f"• {alert}", MARGIN, y, CONTENT_W, 8)
+        y -= 0.2 * cm
+
+    headers = ["Milestone", "Status", "Due", "Days", "Escrow"]
+    widths = [7.5 * cm, 2.2 * cm, 2.5 * cm, 1.5 * cm, 3.5 * cm]
+    y = _draw_table_header(c, headers, widths, y)
+    cur = data.currency.upper()
+    for i, m in enumerate((dt.get("milestones") or [])[:14]):
+        if y < MARGIN + 2 * cm:
+            c.showPage()
+            y = PAGE_H - MARGIN
+            y = _section_header(c, "RERA Milestones (cont.)", y)
+            y = _draw_table_header(c, headers, widths, y)
+        status = str(m.get("status") or "")
+        if status == "overdue":
+            c.setFillColor(colors.HexColor("#FEE2E2"))
+        elif status == "completed":
+            c.setFillColor(colors.HexColor("#D1FAE5"))
+        else:
+            c.setFillColor(LIGHT_BG if i % 2 == 0 else colors.white)
+        c.rect(MARGIN, y - 0.45 * cm, CONTENT_W, 0.45 * cm, stroke=0, fill=1)
+        c.setFillColor(colors.black)
+        c.setFont("Helvetica", 7)
+        cells = [
+            str(m.get("title") or "")[:42],
+            status[:12],
+            format_display_date(m.get("due_date") or m.get("projected_date")),
+            str(m.get("days_until_due") if m.get("days_until_due") is not None else "—"),
+            format_money(m.get("escrow_release_amount_aed"), cur) if m.get("escrow_release_amount_aed") else "—",
+        ]
+        x = MARGIN
+        for cell, w in zip(cells, widths):
+            c.drawString(x + 0.05 * cm, y - 0.32 * cm, str(cell)[:28])
+            x += w
+        y -= 0.48 * cm
+
+    y = _draw_wrapped(
+        c,
+        "UAE Law No. 8 of 2007; Federal Decree-Law No. 8 of 2017 (VAT); IFRS 15 para 38.",
+        MARGIN,
+        y - 0.3 * cm,
+        CONTENT_W,
+        8,
+    )
+
+
 def generate_realestate_pdf(data: RealEstatePDFInput) -> Tuple[bytes, int]:
     """Build PDF bytes and return (bytes, page_count estimate)."""
     buf = io.BytesIO()
@@ -573,6 +637,8 @@ def generate_realestate_pdf(data: RealEstatePDFInput) -> Tuple[bytes, int]:
     _draw_executive_summary(c, data)
     _draw_schedule_and_journals(c, data, start_new_page=True)
     _draw_compliance_page(c, data)
+    if data.deadline_tracker:
+        _draw_deadline_tracker_page(c, data)
 
     c.save()
     pdf_bytes = buf.getvalue()
