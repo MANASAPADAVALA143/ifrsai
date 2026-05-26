@@ -6,11 +6,12 @@ Enterprise REST API for IFRS 16 calculations and reporting
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse, Response, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from decimal import Decimal
 import io
+import hashlib
 import os
 import json
 import uuid
@@ -109,6 +110,43 @@ def _ifrs15_portfolio_saas_summary(firm_id: Optional[str] = None) -> Dict[str, A
         by_type[ct]["arr"] += float(c.get("arr") or 0)
         by_type[ct]["deferred"] += float(c.get("deferred_balance") or 0)
 
+    bundling_alerts: List[Dict[str, Any]] = []
+    try:
+        from backend.app.services.multi_unit_bundling import UnitContract, assess_bundling
+
+        by_buyer: Dict[str, List[Dict[str, Any]]] = {}
+        for c in contracts:
+            if str(c.get("contract_type") or "") != "real_estate_off_plan":
+                continue
+            bid = str(c.get("buyer_id_hash") or "").strip()
+            if not bid:
+                continue
+            by_buyer.setdefault(bid, []).append(c)
+
+        for _, rows in by_buyer.items():
+            if len(rows) < 2:
+                continue
+            units: List[UnitContract] = []
+            for i, row in enumerate(rows):
+                units.append(
+                    UnitContract(
+                        contract_id=str(row.get("contract_id") or f"RE-{i+1}"),
+                        unit_number=str(row.get("unit_number") or row.get("contract_id") or f"U-{i+1}"),
+                        unit_type=str(row.get("unit_type") or "apartment"),
+                        contract_price_aed=float(row.get("total_tp") or 0),
+                        contract_date=str(row.get("start_date") or "2024-01-01"),
+                        completion_pct=float(row.get("completion_pct") or 0),
+                        costs_incurred_aed=float(row.get("costs_incurred_aed") or 0),
+                        buyer_name=str(row.get("customer_name") or "Buyer"),
+                        buyer_id=str(row.get("buyer_id_hash") or ""),
+                    )
+                )
+            assessment = assess_bundling(units).model_dump()
+            if assessment.get("should_bundle"):
+                bundling_alerts.append(assessment)
+    except Exception:
+        bundling_alerts = []
+
     summary = {
         "total_contracts": n,
         "active_contracts": len(active),
@@ -123,8 +161,9 @@ def _ifrs15_portfolio_saas_summary(firm_id: Optional[str] = None) -> Dict[str, A
         "at_risk_rate_pct": round((len(at_risk) / n * 100.0) if n else 0.0, 2),
         "revenue_backlog": round(total_deferred + total_rpo, 2),
         "by_contract_type": by_type,
+        "bundling_alerts_count": len(bundling_alerts),
     }
-    return {"success": True, "summary": summary, "contracts": contracts}
+    return {"success": True, "summary": summary, "contracts": contracts, "bundling_alerts": bundling_alerts}
 
 
 def _ifrs15_audit_append(
@@ -830,6 +869,170 @@ class IFRS15DisclosureScorerRequest(BaseModel):
     calculation_results: Optional[Dict[str, Any]] = None
 
 
+class RealEstateOffPlanRequest(BaseModel):
+    contract_value: float
+    construction_start: str
+    expected_handover: str
+    current_date: str
+    costs_incurred_to_date: float
+    total_estimated_costs: float
+    escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
+    revenue_prior_period: float = 0.0
+    billings: Optional[List[Dict[str, Any]]] = None
+    contract_id: Optional[str] = None
+
+
+class RealEstateEscrowRequest(BaseModel):
+    contract_value: float
+    costs_incurred_to_date: float
+    total_estimated_costs: float
+    escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
+    milestone_releases: List[Dict[str, Any]] = Field(default_factory=list)
+    revenue_prior_period: float = 0.0
+
+
+class RealEstateModificationRequest(BaseModel):
+    original_contract: Dict[str, Any]
+    modification_type: str  # price_change | unit_swap | cancellation | extension
+    modification_details: Dict[str, Any] = Field(default_factory=dict)
+    contract_id: Optional[str] = None
+    oqood_filed: bool = False
+    modification_date: Optional[str] = None
+
+
+class RealEstateContractCostsRequest(BaseModel):
+    commission_paid: float
+    commission_date: Optional[str] = None
+    contract_value: float
+    expected_amortisation_period: int = 24
+    contract_id: Optional[str] = None
+
+
+class RealEstatePrincipalAgentRequest(BaseModel):
+    gross_contract_value: float = 0.0
+    contract_value: Optional[float] = None
+    agent_commission: float = 0.0
+    controls_before_transfer: str = "developer"
+    inventory_risk: str = "developer"
+    pricing_discretion: str = "developer"
+    credit_risk: str = "developer"
+    contract_id: Optional[str] = None
+
+
+class RealEstateVatRequest(BaseModel):
+    revenue_schedule: List[Dict[str, Any]] = Field(default_factory=list)
+    revenue_current_period: Optional[float] = None
+    period: Optional[str] = None
+    fta_filing_period: Optional[str] = None
+    currency: str = "AED"
+
+
+class RealEstateFullRequest(BaseModel):
+    """Run off-plan, escrow, VAT, and optional modules in one call."""
+    off_plan: RealEstateOffPlanRequest
+    escrow: Optional[RealEstateEscrowRequest] = None
+    vat_schedule: List[Dict[str, Any]] = Field(default_factory=list)
+    spa_mapped: Optional[Dict[str, Any]] = None
+
+
+class RealEstateToCalculateRequest(BaseModel):
+    """Build main IFRS 15 /calculate payload from real estate outputs."""
+    off_plan: Dict[str, Any]
+    spa: Optional[Dict[str, Any]] = None
+    spa_mapped: Optional[Dict[str, Any]] = None
+    construction_start: str = ""
+    expected_handover: str = ""
+    contract_value: float = 0.0
+    costs_incurred_to_date: float = 0.0
+    total_estimated_costs: float = 0.0
+    revenue_prior_period: float = 0.0
+    escrow_total: float = 0.0
+
+
+class RealEstateContractInput(BaseModel):
+    """Shared UAE real estate contract fields."""
+
+    rera_registration_number: str = Field(..., min_length=4, max_length=20)
+    project_name: str = ""
+    currency: str = Field(default="AED", pattern="^(AED|USD)$")
+    exchange_rate: float = Field(default=3.6725, gt=0)
+    revenue_recognition_trigger: str = Field(
+        default="earlier_of_both",
+        pattern="^(rera_completion_certificate|spa_handover_date|earlier_of_both)$",
+    )
+    rera_completion_date: Optional[str] = None
+    spa_handover_date: Optional[str] = None
+
+    @field_validator("rera_registration_number")
+    @classmethod
+    def validate_rera_field(cls, v: str) -> str:
+        from backend.app.services.ifrs15_realestate import validate_rera_registration_number
+
+        return validate_rera_registration_number(v)
+
+
+class RealEstateReportRequest(RealEstateContractInput):
+    """Full UAE real estate report with quarterly schedule and optional modules."""
+
+    contract_value: float
+    construction_start: str
+    expected_handover: str
+    current_date: str
+    costs_incurred_to_date: float
+    total_estimated_costs: float
+    escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
+    milestone_releases: List[Dict[str, Any]] = Field(default_factory=list)
+    revenue_prior_period: float = 0.0
+    commission_paid: Optional[float] = None
+    expected_amortisation_period: int = 24
+    assess_principal_agent: bool = False
+    gross_contract_value: Optional[float] = None
+    controls_before_transfer: str = "developer"
+    inventory_risk: str = "developer"
+    pricing_discretion: str = "developer"
+    credit_risk: str = "developer"
+    spa: Optional[Dict[str, Any]] = None
+    spa_mapped: Optional[Dict[str, Any]] = None
+    contract_id: Optional[str] = None
+    cancellation_refund: Optional[Dict[str, Any]] = None
+    modifications: List[Dict[str, Any]] = Field(default_factory=list)
+    units: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class CancellationRefundInput(BaseModel):
+    contract_price: float
+    amount_paid_by_buyer: float
+    construction_completion_pct: float = Field(ge=0, le=100)
+    rera_registration_number: str = Field(..., min_length=4, max_length=20)
+    cancellation_reason: str = Field(
+        default="buyer_default",
+        pattern="^(buyer_default|developer_default|mutual_agreement)$",
+    )
+    escrow_balance: float = 0.0
+
+    @field_validator("rera_registration_number")
+    @classmethod
+    def validate_rera_cancel(cls, v: str) -> str:
+        from backend.app.services.ifrs15_realestate import validate_rera_registration_number
+
+        return validate_rera_registration_number(v)
+
+
+class RealEstateExportExcelRequest(BaseModel):
+    report: Dict[str, Any]
+    contract_id: Optional[str] = None
+
+
+class RealEstateBundlingCheckRequest(BaseModel):
+    units: List[Dict[str, Any]] = Field(default_factory=list)
+    currency: str = "AED"
+
+
+class RealEstateOqoodFiledPatchRequest(BaseModel):
+    modification_id: str
+    oqood_filed: bool = True
+
+
 # Helper Functions
 def convert_lease_request_to_input(request: LeaseRequest):
     """Convert API request to LeaseInput dataclass"""
@@ -1090,12 +1293,15 @@ async def calculate_lease(request: LeaseRequest):
         if 'amortization_schedule' in results_json:
             results_json['amortization_schedule'] = results_json['amortization_schedule'].to_dict(orient='records')
         
-        # Generate Excel file
+        # Generate Excel file (calculation still succeeds if export fails)
         file_id = str(uuid.uuid4())
         excel_filename = OUTPUT_DIR / f"IFRS16_{request.lease_id}_{file_id}.xlsx"
-        
-        exporter = IFRS16ExcelExporter()
-        exporter.export_ifrs16_workbook(results, str(excel_filename))
+        try:
+            exporter = IFRS16ExcelExporter()
+            exporter.export_ifrs16_workbook(results, str(excel_filename))
+        except Exception as excel_err:
+            print(f"Excel export failed (non-critical): {excel_err}")
+            file_id = None
         
         # Auto-trigger RAG embedding only when company_id is provided.
         engine = get_rag_engine() if request.company_id else None
@@ -1128,6 +1334,26 @@ async def calculate_lease(request: LeaseRequest):
                     document_id=request.lease_id
                 )
                 print(f"RAG embedding completed: {rag_result.get('status')}")
+                try:
+                    from ifrs16_rag_leases import index_lease
+                    index_lease(
+                        engine,
+                        request.lease_id,
+                        "",
+                        {
+                            "property_name": request.asset_description,
+                            "start_date": request.commencement_date,
+                            "monthly_payment": request.monthly_payment,
+                            "currency": request.currency,
+                            "ibr": request.annual_discount_rate,
+                            "tenant_name": request.lessee_name,
+                            "lease_liability": float(results["lease_liability"]),
+                            "rou_asset": float(results["rou_asset"]),
+                        },
+                        company_id=request.company_id or "default",
+                    )
+                except Exception as lease_idx_err:
+                    print(f"Lease RAG index (non-critical): {lease_idx_err}")
                 
             except Exception as rag_error:
                 print(f"RAG embedding failed (non-critical): {rag_error}")
@@ -2854,12 +3080,49 @@ async def transaction_price_adjustments(req: TransactionPriceAdjustmentsRequest)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class TPChangeRequest(BaseModel):
+    contract_id: str = ""
+    adjustment_reason: str = "variable_consideration"
+    original_transaction_price: float
+    new_transaction_price: float
+    revenue_recognised_to_date: float = 0
+    remaining_performance_obligations: int = 1
+    adjustment_method: str = "cumulative_catchup"
+    adjustment_date: str = ""
+
+
+@app.post("/api/ifrs15/tp-adjustments")
+async def tp_adjustments_change(req: TPChangeRequest):
+    """IFRS 15 — cumulative catch-up vs prospective transaction price changes."""
+    try:
+        from ifrs15_tp_change import calculate_tp_adjustment
+
+        result = calculate_tp_adjustment(req.model_dump())
+        _ifrs15_audit_append(
+            "TP_ADJUSTMENT",
+            req.contract_id or "N/A",
+            f"TP adjustment {result['adjustment_amount']:,.2f} ({result['method_used']})",
+            {},
+            result,
+            "IFRS 15.87-90",
+            changed_amount=float(result.get("current_period_impact") or 0),
+        )
+        return {"success": True, **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/ifrs15/portfolio/add")
 async def add_portfolio_contract(req: PortfolioContractRequest, request: Request):
     """Upsert a contract into the IFRS 15 portfolio store."""
     firm_id = _ifrs15_firm_id(request)
     try:
         contract_dict = req.model_dump()
+        buyer_id_raw = str(contract_dict.get("buyer_id") or "").strip()
+        if buyer_id_raw:
+            contract_dict["buyer_id_hash"] = hashlib.sha256(buyer_id_raw.encode("utf-8")).hexdigest()
+            contract_dict["buyer_id_masked"] = f"EID-****-{buyer_id_raw[-4:]}" if len(buyer_id_raw) >= 4 else "EID-****-0000"
+            contract_dict.pop("buyer_id", None)
         summary = _ifrs15_portfolio_summary_data(contract_dict)
         contract_name = req.customer_name or req.contract_id
         existing_row = ifrs15_db.find_portfolio_by_business_contract_id(firm_id, req.contract_id)
@@ -3213,6 +3476,352 @@ async def ifrs15_client_report_download(file_id: str):
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
     )
+
+
+@app.post("/api/ifrs15/realestate/off-plan")
+async def ifrs15_realestate_off_plan(request: RealEstateOffPlanRequest):
+    """UAE off-plan sales — over-time revenue via input method (% completion)."""
+    try:
+        from backend.app.services.ifrs15_realestate import OffPlanSalesEngine
+
+        result = OffPlanSalesEngine().calculate(request.model_dump())
+        cid = request.contract_id or "RE-OFFPLAN"
+        _ifrs15_audit_append(
+            "RE_OFFPLAN",
+            cid,
+            f"Off-plan revenue — {result.get('completion_pct')}% complete, "
+            f"AED {float(result.get('revenue_recognised_to_date', 0) or 0):,.0f} to date",
+            {},
+            result,
+            "IFRS 15.35(c) — UAE Real Estate",
+            changed_amount=float(result.get("revenue_current_period") or 0),
+        )
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/escrow")
+async def ifrs15_realestate_escrow(request: RealEstateEscrowRequest):
+    """RERA escrow timeline — revenue at later of % completion or milestone release."""
+    try:
+        from backend.app.services.ifrs15_realestate import ReraEscrowTracker
+
+        result = ReraEscrowTracker().analyse(request.model_dump())
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/modification")
+async def ifrs15_realestate_modification(request: RealEstateModificationRequest):
+    """UAE real estate contract modifications — prospective vs cumulative catch-up."""
+    try:
+        from backend.app.services.ifrs15_realestate import RealEstateModificationEngine
+        from backend.app.services.oqood_validator import assess_oqood_requirement
+
+        payload = request.model_dump()
+        result = RealEstateModificationEngine().assess(payload)
+        oqood = assess_oqood_requirement(
+            {
+                "modification_type": request.modification_type,
+                "old_value": (request.original_contract or {}).get("value"),
+                "new_value": (request.modification_details or {}).get("new_price"),
+                "modification_date": request.modification_date,
+                "currency": "AED",
+                "exchange_rate": 3.6725,
+            }
+        ).model_dump()
+        oqood["oqood_filed"] = bool(request.oqood_filed)
+        result["oqood_assessment"] = oqood
+        cid = request.contract_id or "RE-MOD"
+        _ifrs15_audit_append(
+            "RE_MODIFICATION",
+            cid,
+            f"Modification {request.modification_type} — {result.get('treatment')}",
+            {},
+            result,
+            "IFRS 15.18-21 — UAE Real Estate",
+            changed_amount=float(result.get("revenue_adjustment") or 0),
+        )
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/bundling-check")
+async def ifrs15_realestate_bundling_check(request: RealEstateBundlingCheckRequest):
+    """IFRS 15 para 17 multi-unit bundling assessment."""
+    try:
+        from backend.app.services.multi_unit_bundling import UnitContract, assess_bundling
+
+        units = [UnitContract(**u) for u in request.units]
+        assessment = assess_bundling(units).model_dump()
+        return {"success": True, "assessment": assessment}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/ifrs15/realestate/modification/oqood-filed")
+async def ifrs15_realestate_patch_oqood_filed(request: RealEstateOqoodFiledPatchRequest):
+    """Mark Oqood amendment filing status for a modification."""
+    return {"success": True, "modification_id": request.modification_id, "oqood_filed": request.oqood_filed}
+
+
+@app.post("/api/ifrs15/realestate/contract-costs")
+async def ifrs15_realestate_contract_costs(request: RealEstateContractCostsRequest):
+    """Sales commissions — capitalise when amortisation > 12 months (IFRS 15.91)."""
+    try:
+        from backend.app.services.ifrs15_realestate import RealEstateContractCostsEngine
+
+        result = RealEstateContractCostsEngine().calculate(request.model_dump())
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/principal-agent")
+async def ifrs15_realestate_principal_agent(request: RealEstatePrincipalAgentRequest):
+    """Developer principal vs agent — gross vs net revenue (IFRS 15.B34–B38)."""
+    try:
+        from backend.app.services.ifrs15_realestate import RealEstatePrincipalAgentChecker
+
+        body = request.model_dump()
+        if not body.get("gross_contract_value") and body.get("contract_value"):
+            body["gross_contract_value"] = body["contract_value"]
+        result = RealEstatePrincipalAgentChecker().assess(body)
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/vat")
+async def ifrs15_realestate_vat(request: RealEstateVatRequest):
+    """UAE 5% VAT alignment with IFRS 15 revenue recognition schedule."""
+    try:
+        from backend.app.services.ifrs15_realestate import UaeVatTimingEngine
+
+        result = UaeVatTimingEngine().align(request.model_dump())
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/calculate")
+async def ifrs15_realestate_calculate(request: RealEstateFullRequest):
+    """Combined UAE real estate calculation — off-plan, escrow, VAT."""
+    try:
+        from backend.app.services.ifrs15_realestate import (
+            OffPlanSalesEngine,
+            ReraEscrowTracker,
+            UaeVatTimingEngine,
+        )
+
+        off_plan = OffPlanSalesEngine().calculate(request.off_plan.model_dump())
+        escrow_result = None
+        if request.escrow:
+            escrow_result = ReraEscrowTracker().analyse(request.escrow.model_dump())
+        vat_rows = list(request.vat_schedule or [])
+        if not vat_rows and off_plan.get("revenue_current_period"):
+            vat_rows = [
+                {
+                    "period": off_plan.get("estimated_handover", "Current"),
+                    "revenue_recognised": off_plan["revenue_current_period"],
+                }
+            ]
+        vat_result = UaeVatTimingEngine().align(
+            {"revenue_schedule": vat_rows, "currency": "AED"}
+        )
+        return {
+            "success": True,
+            "off_plan": off_plan,
+            "escrow": escrow_result,
+            "vat": vat_result,
+            "spa_mapped": request.spa_mapped,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/cancellation-refund")
+async def ifrs15_realestate_cancellation_refund(request: CancellationRefundInput):
+    """UAE Law No. 8 of 2007 Article 11 — cancellation refund waterfall."""
+    try:
+        from backend.app.services.ifrs15_realestate import CancellationRefundEngine
+
+        result = CancellationRefundEngine().calculate(request.model_dump())
+        return {"success": True, "result": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/report")
+async def ifrs15_realestate_report(request: RealEstateReportRequest):
+    """Full UAE real estate IFRS 15 report — off-plan, escrow, quarterly VAT schedule."""
+    try:
+        from backend.app.services.ifrs15_realestate import RealEstateReportEngine, validate_realestate_health
+        from backend.app.services.oqood_validator import assess_oqood_requirement
+        from backend.app.services.multi_unit_bundling import UnitContract, assess_bundling
+
+        body = request.model_dump()
+        if request.assess_principal_agent:
+            body["gross_contract_value"] = request.gross_contract_value or request.contract_value
+        if not body.get("spa_handover_date"):
+            body["spa_handover_date"] = request.expected_handover
+        report = RealEstateReportEngine().build(body)
+        oqood_assessments: List[Dict[str, Any]] = []
+        for mod in (request.modifications or []):
+            oq = assess_oqood_requirement(mod).model_dump()
+            oq["modification_date"] = mod.get("modification_date")
+            oq["modification_type"] = mod.get("modification_type") or mod.get("type")
+            oq["oqood_filed"] = bool(mod.get("oqood_filed", False))
+            oqood_assessments.append(oq)
+        if oqood_assessments:
+            report["oqood_assessments"] = oqood_assessments
+
+        bundling_assessment = None
+        if request.units:
+            units = [UnitContract(**u) for u in request.units]
+            bundling_assessment = assess_bundling(units).model_dump()
+            report["bundling_assessment"] = bundling_assessment
+
+        hv = dict(report.get("health_validation") or validate_realestate_health(report))
+        pending_oqood = 0
+        for oq in oqood_assessments:
+            if not bool(oq.get("requires_oqood_amendment")):
+                continue
+            mod_dt = oq.get("modification_date")
+            dt = datetime.strptime(mod_dt[:10], "%Y-%m-%d").date() if isinstance(mod_dt, str) and len(mod_dt) >= 10 else None
+            if dt and dt <= datetime.now().date() and not bool(oq.get("oqood_filed")):
+                pending_oqood += 1
+        hv["check_d_pass"] = pending_oqood == 0
+        hv["check_e_pass"] = bool(bundling_assessment) or not request.units
+        details = list(hv.get("details") or [])
+        details.append(
+            "D: Oqood Amendment Check — "
+            + (
+                f"WARN {pending_oqood} modification(s) may require Oqood amendment filing"
+                if pending_oqood
+                else "PASS"
+            )
+        )
+        details.append(
+            "E: Multi-Unit Bundling Check — "
+            + (
+                "PASS"
+                if hv["check_e_pass"]
+                else "WARN potential IFRS 15 para 17 bundling issue — run bundling check"
+            )
+        )
+        hv["details"] = details
+        hv["overall_pass"] = bool(hv.get("check_a_pass")) and bool(hv.get("check_b_pass")) and bool(hv.get("check_c_pass")) and bool(hv["check_d_pass"]) and bool(hv["check_e_pass"])
+        report["health_validation"] = hv
+
+        if request.cancellation_refund:
+            report["cancellation_refund"] = request.cancellation_refund
+        cid = request.contract_id or "RE-REPORT"
+        off = report.get("off_plan") or {}
+        _ifrs15_audit_append(
+            "RE_REPORT",
+            cid,
+            f"Real estate full report — {off.get('completion_pct')}% complete",
+            {},
+            {
+                "periods": len(report.get("period_schedule") or []),
+                "rera": request.rera_registration_number,
+                "health_pass": (report.get("health_validation") or {}).get("overall_pass"),
+            },
+            "IFRS 15 — UAE Real Estate",
+            changed_amount=float(off.get("revenue_current_period") or 0),
+        )
+        return {"success": True, "report": report}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/export-excel")
+async def ifrs15_realestate_export_excel(request: RealEstateExportExcelRequest):
+    """Export UAE real estate IFRS 15 report to Excel."""
+    try:
+        from ifrs15_realestate_excel import IFRS15RealEstateExcelExporter
+
+        cid = (request.contract_id or "RE").replace(" ", "_")[:40]
+        file_id = str(uuid.uuid4())
+        excel_path = OUTPUT_DIR / f"IFRS15_RE_{cid}_{file_id}.xlsx"
+        exporter = IFRS15RealEstateExcelExporter()
+        exporter.export_workbook(request.report, str(excel_path))
+        return {
+            "status": "success",
+            "file_id": file_id,
+            "filename": excel_path.name,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/to-calculate-payload")
+async def ifrs15_realestate_to_calculate(request: RealEstateToCalculateRequest):
+    """Map UAE real estate recognition into main IFRS 15 calculate request."""
+    try:
+        from backend.app.services.ifrs15_realestate import build_ifrs15_calculate_payload
+
+        payload = build_ifrs15_calculate_payload(
+            off_plan=request.off_plan,
+            spa=request.spa,
+            spa_mapped=request.spa_mapped,
+            construction_start=request.construction_start,
+            expected_handover=request.expected_handover,
+            contract_value=request.contract_value,
+            costs_incurred=request.costs_incurred_to_date,
+            total_costs=request.total_estimated_costs,
+            revenue_prior=request.revenue_prior_period,
+            escrow_total=request.escrow_total,
+        )
+        return {"success": True, "calculate_payload": payload}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/upload-spa")
+async def ifrs15_realestate_upload_spa(file: UploadFile = File(...)):
+    """Upload UAE SPA (PDF/DOCX) — extract fields and map to IFRS 15 inputs."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Claude API not configured. Set ANTHROPIC_API_KEY environment variable.",
+        )
+    try:
+        import uuid
+        from backend.app.services.ifrs15_realestate import map_spa_to_ifrs15_inputs
+        from backend.app.services.spa_parser import SPAParser
+
+        file_id = str(uuid.uuid4())
+        upload_path = UPLOAD_DIR / f"spa_{file_id}_{file.filename}"
+        content = await file.read()
+        upload_path.write_bytes(content)
+        parser = SPAParser(api_key=ANTHROPIC_API_KEY)
+        extracted = parser.extract_from_file(str(upload_path))
+        ifrs15_inputs = map_spa_to_ifrs15_inputs(extracted)
+        extraction_file = OUTPUT_DIR / f"spa_extraction_{file_id}.json"
+        extraction_file.write_text(
+            json.dumps({"extracted": extracted, "ifrs15_inputs": ifrs15_inputs}, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "status": "success",
+            "file_id": file_id,
+            "filename": file.filename,
+            "extracted": extracted,
+            "ifrs15_inputs": ifrs15_inputs,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/ifrs15/classify-contract")
@@ -4114,6 +4723,13 @@ async def delete_rag_document(company_id: str, document_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Delete error: {str(e)}")
 
+
+try:
+    from backend.app.routers.ifrs16_extensions import router as _ifrs16_ext_router
+
+    app.include_router(_ifrs16_ext_router)
+except ImportError as _ifrs16_ext_err:
+    print(f"WARNING: IFRS 16 extensions router not loaded: {_ifrs16_ext_err}")
 
 try:
     from backend.app.routers.rev_rec_recon import router as _rev_rec_recon_router

@@ -2,6 +2,7 @@ import {
   getBackendConnectivityMessage,
   getApiHealthTimeoutMessage,
 } from '@/lib/service-messages';
+import { parseJsonText } from '@/lib/utils';
 
 // Use '' so browser calls same-origin /api/*; the Next server proxies to Python (see app/api/[...path]/route.ts).
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -36,15 +37,22 @@ async function apiCall<T>(
       },
     });
 
+    const bodyText = await response.text();
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
-      const errorMessage = errorData.detail 
-        ? (typeof errorData.detail === 'string' ? errorData.detail : JSON.stringify(errorData.detail))
+      const errorData =
+        parseJsonText<{ detail?: unknown }>(bodyText) ?? ({ detail: 'Unknown error' } as const);
+      const errorMessage = errorData.detail
+        ? typeof errorData.detail === 'string'
+          ? errorData.detail
+          : JSON.stringify(errorData.detail)
         : `HTTP error! status: ${response.status}`;
       throw new Error(errorMessage);
     }
 
-    const data = await response.json();
+    const data = parseJsonText<T>(bodyText);
+    if (data == null) {
+      throw new Error('API returned an empty response');
+    }
     return { data };
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'An error occurred';
@@ -76,6 +84,15 @@ export const ifrs16Api = {
       body: JSON.stringify(body),
     });
   },
+
+  extractFromText: async (contractText: string) =>
+    apiCall<{ extracted_data?: Record<string, unknown>; extraction_id?: string; validation?: unknown }>(
+      '/api/extract',
+      {
+        method: 'POST',
+        body: JSON.stringify({ contract_text: contractText }),
+      }
+    ),
 
   uploadContract: async (file: File, abortSignal?: AbortSignal) => {
     const formData = new FormData();
@@ -121,7 +138,11 @@ export const ifrs16Api = {
         throw new Error(errorMessage);
       }
 
-      return { data: JSON.parse(bodyText) };
+      const data = parseJsonText<Record<string, unknown>>(bodyText);
+      if (data == null) {
+        throw new Error('Upload succeeded but the server returned an empty response');
+      }
+      return { data };
     } catch (error) {
       clearTimeout(timeoutId);
       const msg = error instanceof Error ? error.message : 'Upload failed';
@@ -223,6 +244,40 @@ export const ifrs16IbrApi = {
     }),
 };
 
+export const ifrs16ExtApi = {
+  indexLease: (body: Record<string, unknown>) =>
+    apiCall('/api/ifrs16/index-lease', { method: 'POST', body: JSON.stringify(body) }),
+  search: (query: string, companyId: string, topK = 5) =>
+    apiCall<{ answer: string; sources: string[] }>('/api/ifrs16/search', {
+      method: 'POST',
+      body: JSON.stringify({ query, company_id: companyId, top_k: topK }),
+    }),
+  remeasureCpi: (body: Record<string, unknown>) =>
+    apiCall('/api/ifrs16/remeasure-cpi', { method: 'POST', body: JSON.stringify(body) }),
+  componentSplit: (body: Record<string, unknown>) =>
+    apiCall('/api/ifrs16/component-split', { method: 'POST', body: JSON.stringify(body) }),
+  healthScore: (leases: unknown[], alertsCount = 0) =>
+    apiCall<{ score: number; issues: { description: string; severity: string }[] }>(
+      '/api/ifrs16/health-score',
+      { method: 'POST', body: JSON.stringify({ leases, alerts_count: alertsCount }) }
+    ),
+  ibrBenchmark: (body: { country: string; credit_rating: string; lease_term_years: number; currency?: string }) =>
+    apiCall('/api/ifrs16/ibr-benchmark', { method: 'POST', body: JSON.stringify(body) }),
+  auditBundle: async (body: Record<string, unknown>) => {
+    const res = await fetch(`${API_URL}/api/ifrs16/audit-bundle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      return { error: t || `HTTP ${res.status}` };
+    }
+    const blob = await res.blob();
+    return { data: blob };
+  },
+};
+
 // IFRS 16 Smart Alerts
 export const alertsApi = {
   getDefaults: async () => apiCall<{ email: string }>('/api/ifrs16/alerts/defaults'),
@@ -260,6 +315,17 @@ export const chatApi = {
     });
   },
 
+  leaseSearch: async (companyId: string, question: string, topK = 5) => {
+    return apiCall<{ answer: string; sources: string[] }>('/api/ifrs16/search', {
+      method: 'POST',
+      body: JSON.stringify({
+        query: question,
+        company_id: companyId,
+        top_k: topK,
+      }),
+    });
+  },
+
   getStats: async (companyId: string) => {
     return apiCall(`/api/rag/stats/${companyId}`, {
       method: 'GET',
@@ -291,7 +357,8 @@ export const healthCheck = async (): Promise<ApiResponse<{ status?: string }>> =
       clearTimeout(tid);
 
       if (response.ok) {
-        const data = (await response.json()) as { status?: string };
+        const text = await response.text();
+        const data = parseJsonText<{ status?: string }>(text) ?? { status: 'ok' };
         return { data };
       }
 
@@ -521,6 +588,13 @@ export const ifrs15Api = {
     });
   },
 
+  tpAdjustmentsChange: async (payload: Record<string, unknown>) => {
+    return apiCall<Record<string, unknown>>('/api/ifrs15/tp-adjustments', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   portfolioAddContract: async (payload: Record<string, unknown>) => {
     return apiCall<Record<string, unknown>>('/api/ifrs15/portfolio/add', {
       method: 'POST',
@@ -670,6 +744,112 @@ export const ifrs15Api = {
       body: JSON.stringify(payload),
     });
   },
+
+  realestateUploadSpa: async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const response = await fetch(`${API_URL}/api/ifrs15/realestate/upload-spa`, {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        let errorMessage = `SPA upload failed: ${response.statusText}`;
+        try {
+          const errorData = await response.json();
+          if (errorData.detail) {
+            errorMessage = typeof errorData.detail === 'string' ? errorData.detail : JSON.stringify(errorData.detail);
+          }
+        } catch { /* ignore */ }
+        throw new Error(errorMessage);
+      }
+      return { data: await response.json() };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Upload failed';
+      const isNetworkError = msg === 'Failed to fetch' || msg.includes('NetworkError');
+      return { error: isNetworkError ? getConnectionErrorMessage() : msg };
+    }
+  },
+
+  realestateOffPlan: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; result?: Record<string, unknown> }>('/api/ifrs15/realestate/off-plan', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  realestateEscrow: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; result?: Record<string, unknown> }>('/api/ifrs15/realestate/escrow', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  realestateModification: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; result?: Record<string, unknown> }>('/api/ifrs15/realestate/modification', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  realestateContractCosts: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; result?: Record<string, unknown> }>('/api/ifrs15/realestate/contract-costs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  realestatePrincipalAgent: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; result?: Record<string, unknown> }>('/api/ifrs15/realestate/principal-agent', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  realestateVat: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; result?: Record<string, unknown> }>('/api/ifrs15/realestate/vat', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  realestateCalculate: async (payload: Record<string, unknown>) =>
+    apiCall<Record<string, unknown>>('/api/ifrs15/realestate/calculate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  realestateToCalculatePayload: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; calculate_payload?: Record<string, unknown> }>(
+      '/api/ifrs15/realestate/to-calculate-payload',
+      { method: 'POST', body: JSON.stringify(payload) }
+    ),
+
+  realestateReport: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; report?: Record<string, unknown> }>('/api/ifrs15/realestate/report', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  realestateExportExcel: async (payload: { report: Record<string, unknown>; contract_id?: string }) =>
+    apiCall<{ status: string; file_id: string; filename: string }>('/api/ifrs15/realestate/export-excel', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  realestateDownloadExcel: (fileId: string) => `${API_URL}/api/ifrs15/download/${fileId}`,
+
+  realestateCancellationRefund: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; result?: Record<string, unknown> }>(
+      '/api/ifrs15/realestate/cancellation-refund',
+      { method: 'POST', body: JSON.stringify(payload) }
+    ),
+
+  realestateBundlingCheck: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; assessment?: Record<string, unknown> }>(
+      '/api/ifrs15/realestate/bundling-check',
+      { method: 'POST', body: JSON.stringify(payload) }
+    ),
+
+  realestatePatchOqoodFiled: async (payload: { modification_id: string; oqood_filed: boolean }) =>
+    apiCall<{ success?: boolean; modification_id?: string; oqood_filed?: boolean }>(
+      '/api/ifrs15/realestate/modification/oqood-filed',
+      { method: 'PATCH', body: JSON.stringify(payload) }
+    ),
 };
 
 /** IFRS 9 classification & measurement (POST /api/ifrs9/classify) */
@@ -935,6 +1115,12 @@ export const revRecApi = {
 
   contractBalanceTracker: async (payload: Record<string, unknown>) =>
     apiCall<Record<string, unknown>>('/api/rev-rec/contract-balance-tracker', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  periodReconciliation: async (payload: Record<string, unknown>) =>
+    apiCall<Record<string, unknown>>('/api/rev-rec/period-reconciliation', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

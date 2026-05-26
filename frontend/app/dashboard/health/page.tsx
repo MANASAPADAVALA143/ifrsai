@@ -18,6 +18,7 @@ interface CheckResult {
   fixCommand?: string;
   fixHint?: string;
   timestamp: string;
+  subChecks?: { label: string; pass: boolean; detail: string }[];
 }
 
 function HealthScoreRing({ score, label }: { score: number; label: string }) {
@@ -251,7 +252,124 @@ export default function HealthDashboard() {
       )
     );
 
-    // 7. IFRS 15 Upload (actual: /api/ifrs15/upload-contract)
+    // 7. IFRS 15 Real Estate off-plan
+    results.push(
+      await runCheck(
+        '🏗️ IFRS 15 Real Estate (UAE)',
+        async () => {
+          const r = await fetch(`${API_BASE}/api/ifrs15/realestate/off-plan`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              rera_registration_number: 'RERA-TEST-001',
+              contract_value: 2000000,
+              construction_start: '2023-01-01',
+              expected_handover: '2025-09-30',
+              current_date: '2024-12-31',
+              costs_incurred_to_date: 1300000,
+              total_estimated_costs: 2000000,
+              escrow_receipts: [{ date: '2024-01-01', amount: 400000 }],
+              revenue_prior_period: 0,
+            }),
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${r.status}`);
+          }
+          const body = await r.json();
+          if (!body?.result?.completion_pct) throw new Error('Missing off-plan result');
+        },
+        false,
+        undefined,
+        'Check backend/app/services/ifrs15_realestate.py'
+      )
+    );
+
+    results.push(
+      await runCheck(
+        '⚖️ Law 8/2007 Cancellation Refund',
+        async () => {
+          const r = await fetch(`${API_BASE}/api/ifrs15/realestate/cancellation-refund`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contract_price: 3500000,
+              amount_paid_by_buyer: 1200000,
+              construction_completion_pct: 65,
+              rera_registration_number: 'RERA-TEST-001',
+              cancellation_reason: 'buyer_default',
+              escrow_balance: 1200000,
+            }),
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const body = await r.json();
+          if (body?.result?.buyer_refund_amount == null) throw new Error('Missing refund result');
+        },
+        false,
+        undefined,
+        'CancellationRefundEngine in ifrs15_realestate.py'
+      )
+    );
+
+    {
+      const start = Date.now();
+      try {
+        const r = await fetch(`${API_BASE}/api/ifrs15/realestate/report`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rera_registration_number: 'RERA-TEST-001',
+            contract_value: 3500000,
+            construction_start: '2023-01-01',
+            expected_handover: '2025-09-30',
+            current_date: '2024-12-31',
+            costs_incurred_to_date: 2275000,
+            total_estimated_costs: 3500000,
+            escrow_receipts: [{ date: '2024-01-15', amount: 500000 }],
+            revenue_prior_period: 0,
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+        const duration = Date.now() - start;
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const body = await r.json();
+        const hv = body?.report?.health_validation as Record<string, unknown> | undefined;
+        if (!hv) throw new Error('Missing health_validation');
+        const details = (hv.details as string[]) || [];
+        const subChecks = [
+          { label: 'A: Schedule totals', pass: Boolean(hv.check_a_pass), detail: details[0] || '' },
+          { label: 'B: Escrow before revenue', pass: Boolean(hv.check_b_pass), detail: details[1] || '' },
+          { label: 'C: VAT alignment', pass: Boolean(hv.check_c_pass), detail: details[2] || '' },
+          { label: 'D: Oqood Amendment Check', pass: Boolean(hv.check_d_pass ?? true), detail: details[3] || '' },
+          { label: 'E: Multi-Unit Bundling Check', pass: Boolean(hv.check_e_pass ?? true), detail: details[4] || '' },
+        ];
+        const overall = Boolean(hv.overall_pass);
+        results.push({
+          name: '📊 IFRS 15 Real Estate Report (A/B/C)',
+          status: overall ? (duration > 5000 ? 'slow' : 'pass') : 'fail',
+          message: overall ? `All sub-checks passed (${duration}ms)` : 'One or more sub-checks failed',
+          duration,
+          fixable: false,
+          timestamp: new Date().toLocaleTimeString(),
+          subChecks,
+        });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        results.push({
+          name: '📊 IFRS 15 Real Estate Report (A/B/C)',
+          status: 'fail',
+          message,
+          duration: Date.now() - start,
+          fixable: false,
+          fixHint: 'Check RealEstateReportEngine validate_realestate_health',
+          timestamp: new Date().toLocaleTimeString(),
+        });
+      }
+    }
+
+    // 9. IFRS 15 Upload (actual: /api/ifrs15/upload-contract)
     results.push(
       await runCheck(
         '📤 IFRS 15 File Upload',
@@ -632,6 +750,15 @@ ${(validation.issues ?? []).length ? 'Issues: ' + (validation.issues ?? []).join
                   </div>
                   {check.status === 'fail' && check.fixHint && (
                     <div className="text-xs text-text-muted mt-2">💡 {check.fixHint}</div>
+                  )}
+                  {check.subChecks && check.subChecks.length > 0 && (
+                    <ul className="mt-2 space-y-1 text-xs">
+                      {check.subChecks.map((sc, j) => (
+                        <li key={j} className={sc.pass ? 'text-green-700' : 'text-red-700'}>
+                          {sc.pass ? '✅' : '❌'} {sc.label}: {sc.detail}
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
               </div>
