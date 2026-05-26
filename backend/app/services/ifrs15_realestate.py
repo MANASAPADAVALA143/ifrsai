@@ -29,6 +29,17 @@ def completion_pct_from_costs(
     return round(min(100.0, max(0.0, (costs_td / total_costs) * 100.0)), 4)
 
 
+def effective_completion_pct(data: Dict[str, Any]) -> float:
+    """Authoritative completion % — RERA certificate overrides cost input method."""
+    cert = data.get("rera_certificate_verified_pct")
+    if cert is not None:
+        return round(min(100.0, max(0.0, float(cert))), 4)
+    return completion_pct_from_costs(
+        float(data.get("costs_incurred_to_date", 0) or 0),
+        float(data.get("total_estimated_costs", 0) or 0),
+    )
+
+
 def validate_rera_registration_number(value: str) -> str:
     """Alphanumeric RERA registration number, 4–20 chars."""
     v = (value or "").strip()
@@ -439,10 +450,14 @@ class OffPlanSalesEngine:
             revenue_prior_period=float(data.get("revenue_prior_period", 0) or 0),
             billings=data.get("billings"),
         )
-        total_costs = max(inp.total_estimated_costs, 1e-9)
-        completion_pct = round(
-            min(100.0, max(0.0, (inp.costs_incurred_to_date / total_costs) * 100.0)), 1
-        )
+        cert_pct = data.get("rera_certificate_verified_pct")
+        if cert_pct is not None:
+            completion_pct = round(min(100.0, max(0.0, float(cert_pct))), 1)
+        else:
+            total_costs = max(inp.total_estimated_costs, 1e-9)
+            completion_pct = round(
+                min(100.0, max(0.0, (inp.costs_incurred_to_date / total_costs) * 100.0)), 1
+            )
         revenue_to_date = round(inp.contract_value * (completion_pct / 100.0), 2)
         revenue_current = round(revenue_to_date - inp.revenue_prior_period, 2)
         billings_to_date = _sum_billings(inp.billings, inp.escrow_receipts)
@@ -492,9 +507,13 @@ class ReraEscrowTracker:
 
     def analyse(self, data: Dict[str, Any]) -> Dict[str, Any]:
         contract_value = float(data.get("contract_value", 0) or 0)
-        costs_incurred = float(data.get("costs_incurred_to_date", 0) or 0)
-        total_costs = max(float(data.get("total_estimated_costs", 0) or 0), 1e-9)
-        completion_pct = min(100.0, max(0.0, (costs_incurred / total_costs) * 100.0))
+        cert_pct = data.get("rera_certificate_verified_pct")
+        if cert_pct is not None:
+            completion_pct = min(100.0, max(0.0, float(cert_pct)))
+        else:
+            costs_incurred = float(data.get("costs_incurred_to_date", 0) or 0)
+            total_costs = max(float(data.get("total_estimated_costs", 0) or 0), 1e-9)
+            completion_pct = min(100.0, max(0.0, (costs_incurred / total_costs) * 100.0))
 
         escrow_receipts = list(data.get("escrow_receipts") or [])
         milestones = list(data.get("milestone_releases") or [])
@@ -1058,11 +1077,29 @@ class RealEstateReportEngine:
         ev_esc = _rera_ev(
             list(data.get("escrow_receipts") or []),
             list(report_aed["escrow_releases"]),
-            float(off_plan.get("completion_pct") or 0),
+            effective_completion_pct(data),
             float(data.get("contract_value") or 0),
         )
         report_aed["escrow_validation"] = ev_esc.model_dump()
         report_aed["health_validation"] = validate_realestate_health(report_aed)
+
+        cert_pct = data.get("rera_certificate_verified_pct")
+        if cert_pct is not None:
+            report_aed["completion_source"] = "rera_certificate"
+            report_aed["rera_certificate"] = {
+                "ref": data.get("rera_certificate_ref"),
+                "date": data.get("rera_certificate_date"),
+                "verified_pct": float(cert_pct),
+            }
+            ref = data.get("rera_certificate_ref") or "N/A"
+            dt = data.get("rera_certificate_date") or "N/A"
+            cert_note = (
+                f" Completion % sourced from RERA certificate {ref} dated {dt}."
+            )
+            base_summary = str(report_aed.get("recognition_trigger_summary") or "")
+            report_aed["recognition_trigger_summary"] = base_summary + cert_note
+        else:
+            report_aed["completion_source"] = "manual_input"
 
         display_currency = str(data.get("currency") or "AED").upper()
         if display_currency == "USD":

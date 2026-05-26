@@ -24,6 +24,10 @@ import {
   lowConfidenceFieldLabel,
   successBadgeLabel,
 } from '@/lib/spa-extraction-ui';
+import {
+  RERACertificateCard,
+  type RERACertificateUploadResult,
+} from '@/components/realestate/RERACertificateCard';
 import toast from 'react-hot-toast';
 import {
   Upload,
@@ -87,6 +91,15 @@ export default function RealEstateIFRS15Page() {
   const [extractionMeta, setExtractionMeta] = useState<ExtractionMeta | null>(null);
   const [spaFilename, setSpaFilename] = useState<string | null>(null);
   const [clearedVerifyFields, setClearedVerifyFields] = useState<Set<string>>(new Set());
+  const [certLoading, setCertLoading] = useState(false);
+  const [certFilename, setCertFilename] = useState<string | null>(null);
+  const [certResult, setCertResult] = useState<RERACertificateUploadResult | null>(null);
+  const [reraCertificateRef, setReraCertificateRef] = useState<string | null>(null);
+  const [reraCertificateDate, setReraCertificateDate] = useState<string | null>(null);
+  const [reraCertificateVerifiedPct, setReraCertificateVerifiedPct] = useState<number | null>(null);
+  const [certOverrideManual, setCertOverrideManual] = useState(false);
+  const [certMismatchResolved, setCertMismatchResolved] = useState<'certificate' | 'manual' | null>(null);
+  const [certManualNote, setCertManualNote] = useState<string | null>(null);
 
   const [contractValue, setContractValue] = useState('2000000');
   const [constructionStart, setConstructionStart] = useState('2023-01-01');
@@ -327,6 +340,12 @@ export default function RealEstateIFRS15Page() {
         buyer_name: u.buyer_name,
         buyer_id: u.buyer_id,
       })),
+      rera_certificate_ref: reraCertificateRef,
+      rera_certificate_date: reraCertificateDate,
+      rera_certificate_verified_pct:
+        reraCertificateVerifiedPct != null && !certOverrideManual && certMismatchResolved !== 'manual'
+          ? reraCertificateVerifiedPct
+          : null,
     };
   }, [
     contractValue,
@@ -356,6 +375,11 @@ export default function RealEstateIFRS15Page() {
     modNewPrice,
     unitRows,
     escrowReleases,
+    reraCertificateRef,
+    reraCertificateDate,
+    reraCertificateVerifiedPct,
+    certOverrideManual,
+    certMismatchResolved,
   ]);
 
   const applySpaInputs = useCallback((inputs: Record<string, unknown>) => {
@@ -394,6 +418,44 @@ export default function RealEstateIFRS15Page() {
       ),
     [extractionMeta?.low_confidence_fields, clearedVerifyFields]
   );
+
+  const handleCertUpload = async (file: File) => {
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error('Certificate PDF must be 10MB or smaller');
+      return;
+    }
+    setCertLoading(true);
+    clearCertificateState();
+    setCertFilename(file.name);
+    const { data, error } = await ifrs15Api.realestateUploadReraCertificate(file, {
+      rera_registration_number: reraNumber.trim() || undefined,
+      form_completion_pct: costBasedCompletionPct,
+      currency: displayCurrency,
+    });
+    setCertLoading(false);
+    if (error) {
+      toast.error(error);
+      return;
+    }
+    const result = (data || {}) as RERACertificateUploadResult;
+    setCertResult(result);
+    if (result.success === false) {
+      return;
+    }
+    if (result.mismatch_detected) {
+      return;
+    }
+    const conf = result.confidence_score ?? 0;
+    const low = result.low_confidence_fields || [];
+    if (conf >= 0.7) {
+      applyCertificateFromFields(result.fields, { lowFields: low });
+      setCertMismatchResolved('certificate');
+      toast.success('RERA certificate verified — completion % updated');
+    } else {
+      applyCertificateFromFields(result.fields, { onlyHighConfidence: true, lowFields: low });
+      toast('Partial certificate extraction — verify highlighted fields', { icon: '⚠️' });
+    }
+  };
 
   const handleSpaUpload = async (file: File) => {
     setSpaLoading(true);
@@ -689,11 +751,77 @@ export default function RealEstateIFRS15Page() {
     () => escrowReceipts.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0),
     [escrowReceipts]
   );
-  const completionPctLive = useMemo(() => {
+  const costBasedCompletionPct = useMemo(() => {
     const c = parseFloat(costsIncurred) || 0;
     const t = parseFloat(totalCosts) || 0;
     return t > 0 ? (c / t) * 100 : 0;
   }, [costsIncurred, totalCosts]);
+
+  const completionPctLive = useMemo(() => {
+    if (
+      reraCertificateVerifiedPct != null &&
+      !certOverrideManual &&
+      certMismatchResolved !== 'manual'
+    ) {
+      return reraCertificateVerifiedPct;
+    }
+    return costBasedCompletionPct;
+  }, [
+    reraCertificateVerifiedPct,
+    certOverrideManual,
+    certMismatchResolved,
+    costBasedCompletionPct,
+  ]);
+
+  const clearCertificateState = useCallback(() => {
+    setCertResult(null);
+    setCertFilename(null);
+    setReraCertificateRef(null);
+    setReraCertificateDate(null);
+    setReraCertificateVerifiedPct(null);
+    setCertOverrideManual(false);
+    setCertMismatchResolved(null);
+    setCertManualNote(null);
+  }, []);
+
+  const applyCertificateFromFields = useCallback(
+    (
+      fields: RERACertificateUploadResult['fields'],
+      opts?: { onlyHighConfidence?: boolean; lowFields?: string[] }
+    ) => {
+      if (!fields) return;
+      const low = opts?.lowFields || certResult?.low_confidence_fields || [];
+      const skip = (name: string) => opts?.onlyHighConfidence && low.includes(name);
+
+      if (fields.completion_pct != null && !skip('completion_pct')) {
+        const pct = Number(fields.completion_pct);
+        setReraCertificateVerifiedPct(pct);
+        const total = parseFloat(totalCosts) || 0;
+        if (total > 0) {
+          setCostsIncurred(String(Math.round((pct / 100) * total)));
+        }
+      }
+      if (fields.certificate_date && !skip('certificate_date')) {
+        setReraCertificateDate(fields.certificate_date.slice(0, 10));
+        if (
+          revTrigger === 'rera_completion_certificate' ||
+          revTrigger === 'earlier_of_both'
+        ) {
+          setReraCompletionDate(fields.certificate_date.slice(0, 10));
+        }
+      }
+      if (fields.certificate_ref && !skip('certificate_ref')) {
+        setReraCertificateRef(fields.certificate_ref);
+      }
+      if (fields.project_name && !projectName.trim() && !skip('project_name')) {
+        setProjectName(fields.project_name);
+      }
+      if (fields.rera_registration_number && !reraNumber.trim()) {
+        setReraNumber(fields.rera_registration_number);
+      }
+    },
+    [certResult?.low_confidence_fields, totalCosts, revTrigger, projectName, reraNumber]
+  );
   const escrowReleasePctLive = useMemo(() => {
     const cv = parseFloat(contractValue) || 0;
     return cv > 0 ? (escrowReleasedTotal / cv) * 100 : 0;
@@ -925,6 +1053,7 @@ export default function RealEstateIFRS15Page() {
                 onChange={(e) => {
                   setReraNumber(e.target.value);
                   markFieldVerified('rera_registration_number');
+                  clearCertificateState();
                   if (reraError) setReraError('');
                 }}
                 placeholder="e.g. RERA-2024-DXB-00123"
@@ -943,17 +1072,55 @@ export default function RealEstateIFRS15Page() {
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3">
             {[
               ['RERA', reraNumber || '—'],
+              [
+                'Certificate',
+                certResult?.success === false
+                  ? 'Upload failed'
+                  : certResult?.mismatch_detected && !certMismatchResolved
+                    ? '⚠️ Mismatch'
+                    : reraCertificateVerifiedPct != null && !certOverrideManual
+                      ? '✓ Cert Verified'
+                      : 'No Certificate',
+              ],
               ['Completion', `${offPlanResult.completion_pct}%`],
               ['Revenue YTD', fmt(Number(offPlanResult.revenue_recognised_to_date))],
               ['This period', fmt(Number(offPlanResult.revenue_current_period))],
               ['Escrow', `Received ${fmt(escrowReceivedTotal)} | Released ${fmt(escrowReleasedTotal)} | Net ${fmt(escrowReceivedTotal - escrowReleasedTotal)}`],
               ['Remaining', fmt(Number(offPlanResult.remaining_revenue))],
-            ].map(([k, v]) => (
-              <div key={k} className="bg-gradient-to-br from-orange-50 to-white border border-orange-100 rounded-lg p-3">
-                <p className="text-[10px] uppercase tracking-wide text-text-muted">{k}</p>
-                <p className="text-sm font-bold text-text-primary">{v}</p>
-              </div>
-            ))}
+            ].map(([k, v]) => {
+              const isCert = k === 'Certificate';
+              const certClass =
+                v === '✓ Cert Verified'
+                  ? 'border-green-200 bg-green-50'
+                  : v === '⚠️ Mismatch'
+                    ? 'border-amber-200 bg-amber-50'
+                    : 'border-orange-100 bg-gradient-to-br from-orange-50 to-white';
+              const inner = (
+                <>
+                  <p className="text-[10px] uppercase tracking-wide text-text-muted">{k}</p>
+                  <p className="text-sm font-bold text-text-primary">{v}</p>
+                </>
+              );
+              if (isCert) {
+                return (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() =>
+                      document.getElementById('rera-certificate-section')?.scrollIntoView({ behavior: 'smooth' })
+                    }
+                    className={`rounded-lg p-3 border text-left w-full hover:opacity-90 ${certClass}`}
+                  >
+                    {inner}
+                  </button>
+                );
+              }
+              return (
+                <div key={k} className="bg-gradient-to-br from-orange-50 to-white border border-orange-100 rounded-lg p-3">
+                  {inner}
+                </div>
+              );
+            })}
             <button
               type="button"
               onClick={() => setDisclosureOpen((o) => !o)}
@@ -1087,6 +1254,64 @@ export default function RealEstateIFRS15Page() {
               counsel per IFRS 15.38.
             </p>
           ) : null}
+
+          <div id="rera-certificate-section" className="mt-6 pt-6 border-t border-border-default">
+            <h3 className="text-sm font-semibold text-text-primary">RERA Completion Certificate (Optional)</h3>
+            <p className="text-xs text-text-muted mt-1 mb-3">
+              Upload the DLD-issued completion certificate to verify construction % and strengthen audit evidence.
+            </p>
+            {certFilename && (
+              <p className="text-xs text-text-secondary mb-2">File: {certFilename}</p>
+            )}
+            {certManualNote && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 mb-2">
+                {certManualNote}
+              </p>
+            )}
+            <label className="flex flex-col items-center justify-center border border-dashed border-border-default rounded-lg p-6 cursor-pointer hover:border-orange-primary">
+              <input
+                type="file"
+                accept=".pdf,application/pdf"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleCertUpload(f);
+                }}
+              />
+              {certLoading ? (
+                <div className="flex items-center gap-2 text-sm text-text-secondary">
+                  <Loader2 className="w-5 h-5 animate-spin text-orange-primary" />
+                  Extracting certificate data...
+                </div>
+              ) : (
+                <span className="text-sm text-text-secondary">Upload RERA Completion Certificate (PDF, max 10MB)</span>
+              )}
+            </label>
+            {certResult && (
+              <RERACertificateCard
+                result={certResult}
+                formCompletionPct={costBasedCompletionPct}
+                onUseCertificate={() => {
+                  applyCertificateFromFields(certResult.fields, {
+                    lowFields: certResult.low_confidence_fields,
+                  });
+                  setCertMismatchResolved('certificate');
+                  setCertOverrideManual(false);
+                  setCertManualNote(null);
+                  toast.success('Using certificate completion %');
+                }}
+                onKeepManual={() => {
+                  setCertMismatchResolved('manual');
+                  setCertOverrideManual(true);
+                  setReraCertificateVerifiedPct(null);
+                  setCertManualNote(
+                    'Manual % used — certificate on file for reference.'
+                  );
+                  toast('Keeping manual completion %', { icon: 'ℹ️' });
+                }}
+              />
+            )}
+          </div>
         </section>
 
         {/* 1. SPA Upload */}
@@ -1213,6 +1438,53 @@ export default function RealEstateIFRS15Page() {
         {/* 2. Off-plan calculator */}
         <section className="bg-white border border-border-default rounded-lg p-6">
           <h2 className="text-lg font-semibold mb-4">Off-plan revenue calculator</h2>
+          <label className="text-sm block mb-4 max-w-xs">
+            <span className="text-text-muted block mb-1">
+              Construction completion %
+              {reraCertificateVerifiedPct != null && !certOverrideManual && certMismatchResolved !== 'manual' ? (
+                <span className="ml-1 text-xs text-slate-600">📄 From RERA certificate</span>
+              ) : null}
+            </span>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                readOnly={
+                  reraCertificateVerifiedPct != null &&
+                  !certOverrideManual &&
+                  certMismatchResolved !== 'manual'
+                }
+                className={`w-full rounded px-3 py-2 ${
+                  reraCertificateVerifiedPct != null && !certOverrideManual && certMismatchResolved !== 'manual'
+                    ? 'bg-slate-100 border border-slate-300 text-slate-700'
+                    : 'border border-border-default'
+                }`}
+                value={completionPctLive.toFixed(1)}
+                onChange={(e) => {
+                  const pct = parseFloat(e.target.value) || 0;
+                  const total = parseFloat(totalCosts) || 0;
+                  if (total > 0) setCostsIncurred(String(Math.round((pct / 100) * total)));
+                }}
+              />
+              {reraCertificateVerifiedPct != null && !certOverrideManual && certMismatchResolved !== 'manual' ? (
+                <button
+                  type="button"
+                  className="text-xs text-orange-primary whitespace-nowrap underline"
+                  onClick={() => {
+                    setCertOverrideManual(true);
+                    setReraCertificateVerifiedPct(null);
+                    toast('Overriding certificate — manual input method applies', { icon: '⚠️' });
+                  }}
+                >
+                  Override
+                </button>
+              ) : null}
+            </div>
+            {reraCertificateVerifiedPct != null && !certOverrideManual && certMismatchResolved !== 'manual' ? (
+              <p className="text-[11px] text-amber-700 mt-1">
+                Overriding will use manual input instead of RERA certificate.
+              </p>
+            ) : null}
+          </label>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             {(
               [

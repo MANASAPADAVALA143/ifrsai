@@ -826,6 +826,47 @@ export const ifrs15Api = {
     }
   },
 
+  realestateUploadReraCertificate: async (
+    file: File,
+    opts?: {
+      rera_registration_number?: string;
+      form_completion_pct?: number;
+      currency?: string;
+    }
+  ) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (opts?.rera_registration_number) {
+      formData.append('rera_registration_number', opts.rera_registration_number);
+    }
+    if (opts?.form_completion_pct != null) {
+      formData.append('form_completion_pct', String(opts.form_completion_pct));
+    }
+    formData.append('currency', opts?.currency || 'AED');
+    try {
+      const response = await fetch(`${API_URL}/api/ifrs15/realestate/upload-rera-certificate`, {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        let errorMessage = `Certificate upload failed: ${response.statusText}`;
+        try {
+          const errorData = await response.json();
+          if (errorData.detail) {
+            errorMessage =
+              typeof errorData.detail === 'string' ? errorData.detail : JSON.stringify(errorData.detail);
+          }
+        } catch { /* ignore */ }
+        throw new Error(errorMessage);
+      }
+      return { data: await response.json() };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Upload failed';
+      const isNetworkError = msg === 'Failed to fetch' || msg.includes('NetworkError');
+      return { error: isNetworkError ? getConnectionErrorMessage() : msg };
+    }
+  },
+
   realestateOffPlan: async (payload: Record<string, unknown>) =>
     apiCall<{ success?: boolean; result?: Record<string, unknown> }>('/api/ifrs15/realestate/off-plan', {
       method: 'POST',

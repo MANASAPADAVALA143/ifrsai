@@ -3,7 +3,7 @@ IFRS 16 Lease Accounting Automation - FastAPI Application
 Enterprise REST API for IFRS 16 calculations and reporting
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Query, Request, Form
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse, Response, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -989,6 +989,10 @@ class RealEstateContractInput(BaseModel):
 
 class RealEstateReportRequest(RealEstateContractInput):
     """Full UAE real estate report with quarterly schedule and optional modules."""
+
+    rera_certificate_ref: Optional[str] = None
+    rera_certificate_date: Optional[str] = None
+    rera_certificate_verified_pct: Optional[float] = Field(default=None, ge=0, le=100)
 
     contract_value: float
     construction_start: str
@@ -3746,7 +3750,7 @@ async def ifrs15_realestate_report(request: RealEstateReportRequest):
         from backend.app.services.ifrs15_realestate import (
             RealEstateReportEngine,
             validate_realestate_health,
-            completion_pct_from_costs,
+            effective_completion_pct,
         )
         from backend.app.services.oqood_validator import assess_oqood_requirement
         from backend.app.services.multi_unit_bundling import UnitContract, assess_bundling
@@ -3757,10 +3761,7 @@ async def ifrs15_realestate_report(request: RealEstateReportRequest):
         if not body.get("spa_handover_date"):
             body["spa_handover_date"] = request.expected_handover
 
-        completion_pct_gate = completion_pct_from_costs(
-            float(request.costs_incurred_to_date),
-            float(request.total_estimated_costs),
-        )
+        completion_pct_gate = effective_completion_pct(body)
         gate_rep = _rera_escrow_gate(
             request.escrow_receipts,
             request.escrow_releases,
@@ -3967,6 +3968,86 @@ async def ifrs15_realestate_upload_spa(file: UploadFile = File(...)):
             "ifrs15_inputs": ifrs15_inputs,
             "extraction_meta": meta,
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/upload-rera-certificate")
+async def ifrs15_realestate_upload_rera_certificate(
+    file: UploadFile = File(...),
+    rera_registration_number: Optional[str] = Form(None),
+    form_completion_pct: Optional[float] = Form(None),
+    currency: str = Form("AED"),
+):
+    """Upload RERA / DLD completion certificate PDF — extract verified completion %."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Claude API not configured. Set ANTHROPIC_API_KEY environment variable.",
+        )
+    max_bytes = 10 * 1024 * 1024
+    try:
+        import uuid
+        from backend.app.services.rera_certificate_handler import (
+            cross_check_rera_number,
+            extract_rera_certificate,
+        )
+        from backend.app.services.spa_parser import SPAParser
+
+        content = await file.read()
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=400, detail="Certificate PDF must be 10MB or smaller.")
+        fname = (file.filename or "").lower()
+        if not fname.endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF certificates are accepted.")
+
+        parser = SPAParser(api_key=ANTHROPIC_API_KEY)
+        result = extract_rera_certificate(
+            content,
+            parser._client,
+            form_completion_pct=form_completion_pct,
+            model=parser._model,
+        )
+        result = cross_check_rera_number(result, rera_registration_number)
+
+        file_id = str(uuid.uuid4())
+        cert_path = UPLOAD_DIR / f"rera_cert_{file_id}_{file.filename}"
+        cert_path.write_bytes(content)
+
+        fields = result.fields.model_dump()
+        payload = {
+            "success": result.success,
+            "language_detected": result.language_detected,
+            "confidence_score": result.confidence_score,
+            "fields": fields,
+            "low_confidence_fields": result.low_confidence_fields,
+            "warnings": result.warnings,
+            "extraction_method": result.extraction_method,
+            "mismatch_detected": result.mismatch_detected,
+            "mismatch_detail": result.mismatch_detail,
+            "file_id": file_id,
+            "filename": file.filename,
+            "currency": currency,
+        }
+        if result.success:
+            cert_ref = fields.get("certificate_ref") or "N/A"
+            cert_date = fields.get("certificate_date") or "N/A"
+            pct = fields.get("completion_pct")
+            _ifrs15_audit_append(
+                action="RERA_CERTIFICATE_UPLOAD",
+                contract_id=str(fields.get("rera_registration_number") or rera_registration_number or "RE-CERT"),
+                description=(
+                    f"RERA certificate uploaded — ref: {cert_ref}, date: {cert_date}, "
+                    f"verified completion: {pct}%, method: {result.extraction_method}, "
+                    f"confidence: {result.confidence_score:.0%}"
+                ),
+                before_value={},
+                after_value=payload,
+                ifrs_reference="IFRS 15 — RERA completion certificate",
+            )
+        return payload
     except HTTPException:
         raise
     except Exception as e:

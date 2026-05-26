@@ -66,9 +66,30 @@ class IFRS15RealEstateExcelExporter:
         ws_sum["A1"].font = self.title_font
         ws_sum["A2"] = "RERA Reg No:"
         ws_sum["B2"] = rera
-        ws_sum["A3"] = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        ws_sum["A4"] = f"Contract: {unit}"
-        ws_sum["A5"] = str(report.get("recognition_trigger_summary") or "")
+        cert = report.get("rera_certificate") or {}
+        cert_row = 3
+        if cert:
+            ws_sum["A3"] = "RERA Certificate Ref"
+            ws_sum["B3"] = cert.get("ref") or "—"
+            ws_sum["A4"] = "Certificate Date"
+            ws_sum["B4"] = cert.get("date") or "—"
+            ws_sum["A5"] = "Verified Completion %"
+            ws_sum["B5"] = (
+                f"{cert.get('verified_pct')}%" if cert.get("verified_pct") is not None else "—"
+            )
+            ws_sum["A6"] = "Completion Source"
+            ws_sum["B6"] = (
+                "RERA Certificate"
+                if report.get("completion_source") == "rera_certificate"
+                else "Manual Input"
+            )
+            cert_row = 7
+        ws_sum[f"A{cert_row}"] = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        ws_sum[f"A{cert_row}"].font = self.title_font
+        gen_row = cert_row
+        ws_sum[f"A{gen_row + 1}"] = f"Contract: {unit}"
+        ws_sum[f"A{gen_row + 2}"] = str(report.get("recognition_trigger_summary") or "")
+        start_metrics = gen_row + 4
 
         rows = [
             (f"Completion %", off.get("completion_pct")),
@@ -82,7 +103,7 @@ class IFRS15RealEstateExcelExporter:
             (f"Total VAT 5% {ccy}", vat.get("total_vat")),
             ("Disclosure score", report.get("disclosure_score")),
         ]
-        r = 7
+        r = start_metrics
         for label, val in rows:
             ws_sum.cell(row=r, column=1, value=label)
             ws_sum.cell(row=r, column=2, value=val)
