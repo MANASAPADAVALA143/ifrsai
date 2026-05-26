@@ -28,6 +28,7 @@ import {
   RERACertificateCard,
   type RERACertificateUploadResult,
 } from '@/components/realestate/RERACertificateCard';
+import { mapReportToPDFInput } from '@/lib/realestate-pdf-mapper';
 import toast from 'react-hot-toast';
 import {
   Upload,
@@ -100,6 +101,11 @@ export default function RealEstateIFRS15Page() {
   const [certOverrideManual, setCertOverrideManual] = useState(false);
   const [certMismatchResolved, setCertMismatchResolved] = useState<'certificate' | 'manual' | null>(null);
   const [certManualNote, setCertManualNote] = useState<string | null>(null);
+  const [pdfModalOpen, setPdfModalOpen] = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfReportingPeriod, setPdfReportingPeriod] = useState('Q1 2026');
+  const [pdfReportDate, setPdfReportDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [pdfCustomPeriod, setPdfCustomPeriod] = useState('');
 
   const [contractValue, setContractValue] = useState('2000000');
   const [constructionStart, setConstructionStart] = useState('2023-01-01');
@@ -561,6 +567,53 @@ export default function RealEstateIFRS15Page() {
     toast.success('Full recognition report ready');
   };
 
+  const downloadClientPdf = async () => {
+    if (!fullReport) {
+      toast.error('Run recognition first');
+      return;
+    }
+    const period =
+      pdfReportingPeriod === 'Custom' ? pdfCustomPeriod.trim() || 'Custom period' : pdfReportingPeriod;
+    setPdfLoading(true);
+    const payload = mapReportToPDFInput(
+      fullReport,
+      {
+        projectName,
+        developerName: String(spaExtracted?.developer_name || ''),
+        reraNumber,
+        revTrigger,
+        reraCompletionDate,
+        spaHandoverDate,
+        contractValue,
+        escrowReceipts,
+        escrowReleases,
+        completionPctLive,
+        reraCertificateRef,
+        reraCertificateDate,
+        reraCertificateVerifiedPct,
+        certResult,
+        certMismatchResolved,
+        certOverrideManual,
+        cancelResult,
+      },
+      { reportingPeriod: period, reportDate: pdfReportDate, currency: displayCurrency }
+    );
+    const { blob, filename, error } = await ifrs15Api.realestateClientReportPdf(payload);
+    setPdfLoading(false);
+    if (error || !blob) {
+      toast.error(`PDF generation failed — ${error || 'Unknown error'}`);
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || `IFRS15_RE_${reraNumber}_${pdfReportDate.replace(/-/g, '')}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setPdfModalOpen(false);
+    toast.success(`✓ Client report downloaded — ${a.download}`);
+  };
+
   const exportExcel = async () => {
     if (!fullReport || reraEscrowViolation) {
       toast.error('Run recognition first');
@@ -947,6 +1000,74 @@ export default function RealEstateIFRS15Page() {
 
   return (
     <SidebarLayout>
+      {pdfModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-border-default">
+            <h3 className="text-lg font-semibold mb-4">Generate Client Report</h3>
+            <label className="text-sm block mb-3">
+              <span className="text-text-muted block mb-1">Reporting Period</span>
+              <select
+                className="w-full border rounded px-3 py-2"
+                value={pdfReportingPeriod}
+                onChange={(e) => setPdfReportingPeriod(e.target.value)}
+              >
+                {['Q1 2026', 'Q2 2026', 'Q3 2026', 'Q4 2026', 'FY 2025', 'FY 2026', 'Custom'].map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {pdfReportingPeriod === 'Custom' && (
+              <label className="text-sm block mb-3">
+                <span className="text-text-muted block mb-1">Custom period label</span>
+                <input
+                  className="w-full border rounded px-3 py-2"
+                  value={pdfCustomPeriod}
+                  onChange={(e) => setPdfCustomPeriod(e.target.value)}
+                  placeholder="e.g. H1 2026"
+                />
+              </label>
+            )}
+            <label className="text-sm block mb-3">
+              <span className="text-text-muted block mb-1">Report Date</span>
+              <input
+                type="date"
+                className="w-full border rounded px-3 py-2"
+                value={pdfReportDate}
+                onChange={(e) => setPdfReportDate(e.target.value)}
+              />
+            </label>
+            <label className="text-sm block mb-4">
+              <span className="text-text-muted block mb-1">Currency</span>
+              <select
+                className="w-full border rounded px-3 py-2"
+                value={displayCurrency}
+                onChange={(e) => setDisplayCurrency(e.target.value as DisplayCurrency)}
+              >
+                <option value="AED">AED</option>
+                <option value="USD">USD</option>
+              </select>
+            </label>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setPdfModalOpen(false)} disabled={pdfLoading}>
+                Cancel
+              </Button>
+              <Button variant="primary" onClick={() => void downloadClientPdf()} disabled={pdfLoading}>
+                {pdfLoading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                    Generating PDF report...
+                  </>
+                ) : (
+                  'Generate PDF →'
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-6xl mx-auto space-y-8 pb-16">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -989,6 +1110,20 @@ export default function RealEstateIFRS15Page() {
             <Button title={reraEscrowViolation ? 'Resolve RERA escrow violation first.' : ''} variant="secondary" onClick={syncToMainSchedule} disabled={syncLoading || !offPlanResult || Boolean(reraEscrowViolation)}>
               {syncLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <ArrowRight className="w-4 h-4 mr-2" />}
               Sync to IFRS 15
+            </Button>
+            <Button
+              title={
+                reraEscrowViolation
+                  ? 'Resolve RERA escrow violation first.'
+                  : !fullReport
+                    ? 'Run recognition first to generate report'
+                    : ''
+              }
+              variant="secondary"
+              onClick={() => setPdfModalOpen(true)}
+              disabled={!fullReport || Boolean(reraEscrowViolation)}
+            >
+              📄 Client Report
             </Button>
             <Button title={reraEscrowViolation ? 'Resolve RERA escrow violation first.' : ''} variant="secondary" onClick={exportExcel} disabled={excelLoading || !fullReport || Boolean(reraEscrowViolation)}>
               {excelLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Download className="w-4 h-4 mr-2" />}

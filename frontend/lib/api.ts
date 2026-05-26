@@ -826,6 +826,36 @@ export const ifrs15Api = {
     }
   },
 
+  realestateClientReportPdf: async (payload: Record<string, unknown>) => {
+    try {
+      const response = await fetch(`${API_URL}/api/ifrs15/realestate/client-report-pdf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        let errorMessage = `PDF generation failed: ${response.statusText}`;
+        try {
+          const errorData = await response.json();
+          if (errorData.detail) {
+            errorMessage =
+              typeof errorData.detail === 'string' ? errorData.detail : JSON.stringify(errorData.detail);
+          }
+        } catch { /* ignore */ }
+        throw new Error(errorMessage);
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      const filename = match?.[1] || 'IFRS15_RealEstate_Report.pdf';
+      return { blob, filename };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'PDF generation failed';
+      const isNetworkError = msg === 'Failed to fetch' || msg.includes('NetworkError');
+      return { error: isNetworkError ? getConnectionErrorMessage() : msg };
+    }
+  },
+
   realestateUploadReraCertificate: async (
     file: File,
     opts?: {

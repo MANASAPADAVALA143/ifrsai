@@ -50,6 +50,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 from backend.app.services.ifrs15_db import ifrs15_db
+from backend.app.services.realestate_pdf_report import RealEstatePDFInput
 
 
 def _ifrs15_firm_id(request: Optional[Request] = None) -> str:
@@ -4050,6 +4051,38 @@ async def ifrs15_realestate_upload_rera_certificate(
         return payload
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/client-report-pdf")
+async def ifrs15_realestate_client_report_pdf(request: RealEstatePDFInput):
+    """Generate branded UAE real estate IFRS 15 client PDF (A4, ~4 pages)."""
+    from backend.app.services.realestate_pdf_report import generate_realestate_pdf
+
+    try:
+        pdf_bytes, pages = generate_realestate_pdf(request)
+        safe_rera = "".join(
+            ch for ch in (data.rera_registration_number or "RE") if ch.isalnum() or ch in "-_"
+        )[:30]
+        date_part = (data.report_date or datetime.now().strftime("%Y-%m-%d"))[:10].replace("-", "")
+        filename = f"IFRS15_RE_{safe_rera}_{date_part}.pdf"
+        _ifrs15_audit_append(
+            action="REALESTATE_CLIENT_PDF",
+            contract_id=safe_rera,
+            description=(
+                f"Client PDF report generated — RERA: {data.rera_registration_number}, "
+                f"period: {data.reporting_period}, pages: {pages}"
+            ),
+            before_value={},
+            after_value={"filename": filename, "pages": pages},
+            ifrs_reference="IFRS 15 — UAE Real Estate client report",
+        )
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
