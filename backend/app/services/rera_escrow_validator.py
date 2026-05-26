@@ -38,11 +38,11 @@ def validate_escrow_release(
     if cp <= 0:
         escrow_release_pct = 0.0 if total_released <= 0 else 100.0
     else:
-        escrow_release_pct = round((total_released / cp) * 100.0, 6)
+        escrow_release_pct = round((total_released / contract_price_aed) * 100, 2)
 
     if escrow_release_pct > completion:
-        excess_pct = round(escrow_release_pct - completion, 6)
-        excess_amount_aed = round((excess_pct / 100.0) * cp, 2)
+        excess_pct = round(escrow_release_pct - construction_completion_pct, 2)
+        excess_amount_aed = round((excess_pct / 100) * contract_price_aed, 2)
         msg = (
             f"RERA ESCROW VIOLATION: Escrow released ({escrow_release_pct:.2f}%) "
             f"exceeds construction completion ({completion:.2f}%). "
