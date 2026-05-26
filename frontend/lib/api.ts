@@ -651,6 +651,40 @@ export const ifrs15Api = {
     });
   },
 
+  realestatePortfolioAnalytics: async (params?: Record<string, string | boolean | number>) => {
+    const q = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') q.set(k, String(v));
+      });
+    }
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return apiCall<Record<string, unknown>>(`/api/ifrs15/realestate/portfolio/analytics${suffix}`);
+  },
+
+  realestatePortfolioAnalyticsExport: async (params?: Record<string, string | boolean | number>) => {
+    const q = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') q.set(k, String(v));
+      });
+    }
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    try {
+      const response = await fetch(
+        `${API_URL}/api/ifrs15/realestate/portfolio/analytics/export-excel${suffix}`
+      );
+      if (!response.ok) throw new Error('Export failed');
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      return { blob, filename: match?.[1] || 'RE_Portfolio.xlsx' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Export failed';
+      return { error: msg };
+    }
+  },
+
   realestatePortfolioAdd: async (payload: Record<string, unknown>) =>
     apiPostRealestateEscrowGate<{ success?: boolean; portfolio_size?: number }>(
       '/api/ifrs15/realestate/portfolio',

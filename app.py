@@ -814,6 +814,7 @@ class PortfolioContractRequest(BaseModel):
     escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
     escrow_releases: List[EscrowReleaseEntry] = Field(default_factory=list)
     construction_completion_pct: Optional[float] = None
+    realestate_snapshot: Optional[Dict[str, Any]] = None
 
 
 class AuditSignOffRequest(BaseModel):
@@ -3233,6 +3234,103 @@ async def add_portfolio_contract(req: PortfolioContractRequest, request: Request
 async def ifrs15_realestate_portfolio(req: PortfolioContractRequest, http_request: Request):
     """Real estate portfolio — RERA escrow Art. 8 hard block; same persistence as /portfolio/add."""
     return await add_portfolio_contract(req, http_request)
+
+
+def _realestate_portfolio_rows_from_db(firm_id: str) -> List[Dict[str, Any]]:
+    rows = ifrs15_db.get_portfolio(firm_id)
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        cd = dict(row.get("contract_data") or {})
+        if str(cd.get("contract_type") or "") != "real_estate_off_plan":
+            continue
+        cd["_updated_at"] = row.get("updated_at") or row.get("created_at") or ""
+        out.append(cd)
+    return out
+
+
+@app.get("/api/ifrs15/realestate/portfolio/analytics")
+async def ifrs15_realestate_portfolio_analytics(
+    request: Request,
+    currency: str = Query("AED"),
+    developer_name: str = Query(""),
+    min_completion: Optional[float] = Query(None),
+    max_completion: Optional[float] = Query(None),
+    health_issues_only: bool = Query(False),
+    violations_only: bool = Query(False),
+):
+    """Cross-project UAE real estate portfolio analytics."""
+    try:
+        from backend.app.services.realestate_portfolio_analytics import (
+            build_portfolio_analytics,
+            filter_projects,
+        )
+
+        firm_id = _ifrs15_firm_id(request)
+        contracts = _realestate_portfolio_rows_from_db(firm_id)
+        saas = _ifrs15_portfolio_saas_summary(firm_id)
+        analytics = build_portfolio_analytics(
+            contracts,
+            bundling_alerts=saas.get("bundling_alerts") or [],
+            currency=currency,
+        )
+        if any([developer_name, min_completion is not None, max_completion is not None, health_issues_only, violations_only]):
+            analytics = filter_projects(
+                analytics,
+                developer_name=developer_name or None,
+                min_completion=min_completion,
+                max_completion=max_completion,
+                health_issues_only=health_issues_only,
+                violations_only=violations_only,
+            )
+        return analytics.model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ifrs15/realestate/portfolio/analytics/export-excel")
+async def ifrs15_realestate_portfolio_analytics_export(
+    request: Request,
+    currency: str = Query("AED"),
+    developer_name: str = Query(""),
+    min_completion: Optional[float] = Query(None),
+    max_completion: Optional[float] = Query(None),
+    health_issues_only: bool = Query(False),
+    violations_only: bool = Query(False),
+):
+    """Excel export — portfolio summary, project detail, compliance matrix."""
+    try:
+        from backend.app.services.realestate_portfolio_analytics import (
+            build_portfolio_analytics,
+            export_portfolio_analytics_excel,
+            filter_projects,
+        )
+
+        firm_id = _ifrs15_firm_id(request)
+        contracts = _realestate_portfolio_rows_from_db(firm_id)
+        saas = _ifrs15_portfolio_saas_summary(firm_id)
+        analytics = build_portfolio_analytics(
+            contracts,
+            bundling_alerts=saas.get("bundling_alerts") or [],
+            currency=currency,
+        )
+        if any([developer_name, min_completion is not None, max_completion is not None, health_issues_only, violations_only]):
+            analytics = filter_projects(
+                analytics,
+                developer_name=developer_name or None,
+                min_completion=min_completion,
+                max_completion=max_completion,
+                health_issues_only=health_issues_only,
+                violations_only=violations_only,
+            )
+        xlsx = export_portfolio_analytics_excel(analytics)
+        fn = f"RE_Portfolio_{datetime.now(timezone.utc).strftime('%Y%m%d')}.xlsx"
+        return StreamingResponse(
+            io.BytesIO(xlsx),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{fn}"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/ifrs15/portfolio/summary")

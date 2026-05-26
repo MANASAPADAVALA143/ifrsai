@@ -1,10 +1,12 @@
 'use client';
 
-import { useState, useEffect, Fragment, useMemo } from 'react';
+import { useState, useEffect, Fragment, useMemo, useRef } from 'react';
+import Link from 'next/link';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
-import { Upload, FileText, Calculator, Download, Loader2, CheckCircle2, Clock, ArrowRight, Copy, Plus, Trash2, HelpCircle, X, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
+import { Upload, FileText, Calculator, Download, Loader2, CheckCircle2, Clock, ArrowRight, Copy, Plus, Trash2, HelpCircle, X, ChevronDown, ChevronUp, AlertTriangle, Building2 } from 'lucide-react';
 import { ifrs15Api } from '@/lib/api';
+import { consumeRealEstateSyncPending } from '@/lib/realestate-ifrs15-mapper';
 import toast from 'react-hot-toast';
 import {
   ResponsiveContainer,
@@ -672,7 +674,18 @@ export default function IFRS15Page() {
     fair_value_of_benefit: number;
     currency: string;
   };
-  const [tpAdjPanel, setTpAdjPanel] = useState<'non-cash' | 'payable'>('non-cash');
+  const [tpAdjPanel, setTpAdjPanel] = useState<'non-cash' | 'payable' | 'tp-change'>('non-cash');
+  const [tpChangeForm, setTpChangeForm] = useState({
+    contract_id: '',
+    adjustment_reason: 'variable_consideration',
+    original_transaction_price: '',
+    new_transaction_price: '',
+    revenue_recognised_to_date: '',
+    remaining_performance_obligations: '1',
+    adjustment_method: 'cumulative_catchup',
+  });
+  const [tpChangeResult, setTpChangeResult] = useState<Record<string, unknown> | null>(null);
+  const [tpChangeLoading, setTpChangeLoading] = useState(false);
   const [ncRows, setNcRows] = useState<TpNcFormRow[]>([]);
   const [cpRows, setCpRows] = useState<TpCpFormRow[]>([]);
   const [tpAdjResult, setTpAdjResult] = useState<Record<string, unknown> | null>(null);
@@ -921,6 +934,51 @@ export default function IFRS15Page() {
       setIsCalculating(false);
     }
   };
+
+  const realestateSyncApplied = useRef(false);
+  useEffect(() => {
+    if (realestateSyncApplied.current) return;
+    const payload = consumeRealEstateSyncPending();
+    if (!payload) return;
+    realestateSyncApplied.current = true;
+    setIfrs15DashTab('calculate');
+    setActiveTab('manual');
+    updateStep3({
+      contract_type: 'fixed_price',
+      total_estimated_cost: String(payload.total_estimated_cost ?? ''),
+      actual_cost_to_date: String(payload.actual_cost_to_date ?? ''),
+      prior_revenue_recognised: String(payload.prior_revenue_recognised ?? ''),
+      cumulative_billed: String(payload.cumulative_billed ?? ''),
+    });
+    const pos = (payload.performance_obligations as Record<string, unknown>[]) || [];
+    setExtractedData({
+      step1_identify_contract: {
+        contract_details: {
+          contract_id: payload.contract_id,
+          customer_name: payload.customer_name,
+          vendor_name: payload.vendor_name,
+          effective_date: payload.effective_date,
+          contract_term_months: payload.contract_term_months,
+          total_contract_value: payload.fixed_consideration,
+          currency: payload.currency || 'AED',
+        },
+      },
+      step2_performance_obligations: {
+        identified_obligations: pos.map((p, i) => ({
+          obligation_id: p.obligation_id || `PO-${i + 1}`,
+          description: p.description,
+          standalone_selling_price_estimate: p.standalone_selling_price,
+        })),
+      },
+      step3_transaction_price: {
+        fixed_consideration: payload.fixed_consideration,
+        total_transaction_price: payload.fixed_consideration,
+      },
+      _realestate_overlay: payload.realestate_overlay,
+    });
+    void handleCalculate(payload);
+    toast.success('Real estate recognition synced to IFRS 15 schedule');
+  }, []);
 
   const moduleCards = [
     { id: 'contract-identification', name: 'Contract Identification', gradient: 'gradient-orange' },
@@ -2592,6 +2650,13 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
           >
             Revenue Calculate
           </button>
+          <Link
+            href="/dashboard/ifrs15/realestate"
+            className="px-4 py-2 rounded-lg text-sm font-semibold transition-colors bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40 inline-flex items-center gap-1.5"
+          >
+            <Building2 className="w-4 h-4" />
+            Real Estate UAE
+          </Link>
           <button
             type="button"
             onClick={() => setIfrs15DashTab('deferred-rev')}
@@ -2721,6 +2786,15 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
 
         {ifrs15DashTab === 'portfolio' && (
           <div className="bg-white rounded-card p-6 border border-border-default shadow-card space-y-6">
+            <Link
+              href="/dashboard/ifrs15/realestate/portfolio"
+              className="block p-4 rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 transition-colors"
+            >
+              <p className="font-semibold text-orange-900">Real Estate UAE Portfolio →</p>
+              <p className="text-sm text-orange-800 mt-1">
+                Cross-project KPIs, escrow compliance matrix, completion distribution, and Excel export for off-plan developments.
+              </p>
+            </Link>
             <div className="border-b border-border-default pb-4 flex flex-wrap justify-between gap-3 items-start">
               <div>
                 <h3 className="text-lg font-bold text-text-primary">IFRS 15 PORTFOLIO DASHBOARD</h3>
@@ -5726,7 +5800,70 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               >
                 Consideration payable
               </button>
+              <button
+                type="button"
+                onClick={() => setTpAdjPanel('tp-change')}
+                className={`px-4 py-2 rounded-lg text-sm font-semibold border ${
+                  tpAdjPanel === 'tp-change' ? 'bg-gradient-orange text-white border-orange-primary' : 'bg-bg-light text-text-secondary border-border-default'
+                }`}
+              >
+                TP change (catch-up / prospective)
+              </button>
             </div>
+            {tpAdjPanel === 'tp-change' && (
+              <div className="space-y-4">
+                <p className="text-sm text-text-secondary">IFRS 15.87-90 — Remeasure transaction price when facts change.</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <input className="border rounded px-2 py-1.5 text-sm" placeholder="Contract ID" value={tpChangeForm.contract_id} onChange={(e) => setTpChangeForm((f) => ({ ...f, contract_id: e.target.value }))} />
+                  <select className="border rounded px-2 py-1.5 text-sm" value={tpChangeForm.adjustment_reason} onChange={(e) => setTpChangeForm((f) => ({ ...f, adjustment_reason: e.target.value }))}>
+                    <option value="variable_consideration">Variable consideration</option>
+                    <option value="modification">Modification</option>
+                    <option value="new_info">New information</option>
+                  </select>
+                  <input className="border rounded px-2 py-1.5 text-sm" placeholder="Original TP" value={tpChangeForm.original_transaction_price} onChange={(e) => setTpChangeForm((f) => ({ ...f, original_transaction_price: e.target.value }))} />
+                  <input className="border rounded px-2 py-1.5 text-sm" placeholder="New TP" value={tpChangeForm.new_transaction_price} onChange={(e) => setTpChangeForm((f) => ({ ...f, new_transaction_price: e.target.value }))} />
+                  <input className="border rounded px-2 py-1.5 text-sm" placeholder="Revenue recognised to date" value={tpChangeForm.revenue_recognised_to_date} onChange={(e) => setTpChangeForm((f) => ({ ...f, revenue_recognised_to_date: e.target.value }))} />
+                  <input className="border rounded px-2 py-1.5 text-sm" placeholder="Remaining POs" value={tpChangeForm.remaining_performance_obligations} onChange={(e) => setTpChangeForm((f) => ({ ...f, remaining_performance_obligations: e.target.value }))} />
+                  <select className="border rounded px-2 py-1.5 text-sm" value={tpChangeForm.adjustment_method} onChange={(e) => setTpChangeForm((f) => ({ ...f, adjustment_method: e.target.value }))}>
+                    <option value="cumulative_catchup">Cumulative catch-up</option>
+                    <option value="prospective">Prospective</option>
+                  </select>
+                </div>
+                <Button
+                  variant="primary"
+                  onClick={async () => {
+                    setTpChangeLoading(true);
+                    try {
+                      const res = await ifrs15Api.tpAdjustmentsChange({
+                        ...tpChangeForm,
+                        original_transaction_price: Number(tpChangeForm.original_transaction_price) || 0,
+                        new_transaction_price: Number(tpChangeForm.new_transaction_price) || 0,
+                        revenue_recognised_to_date: Number(tpChangeForm.revenue_recognised_to_date) || 0,
+                        remaining_performance_obligations: Number(tpChangeForm.remaining_performance_obligations) || 1,
+                      });
+                      if (res.error) throw new Error(res.error);
+                      setTpChangeResult(res.data as Record<string, unknown>);
+                      toast.success('TP adjustment calculated');
+                    } catch (e) {
+                      toast.error(e instanceof Error ? e.message : 'Failed');
+                    } finally {
+                      setTpChangeLoading(false);
+                    }
+                  }}
+                  isLoading={tpChangeLoading}
+                >
+                  Calculate TP adjustment
+                </Button>
+                {tpChangeResult && (
+                  <div className="text-sm space-y-1 border rounded p-3 bg-bg-light">
+                    <p>Adjustment: {String(tpChangeResult.adjustment_amount)}</p>
+                    <p>Current period impact: {String(tpChangeResult.current_period_impact)}</p>
+                    <p>Method: {String(tpChangeResult.method_used)}</p>
+                    <p className="text-xs text-text-muted">{String(tpChangeResult.disclosure_note)}</p>
+                  </div>
+                )}
+              </div>
+            )}
             {tpAdjPanel === 'non-cash' && (
               <div className="space-y-4">
                 <p className="text-xs font-semibold text-blue-900">IFRS 15.66-69 — Non-cash consideration</p>
@@ -6148,6 +6285,18 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
         {ifrs15DashTab === 'calculate' && (
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6">
         <div className="space-y-6">
+          {(extractedData as { _realestate_overlay?: Record<string, unknown> })?._realestate_overlay ? (
+            <div className="bg-orange-50 border border-orange-200 rounded-lg px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm text-text-primary">
+                <Building2 className="w-4 h-4 inline mr-1 text-orange-primary" />
+                UAE real estate off-plan data loaded — completion{' '}
+                {(extractedData as { _realestate_overlay?: Record<string, unknown> })._realestate_overlay?.completion_pct}%
+              </p>
+              <Link href="/dashboard/ifrs15/realestate" className="text-xs font-semibold text-orange-primary hover:underline">
+                Edit in Real Estate UAE →
+              </Link>
+            </div>
+          ) : null}
           {/* Upload + AI Extraction */}
           <div className="bg-white rounded-card p-6 border border-border-default shadow-card">
             <div className="border-b border-border-default pb-4 mb-6">

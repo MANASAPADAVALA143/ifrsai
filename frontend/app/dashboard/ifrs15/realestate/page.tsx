@@ -233,6 +233,23 @@ export default function RealEstateIFRS15Page() {
   }, []);
 
   useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('re_portfolio_selected_project');
+      if (!raw) return;
+      const p = JSON.parse(raw) as Record<string, unknown>;
+      if (p.rera_registration_number) setReraNumber(String(p.rera_registration_number));
+      if (p.project_name) setProjectName(String(p.project_name));
+      if (p.contract_value != null) setContractValue(String(p.contract_value));
+      if (p.construction_start) setConstructionStart(String(p.construction_start).slice(0, 10));
+      if (p.expected_handover) setExpectedHandover(String(p.expected_handover).slice(0, 10));
+      sessionStorage.removeItem('re_portfolio_selected_project');
+      toast.success('Project loaded from portfolio');
+    } catch {
+      sessionStorage.removeItem('re_portfolio_selected_project');
+    }
+  }, []);
+
+  useEffect(() => {
     const t = window.setTimeout(() => {
       localStorage.setItem(
         FORM_STORAGE_KEY,
@@ -657,6 +674,12 @@ export default function RealEstateIFRS15Page() {
     setPortfolioLoading(true);
     const unit = String(spaExtracted?.property_unit_number || 'RE-UNIT');
     const buyer = String(spaExtracted?.buyer_name || 'Buyer');
+    const hv = (fullReport?.health_validation as Record<string, unknown>) || {};
+    const pendingOqood = modLog.filter(
+      (m) =>
+        Boolean(m.oqood_assessment?.requires_oqood_amendment) &&
+        !Boolean(m.oqood_assessment?.oqood_filed)
+    ).length;
     const { error, reraViolation } = await ifrs15Api.realestatePortfolioAdd({
       contract_id: `RE-${unit}`,
       customer_name: buyer,
@@ -676,6 +699,25 @@ export default function RealEstateIFRS15Page() {
       escrow_receipts: buildReportPayload().escrow_receipts,
       escrow_releases: buildReportPayload().escrow_releases,
       construction_completion_pct: completionPctLive,
+      realestate_snapshot: {
+        project_name: projectName.trim(),
+        developer_name: String(spaExtracted?.developer_name || ''),
+        rera_registration_number: reraNumber.trim(),
+        completion_pct: completionPctLive,
+        completion_source:
+          reraCertificateVerifiedPct != null && !certOverrideManual ? 'rera_certificate' : 'manual_input',
+        revenue_recognised: Number(offPlanResult.revenue_recognised_to_date) || 0,
+        deferred_revenue: Number(offPlanResult.contract_liability) || 0,
+        vat_amount: Number(vatResult?.total_vat) || 0,
+        health_validation: hv,
+        escrow_validation: fullReport?.escrow_validation,
+        pending_oqood_filings: pendingOqood,
+        bundling_alert: Boolean((fullReport?.bundling_assessment as Record<string, unknown>)?.should_bundle),
+        rera_certificate_verified:
+          reraCertificateVerifiedPct != null && !certOverrideManual && certMismatchResolved !== 'manual',
+        disclosure_score: fullReport?.disclosure_score,
+        last_updated: new Date().toISOString(),
+      },
     });
     setPortfolioLoading(false);
     if (reraViolation) {
@@ -1129,9 +1171,14 @@ export default function RealEstateIFRS15Page() {
               {excelLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Download className="w-4 h-4 mr-2" />}
               Excel
             </Button>
+            <Link href="/dashboard/ifrs15/realestate/portfolio">
+              <Button type="button" variant="secondary">
+                📊 Portfolio
+              </Button>
+            </Link>
             <Button title={reraEscrowViolation ? 'Resolve RERA escrow violation first.' : ''} variant="secondary" onClick={saveToPortfolio} disabled={portfolioLoading || !offPlanResult || Boolean(reraEscrowViolation)}>
               {portfolioLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <FolderPlus className="w-4 h-4 mr-2" />}
-              Portfolio
+              Save
             </Button>
           </div>
         </div>

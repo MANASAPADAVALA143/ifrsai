@@ -154,6 +154,7 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
 
   const ifrsNav = [
     { name: 'IFRS 16 Overview', href: '/dashboard/ifrs16', icon: LayoutDashboard },
+    { name: 'AI Search', href: '/dashboard/assistant?mode=lease', icon: MessageSquare },
     {
       name: '⚡ Quick Analysis',
       href: '/dashboard/ifrs16/quick-analysis',
@@ -182,6 +183,8 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
     { name: 'FX Schedule Report', href: '/dashboard/ifrs16/reports/fx', icon: FileText },
     { name: 'Liability Maturity Report', href: '/dashboard/ifrs16/reports/maturity', icon: FileText },
     { name: 'IFRS 15 Revenue Recognition', href: '/dashboard/ifrs15', icon: DollarSign },
+    { name: 'Real Estate UAE (IFRS 15)', href: '/dashboard/ifrs15/realestate', icon: Building2 },
+    { name: '  └ Portfolio Analytics', href: '/dashboard/ifrs15/realestate/portfolio', icon: Building2 },
     { name: 'Rev Rec Reconciliation', href: '/dashboard/r2r/rev-rec', icon: FileCheck },
     { name: 'IFRS 9 Overview', href: '/dashboard/ifrs9', icon: TrendingUp },
     { name: 'ECL Portfolios', href: '/dashboard/ifrs9/portfolios', icon: FolderOpen, badge: eclPortfolioCount, badgeStyle: 'count' },
