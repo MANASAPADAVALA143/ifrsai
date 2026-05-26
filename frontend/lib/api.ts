@@ -21,6 +21,55 @@ interface ApiResponse<T> {
   error?: string;
 }
 
+/** RERA escrow Art. 8 — HTTP 422 with `error: RERA_ESCROW_VIOLATION` (not wrapped in `detail`). */
+export interface ApiResponseWithRera<T> extends ApiResponse<T> {
+  reraViolation?: Record<string, unknown>;
+}
+
+async function apiPostRealestateEscrowGate<T>(
+  endpoint: string,
+  body: Record<string, unknown>
+): Promise<ApiResponseWithRera<T>> {
+  try {
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const bodyText = await response.text();
+    const parsed = parseJsonText<Record<string, unknown>>(bodyText);
+    if (response.status === 422 && parsed && parsed.error === 'RERA_ESCROW_VIOLATION') {
+      return { reraViolation: parsed };
+    }
+    if (!response.ok) {
+      let msg = `HTTP error! status: ${response.status}`;
+      if (parsed?.detail !== undefined) {
+        msg =
+          typeof parsed.detail === 'string'
+            ? parsed.detail
+            : JSON.stringify(parsed.detail);
+      } else if (typeof parsed?.message === 'string') {
+        msg = parsed.message;
+      }
+      return { error: msg };
+    }
+    const data = parseJsonText<T>(bodyText);
+    if (data == null) {
+      return { error: 'API returned an empty response' };
+    }
+    return { data };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'An error occurred';
+    const net =
+      msg === 'Failed to fetch' ||
+      msg.includes('NetworkError') ||
+      msg.includes('Load failed') ||
+      msg.includes('connection') ||
+      msg.includes('reset');
+    return { error: net ? getBackendUnreachableHelp() : msg };
+  }
+}
+
 async function apiCall<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -602,6 +651,12 @@ export const ifrs15Api = {
     });
   },
 
+  realestatePortfolioAdd: async (payload: Record<string, unknown>) =>
+    apiPostRealestateEscrowGate<{ success?: boolean; portfolio_size?: number }>(
+      '/api/ifrs15/realestate/portfolio',
+      payload
+    ),
+
   portfolioSummary: async () => {
     return apiCall<Record<string, unknown>>('/api/ifrs15/portfolio/summary');
   },
@@ -814,29 +869,35 @@ export const ifrs15Api = {
     }),
 
   realestateToCalculatePayload: async (payload: Record<string, unknown>) =>
-    apiCall<{ success?: boolean; calculate_payload?: Record<string, unknown> }>(
+    apiPostRealestateEscrowGate<{ success?: boolean; calculate_payload?: Record<string, unknown> }>(
       '/api/ifrs15/realestate/to-calculate-payload',
-      { method: 'POST', body: JSON.stringify(payload) }
+      payload
     ),
 
   realestateReport: async (payload: Record<string, unknown>) =>
-    apiCall<{ success?: boolean; report?: Record<string, unknown> }>('/api/ifrs15/realestate/report', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+    apiPostRealestateEscrowGate<{ success?: boolean; report?: Record<string, unknown> }>(
+      '/api/ifrs15/realestate/report',
+      payload
+    ),
 
-  realestateExportExcel: async (payload: { report: Record<string, unknown>; contract_id?: string }) =>
-    apiCall<{ status: string; file_id: string; filename: string }>('/api/ifrs15/realestate/export-excel', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+  realestateExportExcel: async (payload: {
+    report: Record<string, unknown>;
+    contract_id?: string;
+    escrow_receipts?: Record<string, unknown>[];
+    escrow_releases?: Record<string, unknown>[];
+    construction_completion_pct?: number;
+  }) =>
+    apiPostRealestateEscrowGate<{ status: string; file_id: string; filename: string }>(
+      '/api/ifrs15/realestate/export-excel',
+      payload
+    ),
 
   realestateDownloadExcel: (fileId: string) => `${API_URL}/api/ifrs15/download/${fileId}`,
 
   realestateCancellationRefund: async (payload: Record<string, unknown>) =>
-    apiCall<{ success?: boolean; result?: Record<string, unknown> }>(
+    apiPostRealestateEscrowGate<{ success?: boolean; result?: Record<string, unknown> }>(
       '/api/ifrs15/realestate/cancellation-refund',
-      { method: 'POST', body: JSON.stringify(payload) }
+      payload
     ),
 
   realestateBundlingCheck: async (payload: Record<string, unknown>) =>

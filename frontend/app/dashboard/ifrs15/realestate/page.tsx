@@ -85,6 +85,7 @@ export default function RealEstateIFRS15Page() {
   const [totalCosts, setTotalCosts] = useState('2000000');
   const [revenuePrior, setRevenuePrior] = useState('1026000');
   const [escrowReceipts, setEscrowReceipts] = useState<EscrowReceipt[]>(DEFAULT_ESCROW);
+  const [escrowReleases, setEscrowReleases] = useState<EscrowRelease[]>([]);
   const [milestones, setMilestones] = useState<Milestone[]>(DEFAULT_MILESTONES);
 
   const [fullReport, setFullReport] = useState<Record<string, unknown> | null>(null);
@@ -186,6 +187,7 @@ export default function RealEstateIFRS15Page() {
       if (s.totalCosts) setTotalCosts(String(s.totalCosts));
       if (s.revenuePrior) setRevenuePrior(String(s.revenuePrior));
       if (Array.isArray(s.escrowReceipts)) setEscrowReceipts(s.escrowReceipts as EscrowReceipt[]);
+      if (Array.isArray(s.escrowReleases)) setEscrowReleases(s.escrowReleases as EscrowRelease[]);
       if (Array.isArray(s.milestones)) setMilestones(s.milestones as Milestone[]);
       if (s.commissionPaid) setCommissionPaid(String(s.commissionPaid));
       if (s.amortMonths) setAmortMonths(String(s.amortMonths));
@@ -213,6 +215,7 @@ export default function RealEstateIFRS15Page() {
           totalCosts,
           revenuePrior,
           escrowReceipts,
+          escrowReleases,
           milestones,
           commissionPaid,
           amortMonths,
@@ -235,6 +238,7 @@ export default function RealEstateIFRS15Page() {
     totalCosts,
     revenuePrior,
     escrowReceipts,
+    escrowReleases,
     milestones,
     commissionPaid,
     amortMonths,
@@ -253,6 +257,13 @@ export default function RealEstateIFRS15Page() {
       unit_id: r.unit_id,
       buyer_name: r.buyer_name,
     }));
+    const releasePayload = escrowReleases.map((r) => ({
+      date: r.date,
+      amount: parseFloat(r.amount) || 0,
+      release_pct: parseFloat(r.release_pct) || 0,
+      milestone_description: r.milestone_description || '',
+      rera_approval_ref: r.rera_approval_ref || null,
+    }));
     return {
       contract_value: parseFloat(contractValue) || 0,
       construction_start: constructionStart,
@@ -261,6 +272,7 @@ export default function RealEstateIFRS15Page() {
       costs_incurred_to_date: parseFloat(costsIncurred) || 0,
       total_estimated_costs: parseFloat(totalCosts) || 0,
       escrow_receipts: escrowPayload,
+      escrow_releases: releasePayload,
       milestone_releases: milestones.map((m) => ({
         milestone: m.milestone,
         completion_pct_required: parseFloat(m.completion_pct_required) || 0,
@@ -332,6 +344,7 @@ export default function RealEstateIFRS15Page() {
     modLog,
     modNewPrice,
     unitRows,
+    escrowReleases,
   ]);
 
   const applySpaInputs = useCallback((inputs: Record<string, unknown>) => {
@@ -390,12 +403,22 @@ export default function RealEstateIFRS15Page() {
       ...buildReportPayload(),
       cancellation_refund: cancelResult || undefined,
     };
-    const { data, error } = await ifrs15Api.realestateReport(payload);
+    const { data, error, reraViolation } = await ifrs15Api.realestateReport(payload);
     setCalcLoading(false);
+    if (reraViolation) {
+      setReraEscrowViolation(reraViolation);
+      setFullReport(null);
+      setOffPlanResult(null);
+      setEscrowResult(null);
+      setVatResult(null);
+      setPeriodSchedule([]);
+      return;
+    }
     if (error) {
       toast.error(error);
       return;
     }
+    setReraEscrowViolation(null);
     const report = (data?.report as Record<string, unknown>) || {};
     setFullReport(report);
     setOffPlanResult((report.off_plan as Record<string, unknown>) || null);
@@ -408,7 +431,7 @@ export default function RealEstateIFRS15Page() {
   };
 
   const exportExcel = async () => {
-    if (!fullReport) {
+    if (!fullReport || reraEscrowViolation) {
       toast.error('Run recognition first');
       return;
     }
@@ -418,11 +441,22 @@ export default function RealEstateIFRS15Page() {
       ...fullReport,
       ...(cancelResult ? { cancellation_refund: cancelResult } : {}),
     };
-    const { data, error } = await ifrs15Api.realestateExportExcel({
+    const { data, error, reraViolation } = await ifrs15Api.realestateExportExcel({
       report: reportOut,
       contract_id: `RE-${unit}`,
+      escrow_receipts: buildReportPayload().escrow_receipts as Record<string, unknown>[],
+      escrow_releases: buildReportPayload().escrow_releases as Record<string, unknown>[],
+      construction_completion_pct: completionPctLive,
     });
     setExcelLoading(false);
+    if (reraViolation) {
+      setReraEscrowViolation(reraViolation);
+      setBlockedModal({
+        title: 'Excel Export Blocked',
+        body: 'A RERA escrow violation exists. Resolve the escrow release figures before exporting the audit workbook.',
+      });
+      return;
+    }
     if (error || !data?.file_id) {
       toast.error(error || 'Export failed');
       return;
@@ -432,14 +466,14 @@ export default function RealEstateIFRS15Page() {
   };
 
   const saveToPortfolio = async () => {
-    if (!offPlanResult) {
+    if (!offPlanResult || reraEscrowViolation) {
       toast.error('Run recognition first');
       return;
     }
     setPortfolioLoading(true);
     const unit = String(spaExtracted?.property_unit_number || 'RE-UNIT');
     const buyer = String(spaExtracted?.buyer_name || 'Buyer');
-    const { error } = await ifrs15Api.portfolioAddContract({
+    const { error, reraViolation } = await ifrs15Api.realestatePortfolioAdd({
       contract_id: `RE-${unit}`,
       customer_name: buyer,
       contract_type: 'real_estate_off_plan',
@@ -455,8 +489,19 @@ export default function RealEstateIFRS15Page() {
       mrr: 0,
       disclosure_score: Number(fullReport?.disclosure_score) || undefined,
       risk: reraNumber,
+      escrow_receipts: buildReportPayload().escrow_receipts,
+      escrow_releases: buildReportPayload().escrow_releases,
+      construction_completion_pct: completionPctLive,
     });
     setPortfolioLoading(false);
+    if (reraViolation) {
+      setReraEscrowViolation(reraViolation);
+      setBlockedModal({
+        title: 'Portfolio Save Blocked',
+        body: 'Cannot save a contract with an active RERA escrow violation to the portfolio. Resolve and rerun recognition first.',
+      });
+      return;
+    }
     if (error) toast.error(error);
     else toast.success('Saved to IFRS 15 portfolio');
   };
@@ -567,9 +612,27 @@ export default function RealEstateIFRS15Page() {
       ).length,
     [modLog]
   );
+  const escrowReleasedTotal = useMemo(
+    () => escrowReleases.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0),
+    [escrowReleases]
+  );
+  const escrowReceivedTotal = useMemo(
+    () => escrowReceipts.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0),
+    [escrowReceipts]
+  );
+  const completionPctLive = useMemo(() => {
+    const c = parseFloat(costsIncurred) || 0;
+    const t = parseFloat(totalCosts) || 0;
+    return t > 0 ? (c / t) * 100 : 0;
+  }, [costsIncurred, totalCosts]);
+  const escrowReleasePctLive = useMemo(() => {
+    const cv = parseFloat(contractValue) || 0;
+    return cv > 0 ? (escrowReleasedTotal / cv) * 100 : 0;
+  }, [contractValue, escrowReleasedTotal]);
+  const previewReleaseViolation = escrowReleasePctLive > completionPctLive;
 
   const syncToMainSchedule = async () => {
-    if (!offPlanResult) {
+    if (!offPlanResult || reraEscrowViolation) {
       toast.error('Run recognition first');
       return;
     }
@@ -598,7 +661,7 @@ export default function RealEstateIFRS15Page() {
     });
     let payload = fromReport || localPayload;
     if (!fromReport) {
-      const { data, error } = await ifrs15Api.realestateToCalculatePayload({
+      const { data, error, reraViolation } = await ifrs15Api.realestateToCalculatePayload({
         off_plan: offPlanResult,
         spa: spaExtracted ?? undefined,
         spa_mapped: spaInputs ?? undefined,
@@ -609,7 +672,14 @@ export default function RealEstateIFRS15Page() {
         total_estimated_costs: parseFloat(totalCosts) || 0,
         revenue_prior_period: parseFloat(revenuePrior) || 0,
         escrow_total: escrowTotal,
+        escrow_receipts: buildReportPayload().escrow_receipts,
+        escrow_releases: buildReportPayload().escrow_releases,
       });
+      if (reraViolation) {
+        setSyncLoading(false);
+        setReraEscrowViolation(reraViolation);
+        return;
+      }
       if (error && !data?.calculate_payload) {
         setSyncLoading(false);
         toast.error(error);
@@ -629,15 +699,21 @@ export default function RealEstateIFRS15Page() {
       return;
     }
     setCancelLoading(true);
-    const { data, error } = await ifrs15Api.realestateCancellationRefund({
+    const { data, error, reraViolation } = await ifrs15Api.realestateCancellationRefund({
       contract_price: parseFloat(contractValue) || 0,
       amount_paid_by_buyer: parseFloat(amountPaidBuyer) || 0,
       construction_completion_pct: Number(offPlanResult?.completion_pct) || 0,
       rera_registration_number: reraNumber.trim(),
       cancellation_reason: cancelReason,
       escrow_balance: parseFloat(cancelEscrowBal) || 0,
+      escrow_receipts: buildReportPayload().escrow_receipts,
+      escrow_releases: buildReportPayload().escrow_releases,
     });
     setCancelLoading(false);
+    if (reraViolation) {
+      setReraEscrowViolation(reraViolation);
+      return;
+    }
     if (error) {
       toast.error(error);
       return;
@@ -713,20 +789,44 @@ export default function RealEstateIFRS15Page() {
               {calcLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Calculator className="w-4 h-4 mr-2" />}
               Run recognition
             </Button>
-            <Button variant="secondary" onClick={syncToMainSchedule} disabled={syncLoading || !offPlanResult}>
+            <Button title={reraEscrowViolation ? 'Resolve RERA escrow violation first.' : ''} variant="secondary" onClick={syncToMainSchedule} disabled={syncLoading || !offPlanResult || Boolean(reraEscrowViolation)}>
               {syncLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <ArrowRight className="w-4 h-4 mr-2" />}
               Sync to IFRS 15
             </Button>
-            <Button variant="secondary" onClick={exportExcel} disabled={excelLoading || !fullReport}>
+            <Button title={reraEscrowViolation ? 'Resolve RERA escrow violation first.' : ''} variant="secondary" onClick={exportExcel} disabled={excelLoading || !fullReport || Boolean(reraEscrowViolation)}>
               {excelLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Download className="w-4 h-4 mr-2" />}
               Excel
             </Button>
-            <Button variant="secondary" onClick={saveToPortfolio} disabled={portfolioLoading || !offPlanResult}>
+            <Button title={reraEscrowViolation ? 'Resolve RERA escrow violation first.' : ''} variant="secondary" onClick={saveToPortfolio} disabled={portfolioLoading || !offPlanResult || Boolean(reraEscrowViolation)}>
               {portfolioLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <FolderPlus className="w-4 h-4 mr-2" />}
               Portfolio
             </Button>
           </div>
         </div>
+
+        {reraEscrowViolation ? (
+          <section
+            className="w-full border-2 border-red-500 bg-red-50 rounded-lg p-6"
+            role="alert"
+            aria-live="assertive"
+          >
+            <h2 className="text-xl font-bold text-red-800 mb-3">⛔ RERA ESCROW VIOLATION — Processing Blocked</h2>
+            <div className="text-sm text-red-900 space-y-1">
+              <p>Escrow Released: {Number(reraEscrowViolation.escrow_release_pct || 0).toFixed(2)}% ({fmt(escrowReleasedTotal)})</p>
+              <p>Construction: {Number(reraEscrowViolation.construction_completion_pct || 0).toFixed(2)}%</p>
+              <p>Excess Released: {Number(reraEscrowViolation.excess_pct || 0).toFixed(2)}% ({fmt(Number(reraEscrowViolation.excess_amount_aed || 0))})</p>
+              <p className="pt-2 font-medium">{String(reraEscrowViolation.law_reference || 'UAE Law No. 8 of 2007, Article 8')}</p>
+              <div className="pt-2">
+                <p className="font-semibold">Resolution Steps:</p>
+                <ol className="list-decimal pl-5">
+                  {((reraEscrowViolation.resolution_steps as string[]) || []).map((s, i) => (
+                    <li key={i}>{s.replace(/^\d+\.\s*/, '')}</li>
+                  ))}
+                </ol>
+              </div>
+            </div>
+          </section>
+        ) : null}
 
         <section className="bg-white border border-border-default rounded-lg p-6">
           <h2 className="text-lg font-semibold mb-4">Contract details</h2>
@@ -765,7 +865,7 @@ export default function RealEstateIFRS15Page() {
               ['Completion', `${offPlanResult.completion_pct}%`],
               ['Revenue YTD', fmt(Number(offPlanResult.revenue_recognised_to_date))],
               ['This period', fmt(Number(offPlanResult.revenue_current_period))],
-              ['Escrow', fmt(Number(offPlanResult.escrow_balance))],
+              ['Escrow', `Received ${fmt(escrowReceivedTotal)} | Released ${fmt(escrowReleasedTotal)} | Net ${fmt(escrowReceivedTotal - escrowReleasedTotal)}`],
               ['Remaining', fmt(Number(offPlanResult.remaining_revenue))],
             ].map(([k, v]) => (
               <div key={k} className="bg-gradient-to-br from-orange-50 to-white border border-orange-100 rounded-lg p-3">
@@ -1065,6 +1165,49 @@ export default function RealEstateIFRS15Page() {
                 </div>
               ))}
             </div>
+          </div>
+          <div className="mt-5">
+            <p className="text-xs font-semibold text-text-muted mb-2">Escrow Releases (Disbursements to Developer)</p>
+            {escrowReleases.map((r, i) => (
+              <div key={i} className="grid grid-cols-5 gap-2 mb-2">
+                <input type="date" className="border rounded px-2 py-1 text-sm" value={r.date} onChange={(e) => {
+                  const next = [...escrowReleases];
+                  next[i] = { ...next[i], date: e.target.value };
+                  setEscrowReleases(next);
+                }} />
+                <input placeholder="Amount (AED)" className="border rounded px-2 py-1 text-sm" value={r.amount} onChange={(e) => {
+                  const next = [...escrowReleases];
+                  next[i] = { ...next[i], amount: e.target.value };
+                  setEscrowReleases(next);
+                }} />
+                <input placeholder="Release %" className="border rounded px-2 py-1 text-sm" value={r.release_pct} onChange={(e) => {
+                  const next = [...escrowReleases];
+                  next[i] = { ...next[i], release_pct: e.target.value };
+                  setEscrowReleases(next);
+                }} />
+                <input placeholder="Milestone" className="border rounded px-2 py-1 text-sm" value={r.milestone_description} onChange={(e) => {
+                  const next = [...escrowReleases];
+                  next[i] = { ...next[i], milestone_description: e.target.value };
+                  setEscrowReleases(next);
+                }} />
+                <input placeholder="RERA Approval Ref" className="border rounded px-2 py-1 text-sm" value={r.rera_approval_ref || ''} onChange={(e) => {
+                  const next = [...escrowReleases];
+                  next[i] = { ...next[i], rera_approval_ref: e.target.value };
+                  setEscrowReleases(next);
+                }} />
+              </div>
+            ))}
+            <button type="button" className="text-xs text-orange-primary flex items-center gap-1" onClick={() => setEscrowReleases([...escrowReleases, { date: '', amount: '', release_pct: '', milestone_description: '', rera_approval_ref: '' }])}>
+              <Plus className="w-3 h-3" /> Add Release
+            </button>
+            <p className="text-xs mt-2 text-text-secondary">
+              Total Released: {fmt(escrowReleasedTotal)} ({escrowReleasePctLive.toFixed(2)}%)
+            </p>
+            {previewReleaseViolation ? (
+              <p className="text-xs mt-2 text-red-700 font-semibold">
+                ⛔ Release exceeds completion % — will be blocked on submission
+              </p>
+            ) : null}
           </div>
           {timelineChart.length > 0 && (
             <div className="h-64 mt-6">
@@ -1447,6 +1590,15 @@ export default function RealEstateIFRS15Page() {
           Results feed the main IFRS 15 recognition schedule — export via{' '}
           <Link href="/dashboard/ifrs15" className="text-orange-primary underline">IFRS 15 dashboard</Link>.
         </p>
+        {blockedModal ? (
+          <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center">
+            <div className="bg-white rounded-lg border p-6 max-w-md w-full">
+              <h3 className="text-lg font-semibold mb-2">{blockedModal.title}</h3>
+              <p className="text-sm text-text-secondary mb-4">{blockedModal.body}</p>
+              <Button onClick={() => setBlockedModal(null)}>Back to Form</Button>
+            </div>
+          </div>
+        ) : null}
       </div>
     </SidebarLayout>
   );

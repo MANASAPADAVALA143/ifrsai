@@ -785,6 +785,14 @@ class TransactionPriceAdjustmentsRequest(BaseModel):
     consideration_payable_items: List[ConsiderationPayableItem] = Field(default_factory=list)
 
 
+class EscrowReleaseEntry(BaseModel):
+    date: str = ""
+    amount: float = 0.0
+    release_pct: float = 0.0
+    milestone_description: str = ""
+    rera_approval_ref: Optional[str] = None
+
+
 class PortfolioContractRequest(BaseModel):
     contract_id: str
     customer_name: str
@@ -799,6 +807,12 @@ class PortfolioContractRequest(BaseModel):
     rpo_amount: float = 0
     status: str = "active"
     currency: str = "USD"
+    disclosure_score: Optional[float] = None
+    risk: Optional[str] = None
+    buyer_id: Optional[str] = None
+    escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
+    escrow_releases: List[EscrowReleaseEntry] = Field(default_factory=list)
+    construction_completion_pct: Optional[float] = None
 
 
 class AuditSignOffRequest(BaseModel):
@@ -947,6 +961,8 @@ class RealEstateToCalculateRequest(BaseModel):
     total_estimated_costs: float = 0.0
     revenue_prior_period: float = 0.0
     escrow_total: float = 0.0
+    escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
+    escrow_releases: List[EscrowReleaseEntry] = Field(default_factory=list)
 
 
 class RealEstateContractInput(BaseModel):
@@ -981,6 +997,7 @@ class RealEstateReportRequest(RealEstateContractInput):
     costs_incurred_to_date: float
     total_estimated_costs: float
     escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
+    escrow_releases: List[EscrowReleaseEntry] = Field(default_factory=list)
     milestone_releases: List[Dict[str, Any]] = Field(default_factory=list)
     revenue_prior_period: float = 0.0
     commission_paid: Optional[float] = None
@@ -1009,6 +1026,8 @@ class CancellationRefundInput(BaseModel):
         pattern="^(buyer_default|developer_default|mutual_agreement)$",
     )
     escrow_balance: float = 0.0
+    escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
+    escrow_releases: List[EscrowReleaseEntry] = Field(default_factory=list)
 
     @field_validator("rera_registration_number")
     @classmethod
@@ -1021,6 +1040,9 @@ class CancellationRefundInput(BaseModel):
 class RealEstateExportExcelRequest(BaseModel):
     report: Dict[str, Any]
     contract_id: Optional[str] = None
+    escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
+    escrow_releases: List[EscrowReleaseEntry] = Field(default_factory=list)
+    construction_completion_pct: Optional[float] = None
 
 
 class RealEstateBundlingCheckRequest(BaseModel):
@@ -1031,6 +1053,39 @@ class RealEstateBundlingCheckRequest(BaseModel):
 class RealEstateOqoodFiledPatchRequest(BaseModel):
     modification_id: str
     oqood_filed: bool = True
+
+
+def _escrow_entries_to_dicts(entries: Any) -> List[Dict[str, Any]]:
+    if not entries:
+        return []
+    out: List[Dict[str, Any]] = []
+    for e in entries:
+        if isinstance(e, dict):
+            out.append(dict(e))
+        elif hasattr(e, "model_dump"):
+            out.append(e.model_dump(mode="python"))
+        else:
+            out.append(dict(e))
+    return out
+
+
+def _rera_escrow_gate(
+    escrow_receipts: Any,
+    escrow_releases: Any,
+    construction_completion_pct: float,
+    contract_price_aed: float,
+) -> Optional[JSONResponse]:
+    from backend.app.services.rera_escrow_validator import (
+        validate_escrow_release,
+        rera_escrow_violation_response_body,
+    )
+
+    receipts = _escrow_entries_to_dicts(escrow_receipts)
+    releases = _escrow_entries_to_dicts(escrow_releases)
+    ev = validate_escrow_release(receipts, releases, construction_completion_pct, contract_price_aed)
+    if ev.is_violation:
+        return JSONResponse(status_code=422, content=rera_escrow_violation_response_body(ev))
+    return None
 
 
 # Helper Functions
@@ -3117,6 +3172,19 @@ async def add_portfolio_contract(req: PortfolioContractRequest, request: Request
     """Upsert a contract into the IFRS 15 portfolio store."""
     firm_id = _ifrs15_firm_id(request)
     try:
+        if req.contract_type == "real_estate_off_plan":
+            tp = float(req.total_tp or 0)
+            cmp_pct = req.construction_completion_pct
+            if cmp_pct is None and tp > 0:
+                cmp_pct = (float(req.recognised_to_date or 0) / tp) * 100.0
+            gate = _rera_escrow_gate(
+                req.escrow_receipts,
+                req.escrow_releases,
+                float(cmp_pct if cmp_pct is not None else 0),
+                tp,
+            )
+            if gate:
+                return gate
         contract_dict = req.model_dump()
         buyer_id_raw = str(contract_dict.get("buyer_id") or "").strip()
         if buyer_id_raw:
@@ -3154,6 +3222,12 @@ async def add_portfolio_contract(req: PortfolioContractRequest, request: Request
         return {"success": True, "portfolio_size": portfolio_size}
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "Database error", "detail": str(e)})
+
+
+@app.post("/api/ifrs15/realestate/portfolio")
+async def ifrs15_realestate_portfolio(req: PortfolioContractRequest, http_request: Request):
+    """Real estate portfolio — RERA escrow Art. 8 hard block; same persistence as /portfolio/add."""
+    return await add_portfolio_contract(req, http_request)
 
 
 @app.get("/api/ifrs15/portfolio/summary")
@@ -3647,6 +3721,14 @@ async def ifrs15_realestate_calculate(request: RealEstateFullRequest):
 async def ifrs15_realestate_cancellation_refund(request: CancellationRefundInput):
     """UAE Law No. 8 of 2007 Article 11 — cancellation refund waterfall."""
     try:
+        gate = _rera_escrow_gate(
+            request.escrow_receipts,
+            request.escrow_releases,
+            float(request.construction_completion_pct),
+            float(request.contract_price),
+        )
+        if gate:
+            return gate
         from backend.app.services.ifrs15_realestate import CancellationRefundEngine
 
         result = CancellationRefundEngine().calculate(request.model_dump())
@@ -3661,7 +3743,11 @@ async def ifrs15_realestate_cancellation_refund(request: CancellationRefundInput
 async def ifrs15_realestate_report(request: RealEstateReportRequest):
     """Full UAE real estate IFRS 15 report — off-plan, escrow, quarterly VAT schedule."""
     try:
-        from backend.app.services.ifrs15_realestate import RealEstateReportEngine, validate_realestate_health
+        from backend.app.services.ifrs15_realestate import (
+            RealEstateReportEngine,
+            validate_realestate_health,
+            completion_pct_from_costs,
+        )
         from backend.app.services.oqood_validator import assess_oqood_requirement
         from backend.app.services.multi_unit_bundling import UnitContract, assess_bundling
 
@@ -3670,6 +3756,20 @@ async def ifrs15_realestate_report(request: RealEstateReportRequest):
             body["gross_contract_value"] = request.gross_contract_value or request.contract_value
         if not body.get("spa_handover_date"):
             body["spa_handover_date"] = request.expected_handover
+
+        completion_pct_gate = completion_pct_from_costs(
+            float(request.costs_incurred_to_date),
+            float(request.total_estimated_costs),
+        )
+        gate_rep = _rera_escrow_gate(
+            request.escrow_receipts,
+            request.escrow_releases,
+            completion_pct_gate,
+            float(request.contract_value),
+        )
+        if gate_rep:
+            return gate_rep
+
         report = RealEstateReportEngine().build(body)
         oqood_assessments: List[Dict[str, Any]] = []
         for mod in (request.modifications or []):
@@ -3747,6 +3847,17 @@ async def ifrs15_realestate_report(request: RealEstateReportRequest):
 async def ifrs15_realestate_export_excel(request: RealEstateExportExcelRequest):
     """Export UAE real estate IFRS 15 report to Excel."""
     try:
+        rpt = dict(request.report)
+        receipts = list(request.escrow_receipts or rpt.get("escrow_receipts") or [])
+        releases = list(request.escrow_releases or rpt.get("escrow_releases") or [])
+        cmp_pct_x = request.construction_completion_pct
+        if cmp_pct_x is None:
+            cmp_pct_x = float((rpt.get("off_plan") or {}).get("completion_pct") or 0)
+        cv_x = float(rpt.get("contract_value") or 0)
+        gate_x = _rera_escrow_gate(receipts, releases, float(cmp_pct_x), cv_x)
+        if gate_x:
+            return gate_x
+
         from ifrs15_realestate_excel import IFRS15RealEstateExcelExporter
 
         cid = (request.contract_id or "RE").replace(" ", "_")[:40]
@@ -3767,6 +3878,14 @@ async def ifrs15_realestate_export_excel(request: RealEstateExportExcelRequest):
 async def ifrs15_realestate_to_calculate(request: RealEstateToCalculateRequest):
     """Map UAE real estate recognition into main IFRS 15 calculate request."""
     try:
+        gate_tc = _rera_escrow_gate(
+            request.escrow_receipts,
+            request.escrow_releases,
+            float(request.off_plan.get("completion_pct") or 0),
+            float(request.contract_value),
+        )
+        if gate_tc:
+            return gate_tc
         from backend.app.services.ifrs15_realestate import build_ifrs15_calculate_payload
 
         payload = build_ifrs15_calculate_payload(

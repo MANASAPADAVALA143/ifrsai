@@ -340,10 +340,11 @@ export default function HealthDashboard() {
         const details = (hv.details as string[]) || [];
         const subChecks = [
           { label: 'A: Schedule totals', pass: Boolean(hv.check_a_pass), detail: details[0] || '' },
-          { label: 'B: Escrow before revenue', pass: Boolean(hv.check_b_pass), detail: details[1] || '' },
-          { label: 'C: VAT alignment', pass: Boolean(hv.check_c_pass), detail: details[2] || '' },
-          { label: 'D: Oqood Amendment Check', pass: Boolean(hv.check_d_pass ?? true), detail: details[3] || '' },
-          { label: 'E: Multi-Unit Bundling Check', pass: Boolean(hv.check_e_pass ?? true), detail: details[4] || '' },
+          { label: 'B1: No revenue before escrow receipt', pass: Boolean(hv.check_b1_pass ?? hv.check_b_pass), detail: details[1] || '' },
+          { label: 'B2: Escrow release ≤ construction completion', pass: Boolean(hv.check_b2_pass ?? true), detail: details[2] || '' },
+          { label: 'C: VAT alignment', pass: Boolean(hv.check_c_pass), detail: details[3] || '' },
+          { label: 'D: Oqood Amendment Check', pass: Boolean(hv.check_d_pass ?? true), detail: details[4] || '' },
+          { label: 'E: Multi-Unit Bundling Check', pass: Boolean(hv.check_e_pass ?? true), detail: details[5] || '' },
         ];
         const overall = Boolean(hv.overall_pass);
         results.push({
