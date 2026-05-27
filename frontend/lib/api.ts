@@ -1017,6 +1017,36 @@ export const ifrs15Api = {
       { method: 'PATCH', body: JSON.stringify(payload) }
     ),
 
+  realestateVatReconciliation: async (payload: Record<string, unknown>) =>
+    apiCall<{ success?: boolean; report?: Record<string, unknown> }>(
+      '/api/ifrs15/realestate/vat-reconciliation',
+      { method: 'POST', body: JSON.stringify(payload) }
+    ),
+
+  realestateVatReconciliationExport: async (payload: Record<string, unknown>) => {
+    try {
+      const response = await fetch(`${API_URL}/api/ifrs15/realestate/vat-reconciliation/export-excel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        return {
+          blob: null,
+          filename: null,
+          error: (err as { detail?: string }).detail || response.statusText,
+        };
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      return { blob, filename: match?.[1] || 'VAT_Rec.xlsx', error: null };
+    } catch (e) {
+      return { blob: null, filename: null, error: e instanceof Error ? e.message : 'Export failed' };
+    }
+  },
+
   realestateDeadlineTracker: async (payload: Record<string, unknown>) =>
     apiCall<{ success?: boolean; report?: Record<string, unknown> }>(
       '/api/ifrs15/realestate/deadline-tracker',

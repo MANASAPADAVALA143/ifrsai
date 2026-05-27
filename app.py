@@ -1083,6 +1083,15 @@ class DeadlineTrackerCompleteRequest(DeadlineTrackerRequest):
     notes: str = ""
 
 
+class FTAVATReconciliationRequest(BaseModel):
+    rera_registration_number: str
+    project_name: str = ""
+    developer_name: str = ""
+    currency: str = "AED"
+    quarterly_schedule: List[Dict[str, Any]] = Field(default_factory=list)
+    fta_returns: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class CancellationRefundInput(BaseModel):
     contract_price: float
     amount_paid_by_buyer: float
@@ -4244,6 +4253,76 @@ async def ifrs15_realestate_upload_rera_certificate(
         return payload
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/vat-reconciliation")
+async def ifrs15_realestate_vat_reconciliation(request: FTAVATReconciliationRequest):
+    """Reconcile IFRS 15 quarterly revenue against FTA VAT return Box 1a/1b."""
+    from backend.app.services.fta_vat_reconciliation import (
+        FTAVATReturn,
+        build_reconciliation_report,
+    )
+
+    try:
+        fta_returns = [FTAVATReturn(**r) for r in request.fta_returns]
+        project_info = {
+            "rera_registration_number": request.rera_registration_number,
+            "project_name": request.project_name,
+            "developer_name": request.developer_name,
+            "currency": request.currency,
+        }
+        report = build_reconciliation_report(
+            quarterly_schedule=list(request.quarterly_schedule),
+            fta_returns=fta_returns,
+            project_info=project_info,
+        )
+        _ifrs15_audit_append(
+            "RE_VAT_RECONCILIATION",
+            request.rera_registration_number,
+            (
+                f"VAT reconciliation run — {len(report.reconciliation_lines)} quarters, "
+                f"risk: {report.overall_risk}, {report.quarters_matched} matched, "
+                f"{report.quarters_unexplained} unexplained"
+            ),
+            {},
+            report.model_dump(),
+            "Federal Decree-Law No. 8 of 2017 — FTA VAT",
+        )
+        return {"success": True, "report": report.model_dump()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs15/realestate/vat-reconciliation/export-excel")
+async def ifrs15_realestate_vat_reconciliation_export(request: FTAVATReconciliationRequest):
+    """Export FTA VAT reconciliation workbook (3 sheets)."""
+    from backend.app.services.fta_vat_reconciliation import (
+        FTAVATReturn,
+        build_reconciliation_report,
+        export_vat_reconciliation_excel,
+    )
+
+    try:
+        fta_returns = [FTAVATReturn(**r) for r in request.fta_returns]
+        project_info = {
+            "rera_registration_number": request.rera_registration_number,
+            "project_name": request.project_name,
+            "developer_name": request.developer_name,
+            "currency": request.currency,
+        }
+        report = build_reconciliation_report(
+            quarterly_schedule=list(request.quarterly_schedule),
+            fta_returns=fta_returns,
+            project_info=project_info,
+        )
+        xlsx_bytes, filename = export_vat_reconciliation_excel(report, fta_returns)
+        return Response(
+            content=xlsx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

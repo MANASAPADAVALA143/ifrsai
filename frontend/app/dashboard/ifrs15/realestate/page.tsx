@@ -30,6 +30,7 @@ import {
 } from '@/components/realestate/RERACertificateCard';
 import { mapReportToPDFInput } from '@/lib/realestate-pdf-mapper';
 import { RERADeadlineTracker } from '@/components/realestate/RERADeadlineTracker';
+import { FTAVATReconciliation } from '@/components/realestate/FTAVATReconciliation';
 import toast from 'react-hot-toast';
 import {
   Upload,
@@ -130,6 +131,8 @@ export default function RealEstateIFRS15Page() {
   const [deadlineTrackerReport, setDeadlineTrackerReport] = useState<Record<string, unknown> | null>(
     null
   );
+  const [vatRecResult, setVatRecResult] = useState<Record<string, unknown> | null>(null);
+  const [ftaVatOpen, setFtaVatOpen] = useState(false);
 
   const [modType, setModType] = useState('price_change');
   const [modNewPrice, setModNewPrice] = useState('1950000');
@@ -1277,7 +1280,7 @@ export default function RealEstateIFRS15Page() {
         </section>
 
         {offPlanResult && (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-8 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-9 gap-3">
             {[
               ['RERA', reraNumber || '—'],
               [
@@ -1349,6 +1352,37 @@ export default function RealEstateIFRS15Page() {
               <p className="text-[10px] uppercase tracking-wide">Pending Oqood Filings</p>
               <p className="text-sm font-bold">{pendingOqoodCount}</p>
             </div>
+            <button
+              type="button"
+              onClick={() => {
+                setFtaVatOpen(true);
+                document.getElementById('fta-vat-reconciliation')?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className={`rounded-lg p-3 border text-left w-full ${
+                vatRecResult?.overall_risk === 'high'
+                  ? 'bg-red-100 text-red-800 border-red-300'
+                  : vatRecResult?.overall_risk === 'medium'
+                    ? 'bg-amber-100 text-amber-800 border-amber-300'
+                    : vatRecResult
+                      ? 'bg-green-100 text-green-800 border-green-300'
+                      : 'bg-slate-50 border-slate-200'
+              }`}
+            >
+              <p className="text-[10px] uppercase tracking-wide text-text-muted">VAT Rec</p>
+              <p className="text-sm font-bold">
+                {!vatRecResult
+                  ? 'Not run'
+                  : String(vatRecResult.overall_risk || 'low').toUpperCase()}
+              </p>
+              {vatRecResult ? (
+                <p className="text-[10px] text-text-muted">
+                  {Number(vatRecResult.quarters_matched)} matched /{' '}
+                  {Number(vatRecResult.quarters_unexplained)} unexplained
+                </p>
+              ) : (
+                <p className="text-[10px] text-text-muted">Enter FTA return data</p>
+              )}
+            </button>
             <button
               type="button"
               onClick={() =>
@@ -1446,6 +1480,18 @@ export default function RealEstateIFRS15Page() {
             ) : null}
           </section>
         )}
+
+        <FTAVATReconciliation
+          reraNumber={reraNumber}
+          projectName={projectName}
+          developerName={String(spaExtracted?.developer_name || '')}
+          currency={displayCurrency}
+          periodSchedule={periodSchedule}
+          fmt={fmt}
+          onResultChange={setVatRecResult}
+          open={ftaVatOpen}
+          onOpenChange={setFtaVatOpen}
+        />
 
         <section className="bg-white border border-border-default rounded-lg p-6">
           <h2 className="text-lg font-semibold mb-4">Revenue recognition trigger</h2>
