@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { Suspense, useState, useRef, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { MessageSquare, Send, Loader2 } from 'lucide-react';
 import { chatApi } from '@/lib/api';
@@ -18,7 +19,10 @@ interface AskResponse {
   sources: string[];
 }
 
-export default function AssistantPage() {
+function AssistantPageContent() {
+  const searchParams = useSearchParams();
+  const leaseSearchDefault = searchParams.get('mode') === 'lease';
+  const [leaseSearchMode, setLeaseSearchMode] = useState(leaseSearchDefault);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -42,8 +46,10 @@ export default function AssistantPage() {
     setIsLoading(true);
 
     try {
-      const companyId = getCompanyId();
-      const { data, error } = await chatApi.ask(companyId, userMessage, 'lease');
+      const companyId = getCompanyId() || 'default';
+      const { data, error } = leaseSearchMode
+        ? await chatApi.leaseSearch(companyId, userMessage)
+        : await chatApi.ask(companyId, userMessage, 'lease');
 
       if (error) {
         throw new Error(error);
@@ -79,9 +85,25 @@ export default function AssistantPage() {
     <SidebarLayout pageTitle="AI Assistant" pageSubtitle="Ask questions about your IFRS data">
       <div className="flex flex-col h-[calc(100vh-8rem)] max-w-3xl mx-auto">
         <h1 className="text-xl font-semibold text-text-primary mb-2">AI Assistant</h1>
-        <p className="text-sm text-text-muted mb-6">
+        <p className="text-sm text-text-muted mb-4">
           Ask questions about your IFRS lease portfolio. Answers are powered by RAG (Retrieval-Augmented Generation).
         </p>
+        <div className="flex gap-2 mb-4 max-w-xs">
+          <button
+            type="button"
+            onClick={() => setLeaseSearchMode(false)}
+            className={`flex-1 text-xs py-2 rounded-lg font-medium border ${!leaseSearchMode ? 'bg-orange-500 text-white border-orange-500' : 'bg-white text-text-secondary'}`}
+          >
+            General AI
+          </button>
+          <button
+            type="button"
+            onClick={() => setLeaseSearchMode(true)}
+            className={`flex-1 text-xs py-2 rounded-lg font-medium border ${leaseSearchMode ? 'bg-orange-500 text-white border-orange-500' : 'bg-white text-text-secondary'}`}
+          >
+            Lease Search
+          </button>
+        </div>
 
         <div className="flex-1 bg-white rounded-lg border border-border-default flex flex-col overflow-hidden">
           {/* Messages */}
@@ -156,5 +178,24 @@ export default function AssistantPage() {
         </div>
       </div>
     </SidebarLayout>
+  );
+}
+
+export default function AssistantPage() {
+  return (
+    <Suspense
+      fallback={
+        <SidebarLayout pageTitle="AI Assistant" pageSubtitle="Ask questions about your IFRS data">
+          <div className="flex items-center justify-center h-[calc(100vh-8rem)]">
+            <div className="flex items-center gap-2 text-text-muted">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm">Loading assistant...</span>
+            </div>
+          </div>
+        </SidebarLayout>
+      }
+    >
+      <AssistantPageContent />
+    </Suspense>
   );
 }
