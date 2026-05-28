@@ -1,1 +1,1 @@
-export { default } from '@/src/pages/r2r/RevRecReconciliationPage';
+export { default } from '@/src/views/r2r/RevRecReconciliationPage';

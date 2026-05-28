@@ -14,6 +14,7 @@ import {
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { revRecApi } from '@/lib/api';
+import { PeriodReconciliationTab } from '@/components/r2r/PeriodReconciliationTab';
 import { cn } from '@/lib/utils';
 
 const SSP_METHODS = [
@@ -471,6 +472,15 @@ export default function RevRecReconciliationPage() {
     >
       <div className="space-y-6">
         <StatusPillsRow sspPill={sspPill} balancePill={balancePill} />
+
+        <section className="bg-white rounded-[14px] p-6 border border-border-default shadow-card">
+          <CardHeader
+            number={8}
+            title="Period GL vs IFRS.ai Revenue"
+            subtitle="BlackLine-style reconciliation by contract"
+          />
+          <PeriodReconciliationTab />
+        </section>
 
         <section className="bg-white rounded-[14px] p-6 border border-border-default shadow-card">
           <CardHeader
