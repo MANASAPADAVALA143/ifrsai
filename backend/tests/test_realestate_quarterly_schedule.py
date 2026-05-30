@@ -36,6 +36,20 @@ def test_cumulative_revenue_at_measurement_date():
     assert last["completion_pct"] == 65.0
 
 
+def test_even_quarterly_split_four_quarters_2024():
+    schedule = generate_quarterly_revenue_schedule(_base_data())
+    assert len(schedule) == 4
+    assert [row["period"] for row in schedule] == [
+        "Q1 2024",
+        "Q2 2024",
+        "Q3 2024",
+        "Q4 2024",
+    ]
+    for row in schedule:
+        assert row["revenue_recognised"] == 325_000
+    assert sum(row["revenue_recognised"] for row in schedule) == 1_300_000
+
+
 def test_period_bounds_include_spa_start_on_first_quarter():
     schedule = generate_quarterly_revenue_schedule(_base_data())
     first = schedule[0]

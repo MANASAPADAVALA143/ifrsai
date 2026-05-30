@@ -419,7 +419,7 @@ def _quarter_end_dates(start: date, end: date) -> List[date]:
 
 
 def generate_quarterly_revenue_schedule(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Quarterly revenue from contract inception (SPA date) using input-method cost curve."""
+    """Quarterly revenue from SPA contract inception (IFRS 15.9) through measurement date."""
     schedule_start = _schedule_start_date(data)
     end = _recognition_end_date(data)
     current = _parse_date(data.get("current_date"))
@@ -427,30 +427,27 @@ def generate_quarterly_revenue_schedule(data: Dict[str, Any]) -> List[Dict[str, 
         return []
 
     cv = float(data.get("contract_value", 0) or 0)
-    total_costs = max(float(data.get("total_estimated_costs", 0) or 0), 1e-9)
-    costs_to_date = float(data.get("costs_incurred_to_date", 0) or 0)
+    completion_pct = effective_completion_pct(data)
+    revenue_to_date = round(cv * (completion_pct / 100.0), 2)
     cap_date = min(current, end)
-    span_days = max((cap_date - schedule_start).days, 1)
     escrow_receipts = list(data.get("escrow_receipts") or [])
 
     quarter_ends = [d for d in _quarter_end_dates(schedule_start, cap_date) if d <= cap_date]
     if not quarter_ends or quarter_ends[-1] < cap_date:
         quarter_ends.append(cap_date)
     quarter_ends = sorted(set(quarter_ends))
+    n = len(quarter_ends)
+    if n == 0:
+        return []
 
-    prior_revenue = 0.0
+    per_period = round(revenue_to_date / n, 2)
+    cumulative = 0.0
     schedule: List[Dict[str, Any]] = []
-    for q_end in quarter_ends:
-        if q_end < cap_date:
-            elapsed = max((q_end - schedule_start).days, 0)
-            frac = min(1.0, elapsed / span_days)
-            cum_cost = frac * costs_to_date
-        else:
-            cum_cost = costs_to_date
-        completion = min(100.0, (cum_cost / total_costs) * 100.0)
-        cum_rev = round(cv * (completion / 100.0), 2)
-        period_rev = round(cum_rev - prior_revenue, 2)
-        prior_revenue = cum_rev
+    for i, q_end in enumerate(quarter_ends):
+        is_last = i == n - 1
+        period_rev = round(revenue_to_date - cumulative, 2) if is_last else per_period
+        cumulative = round(cumulative + period_rev, 2)
+        completion = round(completion_pct * (i + 1) / n, 1)
         period_start, period_end = _period_bounds_for_quarter_end(q_end, schedule_start)
         schedule.append(
             {
@@ -458,10 +455,10 @@ def generate_quarterly_revenue_schedule(data: Dict[str, Any]) -> List[Dict[str, 
                 "quarter": _quarter_label(q_end),
                 "period_start": period_start,
                 "period_end": period_end,
-                "completion_pct": round(completion, 1),
+                "completion_pct": completion,
                 "revenue_recognised": period_rev,
                 "revenue": period_rev,
-                "cumulative_revenue": cum_rev,
+                "cumulative_revenue": cumulative,
                 "cumulative_escrow_received": _escrow_cumulative_by_date(
                     escrow_receipts, q_end
                 ),

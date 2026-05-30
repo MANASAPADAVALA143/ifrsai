@@ -590,6 +590,10 @@ export default function RealEstateIFRS15Page() {
       toast.error('SPA handover date required for this trigger');
       return;
     }
+    if (!spaExecutionDate.trim()) {
+      toast.error('SPA execution date (contract date) is required');
+      return;
+    }
     setCalcLoading(true);
     const payload = {
       ...buildReportPayload(),
@@ -1821,7 +1825,7 @@ export default function RealEstateIFRS15Page() {
                 ['Costs incurred', costsIncurred, setCostsIncurred],
                 ['Total estimated costs', totalCosts, setTotalCosts],
                 ['Revenue prior period', revenuePrior, setRevenuePrior],
-                ['SPA execution date', spaExecutionDate, setSpaExecutionDate, 'date'],
+                ['SPA execution date (contract date) *', spaExecutionDate, setSpaExecutionDate, 'date'],
                 ['Construction start', constructionStart, setConstructionStart, 'date'],
                 ['Expected handover', expectedHandover, setExpectedHandover, 'date', 'handover_date'],
                 ['Current date', currentDate, setCurrentDate, 'date'],

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/Button';
 import { ifrs15Api } from '@/lib/api';
 import { ChevronDown, ChevronRight, Download, Loader2 } from 'lucide-react';
@@ -62,6 +62,28 @@ function scheduleToFtaRow(row: Record<string, unknown>): FTAReturnRow {
   };
 }
 
+function computeLocalFtaPreview(
+  ftaReturns: FTAReturnRow[],
+  periodSchedule: Record<string, unknown>[],
+  fmt: (n: number) => string
+): { level: 'high' | 'medium' | 'low'; message: string } | null {
+  if (!periodSchedule.length) return null;
+  const pairs = ftaReturns.map((r, i) => ({
+    ifrs: Number(periodSchedule[i]?.revenue_recognised) || 0,
+    box1a: Number(r.box_1a) || 0,
+  }));
+  if (!pairs.some((p) => p.box1a > 0)) return null;
+  const ifrsTotal = pairs.reduce((s, p) => s + p.ifrs, 0);
+  const ftaTotal = pairs.reduce((s, p) => s + p.box1a, 0);
+  const diff = ifrsTotal - ftaTotal;
+  const pct = ifrsTotal > 0 ? (Math.abs(diff) / ifrsTotal) * 100 : 0;
+  let level: 'high' | 'medium' | 'low' = 'low';
+  if (pct > 10) level = 'high';
+  else if (pct >= 5) level = 'medium';
+  const message = `IFRS 15 revenue ${fmt(ifrsTotal)} vs FTA Box 1a ${fmt(ftaTotal)} — unexplained difference ${fmt(Math.abs(diff))}. Federal Decree-Law No. 8 of 2017 — potential compliance issue.`;
+  return { level, message };
+}
+
 function loadStoredReturns(rera: string): FTAReturnRow[] {
   if (typeof window === 'undefined' || !rera.trim()) return [];
   try {
@@ -99,7 +121,10 @@ export function FTAVATReconciliation({
       if (saved.length > 0) setFtaReturns(saved);
       return;
     }
-    const saved = loadStoredReturns(reraNumber);
+    const scheduleQuarters = new Set(
+      periodSchedule.map((row) => String(row.period || row.quarter || ''))
+    );
+    const saved = loadStoredReturns(reraNumber).filter((r) => scheduleQuarters.has(r.quarter));
     const savedByQuarter = Object.fromEntries(saved.map((r) => [r.quarter, r]));
     setFtaReturns(
       periodSchedule.map((row) => {
@@ -236,6 +261,10 @@ export function FTAVATReconciliation({
 
   const risk = String(vatRecResult?.overall_risk || '');
   const lines = (vatRecResult?.reconciliation_lines as Record<string, unknown>[]) || [];
+  const localPreview = useMemo(
+    () => computeLocalFtaPreview(ftaReturns, periodSchedule, fmt),
+    [ftaReturns, periodSchedule, fmt]
+  );
 
   return (
     <section
@@ -431,6 +460,27 @@ export function FTAVATReconciliation({
                   + Add Quarter
                 </button>
               </div>
+
+              {localPreview && (
+                <div
+                  className={`rounded-lg p-4 border text-sm ${
+                    localPreview.level === 'high'
+                      ? 'bg-red-50 border-red-300 text-red-800'
+                      : localPreview.level === 'medium'
+                        ? 'bg-amber-50 border-amber-300 text-amber-900'
+                        : 'bg-green-50 border-green-300 text-green-800'
+                  }`}
+                >
+                  <p className="font-semibold">
+                    {localPreview.level === 'high'
+                      ? '⛔ VAT Reconciliation — HIGH RISK (preview)'
+                      : localPreview.level === 'medium'
+                        ? '⚠️ VAT Reconciliation — Medium Risk (preview)'
+                        : '✓ VAT Reconciliation — Low Risk (preview)'}
+                  </p>
+                  <p className="mt-1">{localPreview.message}</p>
+                </div>
+              )}
 
               <div className="flex flex-wrap gap-3">
                 <Button variant="primary" onClick={() => void handleRunVatReconciliation()} disabled={vatRecLoading}>
