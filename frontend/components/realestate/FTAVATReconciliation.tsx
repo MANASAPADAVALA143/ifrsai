@@ -94,14 +94,30 @@ export function FTAVATReconciliation({
 
   useEffect(() => {
     if (!reraNumber.trim()) return;
-    const saved = loadStoredReturns(reraNumber);
-    if (saved.length > 0) {
-      setFtaReturns(saved);
+    if (periodSchedule.length === 0) {
+      const saved = loadStoredReturns(reraNumber);
+      if (saved.length > 0) setFtaReturns(saved);
       return;
     }
-    if (periodSchedule.length > 0) {
-      setFtaReturns(periodSchedule.map(scheduleToFtaRow));
-    }
+    const saved = loadStoredReturns(reraNumber);
+    const savedByQuarter = Object.fromEntries(saved.map((r) => [r.quarter, r]));
+    setFtaReturns(
+      periodSchedule.map((row) => {
+        const base = scheduleToFtaRow(row);
+        const prev = savedByQuarter[base.quarter];
+        if (!prev) return base;
+        return {
+          ...base,
+          box_1a: prev.box_1a,
+          box_1b: prev.box_1b,
+          box_7: prev.box_7,
+          box_8: prev.box_8,
+          fta_return_ref: prev.fta_return_ref,
+          filing_date: prev.filing_date,
+          status: prev.status,
+        };
+      })
+    );
   }, [reraNumber, periodSchedule]);
 
   useEffect(() => {
@@ -278,7 +294,7 @@ export function FTAVATReconciliation({
                           'Quarter',
                           'Period Start',
                           'Period End',
-                          'Box 1a',
+                          'Box 1a (Taxable)',
                           'Box 1b',
                           'Box 7',
                           'Box 8',
@@ -319,11 +335,14 @@ export function FTAVATReconciliation({
                               onChange={(e) => handleFtaRowChange(i, 'period_end', e.target.value)}
                             />
                           </td>
-                          <td className="border border-border-default px-1 py-1">
+                          <td className="border border-border-default px-1 py-1 bg-white">
                             <input
                               type="number"
-                              className="w-28 text-xs border rounded px-1"
-                              value={row.box_1a}
+                              min={0}
+                              step={0.01}
+                              placeholder="FTA filed amount"
+                              className="w-full min-w-[7rem] text-sm border-2 border-slate-300 rounded px-2 py-1.5 bg-white text-text-primary focus:border-orange-primary focus:outline-none"
+                              value={row.box_1a === 0 ? '' : row.box_1a}
                               onChange={(e) =>
                                 handleFtaRowChange(i, 'box_1a', parseFloat(e.target.value) || 0)
                               }

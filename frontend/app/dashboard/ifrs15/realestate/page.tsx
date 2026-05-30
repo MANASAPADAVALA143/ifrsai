@@ -111,6 +111,7 @@ export default function RealEstateIFRS15Page() {
 
   const [contractValue, setContractValue] = useState('2000000');
   const [constructionStart, setConstructionStart] = useState('2023-01-01');
+  const [spaExecutionDate, setSpaExecutionDate] = useState('2024-01-15');
   const [expectedHandover, setExpectedHandover] = useState('2025-09-30');
   const [currentDate, setCurrentDate] = useState('2024-12-31');
   const [costsIncurred, setCostsIncurred] = useState('1300000');
@@ -127,6 +128,8 @@ export default function RealEstateIFRS15Page() {
   const [periodSchedule, setPeriodSchedule] = useState<Record<string, unknown>[]>([]);
   const [excelLoading, setExcelLoading] = useState(false);
   const [portfolioLoading, setPortfolioLoading] = useState(false);
+  const [reraEscrowViolation, setReraEscrowViolation] = useState<Record<string, unknown> | null>(null);
+  const [blockedModal, setBlockedModal] = useState<{ title: string; body: string } | null>(null);
   const [deadlineKpi, setDeadlineKpi] = useState<{ overdue: number; dueSoon: number } | null>(null);
   const [deadlineTrackerReport, setDeadlineTrackerReport] = useState<Record<string, unknown> | null>(
     null
@@ -219,6 +222,7 @@ export default function RealEstateIFRS15Page() {
       const s = JSON.parse(raw) as Record<string, unknown>;
       if (s.contractValue) setContractValue(String(s.contractValue));
       if (s.constructionStart) setConstructionStart(String(s.constructionStart));
+      if (s.spaExecutionDate) setSpaExecutionDate(String(s.spaExecutionDate));
       if (s.expectedHandover) setExpectedHandover(String(s.expectedHandover));
       if (s.currentDate) setCurrentDate(String(s.currentDate));
       if (s.costsIncurred) setCostsIncurred(String(s.costsIncurred));
@@ -264,6 +268,7 @@ export default function RealEstateIFRS15Page() {
         JSON.stringify({
           contractValue,
           constructionStart,
+          spaExecutionDate,
           expectedHandover,
           currentDate,
           costsIncurred,
@@ -287,6 +292,7 @@ export default function RealEstateIFRS15Page() {
   }, [
     contractValue,
     constructionStart,
+    spaExecutionDate,
     expectedHandover,
     currentDate,
     costsIncurred,
@@ -331,6 +337,8 @@ export default function RealEstateIFRS15Page() {
     return {
       contract_value: parseFloat(contractValue) || 0,
       construction_start: constructionStart,
+      spa_execution_date: spaExecutionDate || null,
+      contract_date: spaExecutionDate || null,
       project_start_date: constructionStart,
       completion_rate_per_month: 3.5,
       existing_completions: existingCompletions,
@@ -393,6 +401,7 @@ export default function RealEstateIFRS15Page() {
   }, [
     contractValue,
     constructionStart,
+    spaExecutionDate,
     expectedHandover,
     currentDate,
     costsIncurred,
@@ -429,6 +438,11 @@ export default function RealEstateIFRS15Page() {
     if (inputs.contract_value) setContractValue(String(inputs.contract_value));
     if (inputs.expected_handover) setExpectedHandover(String(inputs.expected_handover).slice(0, 10));
     if (inputs.construction_start) setConstructionStart(String(inputs.construction_start).slice(0, 10));
+    const spaDate =
+      inputs.agreement_date ||
+      inputs.contract_date ||
+      (inputs as { execution_date?: string }).execution_date;
+    if (spaDate) setSpaExecutionDate(String(spaDate).slice(0, 10));
     const receipts = (inputs.escrow_receipts as EscrowReceipt[]) || [];
     if (receipts.length) {
       setEscrowReceipts(
@@ -544,6 +558,10 @@ export default function RealEstateIFRS15Page() {
     }
     if (extracted.handover_date) {
       setSpaHandoverDate(String(extracted.handover_date).slice(0, 10));
+    }
+    const spaExec = extracted.agreement_date || extracted.contract_date;
+    if (spaExec) {
+      setSpaExecutionDate(String(spaExec).slice(0, 10));
     }
 
     if (meta.warnings?.length) {
@@ -1276,6 +1294,27 @@ export default function RealEstateIFRS15Page() {
                 <p className="text-xs text-red-600 mt-1">{reraError}</p>
               ) : null}
             </label>
+            <label className="text-sm">
+              <span className="text-text-muted block mb-1">SPA execution date (contract date) *</span>
+              <input
+                type="date"
+                className="w-full border rounded px-3 py-2"
+                value={spaExecutionDate}
+                onChange={(e) => setSpaExecutionDate(e.target.value)}
+              />
+              <p className="text-xs text-text-muted mt-1">
+                Revenue schedule starts from this date (IFRS 15.9), not before contract exists.
+              </p>
+            </label>
+            <label className="text-sm">
+              <span className="text-text-muted block mb-1">Construction start</span>
+              <input
+                type="date"
+                className="w-full border rounded px-3 py-2"
+                value={constructionStart}
+                onChange={(e) => setConstructionStart(e.target.value)}
+              />
+            </label>
           </div>
         </section>
 
@@ -1539,6 +1578,11 @@ export default function RealEstateIFRS15Page() {
               counsel per IFRS 15.38.
             </p>
           ) : null}
+          {fullReport?.over_time_recognition_note ? (
+            <p className="text-sm text-blue-900 bg-blue-50 border border-blue-200 rounded p-3 mt-3">
+              {String(fullReport.over_time_recognition_note)}
+            </p>
+          ) : null}
 
           <div id="rera-certificate-section" className="mt-6 pt-6 border-t border-border-default">
             <h3 className="text-sm font-semibold text-text-primary">RERA Completion Certificate (Optional)</h3>
@@ -1777,6 +1821,7 @@ export default function RealEstateIFRS15Page() {
                 ['Costs incurred', costsIncurred, setCostsIncurred],
                 ['Total estimated costs', totalCosts, setTotalCosts],
                 ['Revenue prior period', revenuePrior, setRevenuePrior],
+                ['SPA execution date', spaExecutionDate, setSpaExecutionDate, 'date'],
                 ['Construction start', constructionStart, setConstructionStart, 'date'],
                 ['Expected handover', expectedHandover, setExpectedHandover, 'date', 'handover_date'],
                 ['Current date', currentDate, setCurrentDate, 'date'],

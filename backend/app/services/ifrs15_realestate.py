@@ -343,6 +343,60 @@ def _quarter_label(d: date) -> str:
     return f"Q{q} {d.year}"
 
 
+def _quarter_start(d: date) -> date:
+    q = (d.month - 1) // 3
+    return date(d.year, q * 3 + 1, 1)
+
+
+def _spa_execution_date(data: Dict[str, Any]) -> Optional[date]:
+    """SPA / contract execution date — revenue cannot start before IFRS 15.9 contract exists."""
+    for key in (
+        "spa_execution_date",
+        "contract_date",
+        "spa_contract_date",
+        "agreement_date",
+    ):
+        d = _parse_date(data.get(key))
+        if d:
+            return d
+    for src in (data.get("spa_mapped") or {}, data.get("spa") or {}):
+        if not isinstance(src, dict):
+            continue
+        for key in (
+            "execution_date",
+            "contract_date",
+            "agreement_date",
+            "effective_date",
+            "signing_date",
+        ):
+            d = _parse_date(src.get(key))
+            if d:
+                return d
+    return None
+
+
+def _schedule_start_date(data: Dict[str, Any]) -> Optional[date]:
+    """Later of construction start and SPA execution (contract inception)."""
+    construction = _parse_date(data.get("construction_start"))
+    spa = _spa_execution_date(data)
+    if construction and spa:
+        return max(construction, spa)
+    return spa or construction
+
+
+def _period_bounds_for_quarter_end(q_end: date, schedule_start: date) -> Tuple[str, str]:
+    qs = _quarter_start(q_end)
+    period_start = max(schedule_start, qs)
+    return period_start.isoformat(), q_end.isoformat()
+
+
+OVER_TIME_RECOGNITION_NOTE = (
+    "Revenue recognised over time (IFRS 15.35(c), input method) — the handover / RERA "
+    "completion trigger applies to final satisfaction of the performance obligation, not "
+    "to periodic percentage-of-completion recognition."
+)
+
+
 def _quarter_end_dates(start: date, end: date) -> List[date]:
     """Quarter-end dates strictly after start through end (inclusive)."""
     results: List[date] = []
@@ -365,21 +419,21 @@ def _quarter_end_dates(start: date, end: date) -> List[date]:
 
 
 def generate_quarterly_revenue_schedule(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Project quarterly revenue from linear cost-to-complete curve (input method)."""
-    start = _parse_date(data.get("construction_start"))
+    """Quarterly revenue from contract inception (SPA date) using input-method cost curve."""
+    schedule_start = _schedule_start_date(data)
     end = _recognition_end_date(data)
     current = _parse_date(data.get("current_date"))
-    if not start or not end or not current:
+    if not schedule_start or not end or not current:
         return []
 
     cv = float(data.get("contract_value", 0) or 0)
     total_costs = max(float(data.get("total_estimated_costs", 0) or 0), 1e-9)
     costs_to_date = float(data.get("costs_incurred_to_date", 0) or 0)
-    total_days = max((end - start).days, 1)
     cap_date = min(current, end)
+    span_days = max((cap_date - schedule_start).days, 1)
     escrow_receipts = list(data.get("escrow_receipts") or [])
 
-    quarter_ends = [d for d in _quarter_end_dates(start, cap_date) if d <= cap_date]
+    quarter_ends = [d for d in _quarter_end_dates(schedule_start, cap_date) if d <= cap_date]
     if not quarter_ends or quarter_ends[-1] < cap_date:
         quarter_ends.append(cap_date)
     quarter_ends = sorted(set(quarter_ends))
@@ -387,26 +441,31 @@ def generate_quarterly_revenue_schedule(data: Dict[str, Any]) -> List[Dict[str, 
     prior_revenue = 0.0
     schedule: List[Dict[str, Any]] = []
     for q_end in quarter_ends:
-        if q_end < current:
-            frac = min(1.0, (q_end - start).days / total_days)
-            cum_cost = frac * total_costs
+        if q_end < cap_date:
+            elapsed = max((q_end - schedule_start).days, 0)
+            frac = min(1.0, elapsed / span_days)
+            cum_cost = frac * costs_to_date
         else:
             cum_cost = costs_to_date
         completion = min(100.0, (cum_cost / total_costs) * 100.0)
         cum_rev = round(cv * (completion / 100.0), 2)
         period_rev = round(cum_rev - prior_revenue, 2)
         prior_revenue = cum_rev
+        period_start, period_end = _period_bounds_for_quarter_end(q_end, schedule_start)
         schedule.append(
             {
                 "period": _quarter_label(q_end),
-                "period_end": q_end.isoformat(),
+                "quarter": _quarter_label(q_end),
+                "period_start": period_start,
+                "period_end": period_end,
                 "completion_pct": round(completion, 1),
                 "revenue_recognised": period_rev,
+                "revenue": period_rev,
                 "cumulative_revenue": cum_rev,
                 "cumulative_escrow_received": _escrow_cumulative_by_date(
                     escrow_receipts, q_end
                 ),
-                "fta_filing_period": f"{q_end.year}-{q_end.month:02d}",
+                "fta_filing_period": f"{q_end.year}-Q{(q_end.month - 1) // 3 + 1}",
             }
         )
     return schedule
@@ -1051,13 +1110,22 @@ class RealEstateReportEngine:
             exchange_rate=float(data.get("exchange_rate") or UAE_CENTRAL_BANK_PEG),
         )
 
+        spa_exec = _spa_execution_date(data)
+        schedule_start = _schedule_start_date(data)
         report_aed: Dict[str, Any] = {
             "rera_registration_number": rera,
             "project_name": data.get("project_name"),
             "contract_value": float(data.get("contract_value", 0) or 0),
+            "spa_execution_date": spa_exec.isoformat() if spa_exec else None,
+            "schedule_start_date": schedule_start.isoformat() if schedule_start else None,
             "recognition_trigger": recognition_trigger,
             "recognition_trigger_summary": recognition_trigger.get(
                 "recognition_trigger_summary"
+            ),
+            "over_time_recognition_note": (
+                OVER_TIME_RECOGNITION_NOTE
+                if off_plan.get("recognition_basis") == "over_time_input_method"
+                else None
             ),
             "off_plan": off_plan,
             "escrow": escrow_result,
