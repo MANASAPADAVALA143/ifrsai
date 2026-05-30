@@ -5,6 +5,7 @@ import { Button } from '@/components/Button';
 import { ifrs15Api } from '@/lib/api';
 import { ChevronDown, ChevronRight, Download, Loader2 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { filterPeriodScheduleFromSpa } from '@/lib/realestate-format';
 
 export type FTAReturnRow = {
   quarter: string;
@@ -19,11 +20,20 @@ export type FTAReturnRow = {
   status: 'draft' | 'filed' | 'amended';
 };
 
+/** Marina Heights demo — FTA declared vs IFRS 1.3M → AED 800K gap story */
+const DEMO_FTA_BOX_1A: Record<string, number> = {
+  'Q1 2024': 150_000,
+  'Q2 2024': 160_000,
+  'Q3 2024': 170_000,
+  'Q4 2024': 20_000,
+};
+
 type Props = {
   reraNumber: string;
   projectName: string;
   developerName: string;
   currency: string;
+  spaExecutionDate?: string;
   periodSchedule: Record<string, unknown>[];
   fmt: (n: number) => string;
   onResultChange?: (report: Record<string, unknown> | null) => void;
@@ -99,12 +109,17 @@ export function FTAVATReconciliation({
   projectName,
   developerName,
   currency,
+  spaExecutionDate = '',
   periodSchedule,
   fmt,
   onResultChange,
   open: openProp,
   onOpenChange,
 }: Props) {
+  const activeSchedule = useMemo(
+    () => filterPeriodScheduleFromSpa(periodSchedule, spaExecutionDate),
+    [periodSchedule, spaExecutionDate]
+  );
   const [internalOpen, setInternalOpen] = useState(false);
   const ftaVatOpen = openProp ?? internalOpen;
   const setFtaVatOpen = onOpenChange ?? setInternalOpen;
@@ -116,34 +131,37 @@ export function FTAVATReconciliation({
 
   useEffect(() => {
     if (!reraNumber.trim()) return;
-    if (periodSchedule.length === 0) {
-      const saved = loadStoredReturns(reraNumber);
-      if (saved.length > 0) setFtaReturns(saved);
+    if (activeSchedule.length === 0) {
+      setFtaReturns([]);
       return;
     }
     const scheduleQuarters = new Set(
-      periodSchedule.map((row) => String(row.period || row.quarter || ''))
+      activeSchedule.map((row) => String(row.period || row.quarter || ''))
     );
-    const saved = loadStoredReturns(reraNumber).filter((r) => scheduleQuarters.has(r.quarter));
+    const saved = loadStoredReturns(reraNumber)
+      .filter((r) => scheduleQuarters.has(r.quarter))
+      .filter((r) => !/2023/.test(r.quarter));
     const savedByQuarter = Object.fromEntries(saved.map((r) => [r.quarter, r]));
-    setFtaReturns(
-      periodSchedule.map((row) => {
-        const base = scheduleToFtaRow(row);
-        const prev = savedByQuarter[base.quarter];
-        if (!prev) return base;
-        return {
-          ...base,
-          box_1a: prev.box_1a,
-          box_1b: prev.box_1b,
-          box_7: prev.box_7,
-          box_8: prev.box_8,
-          fta_return_ref: prev.fta_return_ref,
-          filing_date: prev.filing_date,
-          status: prev.status,
-        };
-      })
-    );
-  }, [reraNumber, periodSchedule]);
+    const rows = activeSchedule.map((row) => {
+      const base = scheduleToFtaRow(row);
+      const prev = savedByQuarter[base.quarter];
+      if (!prev) return base;
+      return {
+        ...base,
+        box_1a: prev.box_1a,
+        box_1b: prev.box_1b,
+        box_7: prev.box_7,
+        box_8: prev.box_8,
+        fta_return_ref: prev.fta_return_ref,
+        filing_date: prev.filing_date,
+        status: prev.status,
+      };
+    });
+    setFtaReturns(rows);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(`fta_returns_${reraNumber.trim()}`, JSON.stringify(rows));
+    }
+  }, [reraNumber, activeSchedule]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !reraNumber.trim()) return;
@@ -164,7 +182,7 @@ export function FTAVATReconciliation({
       project_name: projectName.trim(),
       developer_name: developerName,
       currency,
-      quarterly_schedule: periodSchedule.map((row) => ({
+      quarterly_schedule: activeSchedule.map((row) => ({
         period: row.period,
         quarter: row.period,
         period_start: row.period_start,
@@ -185,8 +203,26 @@ export function FTAVATReconciliation({
         status: r.status,
       })),
     }),
-    [reraNumber, projectName, developerName, currency, periodSchedule, ftaReturns]
+    [reraNumber, projectName, developerName, currency, activeSchedule, ftaReturns]
   );
+
+  const loadDemoFtaAmounts = () => {
+    setFtaReturns((prev) =>
+      prev.map((r) => {
+        const demo = DEMO_FTA_BOX_1A[r.quarter];
+        if (demo == null) return r;
+        const box1b = Math.round(demo * 0.05 * 100) / 100;
+        return {
+          ...r,
+          box_1a: demo,
+          box_1b: box1b,
+          box_8: box1b - r.box_7,
+          status: 'filed' as const,
+        };
+      })
+    );
+    toast.success('Demo FTA Box 1a loaded (AED 500K declared vs AED 1.3M IFRS)');
+  };
 
   const handleFtaRowChange = (index: number, field: keyof FTAReturnRow, value: string | number) => {
     setFtaReturns((prev) => {
@@ -262,8 +298,8 @@ export function FTAVATReconciliation({
   const risk = String(vatRecResult?.overall_risk || '');
   const lines = (vatRecResult?.reconciliation_lines as Record<string, unknown>[]) || [];
   const localPreview = useMemo(
-    () => computeLocalFtaPreview(ftaReturns, periodSchedule, fmt),
-    [ftaReturns, periodSchedule, fmt]
+    () => computeLocalFtaPreview(ftaReturns, activeSchedule, fmt),
+    [ftaReturns, activeSchedule, fmt]
   );
 
   return (
@@ -302,18 +338,26 @@ export function FTAVATReconciliation({
             2017.
           </p>
 
-          {!periodSchedule.length && (
+          {!activeSchedule.length && (
             <div className="bg-amber-50 border border-amber-200 rounded p-4 text-amber-800 text-sm">
-              Run recognition first to generate the quarterly schedule, then enter FTA return data here.
+              Run recognition first to generate the quarterly schedule (from SPA execution date), then enter FTA
+              return data here.
             </div>
           )}
 
-          {periodSchedule.length > 0 && (
+          {activeSchedule.length > 0 && (
             <>
               <div>
-                <h3 className="font-medium text-text-primary mb-2">Enter FTA VAT Return Data</h3>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <h3 className="font-medium text-text-primary">Enter FTA VAT Return Data</h3>
+                  <Button type="button" variant="secondary" onClick={loadDemoFtaAmounts}>
+                    Load demo Box 1a (Marina Heights)
+                  </Button>
+                </div>
                 <p className="text-xs text-text-muted mb-3">
-                  Enter Box 1a and 1b from your filed FTA VAT returns. One row per quarter.
+                  Enter Box 1a taxable supplies from filed FTA VAT returns — one row per quarter from{' '}
+                  {spaExecutionDate ? `SPA date ${spaExecutionDate.slice(0, 10)}` : 'SPA execution'} onward.
+                  Empty Box 1a compares against zero and triggers a misleading HIGH risk.
                 </p>
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm border-collapse border border-border-default">

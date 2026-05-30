@@ -973,18 +973,133 @@ class CancellationRefundEngine:
         }
 
 
+def _sync_contract_effective_date(
+    *,
+    construction_start: str = "",
+    spa_execution_date: str = "",
+    spa: Optional[Dict[str, Any]] = None,
+    spa_mapped: Optional[Dict[str, Any]] = None,
+) -> str:
+    """SPA execution date for IFRS 15 contract inception; fallback construction start."""
+    ctx = {
+        "construction_start": construction_start,
+        "spa_execution_date": spa_execution_date,
+        "spa": spa or {},
+        "spa_mapped": spa_mapped or {},
+    }
+    spa_d = _spa_execution_date(ctx)
+    if spa_d:
+        return spa_d.isoformat()
+    start_d = _parse_date(construction_start)
+    return start_d.isoformat() if start_d else "2024-01-01"
+
+
+def period_schedule_to_ifrs15_revenue_schedule(
+    period_schedule: List[Dict[str, Any]],
+    *,
+    obligation_id: str = "PO-RE-1",
+    obligation_label: str = "Off-plan unit",
+    method: str = "Over Time (cost-to-cost)",
+) -> List[Dict[str, Any]]:
+    """Map UAE quarterly period_schedule rows into main IFRS 15 revenue_schedule records."""
+    rows: List[Dict[str, Any]] = []
+    cumulative = 0.0
+    for i, row in enumerate(period_schedule or []):
+        rev = float(row.get("revenue_recognised") or row.get("revenue") or 0)
+        cumulative = round(cumulative + rev, 2)
+        period_end = str(row.get("period_end") or row.get("period_start") or "")[:10]
+        period_label = str(row.get("period") or row.get("quarter") or f"Period {i + 1}")
+        rows.append(
+            {
+                "Period": i + 1,
+                "Date": period_end or period_label,
+                "Month": period_label,
+                "Obligation_ID": obligation_id,
+                "Obligation": obligation_label,
+                "Method": method,
+                "Scheduled_Revenue": rev,
+                "Revenue": rev,
+                "Status": "Recognised",
+                "Cumulative": cumulative,
+            }
+        )
+    return rows
+
+
+def merge_realestate_into_calculate_results(
+    results: Dict[str, Any],
+    *,
+    period_schedule: Optional[List[Dict[str, Any]]] = None,
+    overlay: Optional[Dict[str, Any]] = None,
+    obligation_description: str = "",
+    currency: str = "AED",
+) -> Dict[str, Any]:
+    """Apply UAE real estate recognition totals and quarterly schedule to /calculate output."""
+    out = copy.deepcopy(results)
+    ov = dict(overlay or {})
+    rev_td = float(ov.get("revenue_recognised_to_date") or 0)
+    rev_period = float(ov.get("revenue_current_period") or 0)
+    completion = float(ov.get("completion_pct") or 0)
+    cur = (ov.get("currency") or currency or "AED").strip().upper() or "AED"
+
+    schedule_rows = period_schedule_to_ifrs15_revenue_schedule(
+        list(period_schedule or []),
+        obligation_label=obligation_description or "Off-plan unit",
+    )
+    if schedule_rows:
+        out["revenue_schedule"] = schedule_rows
+        rev_td = float(schedule_rows[-1].get("Cumulative") or rev_td)
+
+    tp = float(out.get("transaction_price") or out.get("total_contract_value") or 0)
+    if rev_td > 0:
+        out["total_recognised"] = rev_td
+        out["total_deferred"] = max(0.0, tp - rev_td)
+        balances = dict(out.get("contract_balances") or {})
+        balances["revenue_recognized_to_date"] = rev_td
+        out["contract_balances"] = balances
+
+    engine = dict(out.get("revenue_engine_result") or {})
+    if completion > 0:
+        engine["poc_percentage"] = completion
+        engine["method"] = "Fixed Price (POC)"
+    if rev_period > 0:
+        engine["revenue_this_period"] = rev_period
+    if rev_td > 0:
+        engine["cumulative_revenue"] = rev_td
+    out["revenue_engine_result"] = engine
+
+    disc = dict(out.get("disclosure_data") or {})
+    cd = dict(disc.get("contract_details") or {})
+    cd["currency"] = cur
+    disc["contract_details"] = cd
+    out["disclosure_data"] = disc
+
+    perf = out.get("performance_obligations")
+    if isinstance(perf, list):
+        for item in perf:
+            if isinstance(item, dict):
+                if rev_td > 0:
+                    item["revenue_recognized"] = rev_td
+                    item["recognised_to_date"] = rev_td
+                if completion > 0:
+                    item["pct_complete"] = completion
+    return out
+
+
 def build_ifrs15_calculate_payload(
     *,
     off_plan: Dict[str, Any],
     spa: Optional[Dict[str, Any]] = None,
     spa_mapped: Optional[Dict[str, Any]] = None,
     construction_start: str = "",
+    spa_execution_date: str = "",
     expected_handover: str = "",
     contract_value: float = 0.0,
     costs_incurred: float = 0.0,
     total_costs: float = 0.0,
     revenue_prior: float = 0.0,
     escrow_total: float = 0.0,
+    period_schedule: Optional[List[Dict[str, Any]]] = None,
     rera_registration_number: str = "",
     project_name: str = "",
     revenue_recognition_trigger: str = "earlier_of_both",
@@ -998,16 +1113,42 @@ def build_ifrs15_calculate_payload(
     cv = float(contract_value or mapped.get("contract_value") or spa.get("total_contract_price") or 0)
     start_s = construction_start or str(mapped.get("construction_start") or "")
     end_s = expected_handover or str(mapped.get("expected_handover") or spa.get("handover_date") or "")
-    start_d = _parse_date(start_s)
+    eff = _sync_contract_effective_date(
+        construction_start=start_s,
+        spa_execution_date=spa_execution_date,
+        spa=spa,
+        spa_mapped=mapped,
+    )
+    eff_d = _parse_date(eff)
     end_d = _parse_date(end_s)
-    term = _months_between(start_d, end_d)
+    term = _months_between(eff_d, end_d)
 
     unit = str(spa.get("property_unit_number") or mapped.get("unit_id") or "UNIT")
     buyer = str(spa.get("buyer_name") or mapped.get("customer_name") or "Buyer")
     developer = str(spa.get("developer_name") or mapped.get("vendor_name") or "Developer")
-    eff = start_s[:10] if start_s else "2024-01-01"
+    rev_td = float(off_plan.get("revenue_recognised_to_date") or 0)
+    po_ssp = rev_td if rev_td > 0 else cv
+    po_desc = (
+        f"Off-plan unit {unit} — IFRS 15.35(c) over time, cost-to-cost method"
+    )
 
     billings = float(off_plan.get("billings_to_date") or escrow_total or 0)
+    cur = (currency or "AED").strip().upper() or "AED"
+    overlay = {
+        "completion_pct": off_plan.get("completion_pct"),
+        "revenue_recognised_to_date": off_plan.get("revenue_recognised_to_date"),
+        "revenue_current_period": off_plan.get("revenue_current_period"),
+        "contract_asset": off_plan.get("contract_asset"),
+        "contract_liability": off_plan.get("contract_liability"),
+        "escrow_balance": off_plan.get("escrow_balance"),
+        "project_name": project_name or spa.get("project_name") or mapped.get("project_name"),
+        "rera_registration_number": rera_registration_number,
+        "revenue_recognition_trigger": revenue_recognition_trigger,
+        "recognition_trigger_summary": recognition_trigger_summary,
+        "currency": cur,
+        "exchange_rate": exchange_rate,
+        "spa_execution_date": eff,
+    }
     return {
         "contract_id": f"RE-{unit}",
         "customer_name": buyer,
@@ -1016,7 +1157,7 @@ def build_ifrs15_calculate_payload(
         "contract_term_months": term,
         "fixed_consideration": cv,
         "variable_consideration": 0.0,
-        "currency": "AED",
+        "currency": cur,
         "cash_received": billings,
         "contract_type": "fixed_price",
         "total_estimated_cost": float(total_costs or 0),
@@ -1026,27 +1167,15 @@ def build_ifrs15_calculate_payload(
         "performance_obligations": [
             {
                 "obligation_id": "PO-RE-1",
-                "description": f"Off-plan unit {unit} — construction (IFRS 15.35c)",
-                "standalone_selling_price": cv,
+                "description": po_desc,
+                "standalone_selling_price": po_ssp,
                 "recognition_method": "over_time",
                 "duration_months": term,
                 "transfer_date": end_s[:10] if end_s else None,
             }
         ],
-        "realestate_overlay": {
-            "completion_pct": off_plan.get("completion_pct"),
-            "revenue_recognised_to_date": off_plan.get("revenue_recognised_to_date"),
-            "revenue_current_period": off_plan.get("revenue_current_period"),
-            "contract_asset": off_plan.get("contract_asset"),
-            "contract_liability": off_plan.get("contract_liability"),
-            "escrow_balance": off_plan.get("escrow_balance"),
-            "project_name": project_name or spa.get("project_name") or mapped.get("project_name"),
-            "rera_registration_number": rera_registration_number,
-            "revenue_recognition_trigger": revenue_recognition_trigger,
-            "recognition_trigger_summary": recognition_trigger_summary,
-            "currency": currency,
-            "exchange_rate": exchange_rate,
-        },
+        "realestate_overlay": overlay,
+        "realestate_period_schedule": list(period_schedule or []),
     }
 
 
@@ -1089,12 +1218,14 @@ class RealEstateReportEngine:
             spa=data.get("spa"),
             spa_mapped=data.get("spa_mapped"),
             construction_start=str(data.get("construction_start", "")),
+            spa_execution_date=str(data.get("spa_execution_date") or ""),
             expected_handover=str(data.get("expected_handover", "")),
             contract_value=float(data.get("contract_value", 0) or 0),
             costs_incurred=float(data.get("costs_incurred_to_date", 0) or 0),
             total_costs=float(data.get("total_estimated_costs", 0) or 0),
             revenue_prior=float(data.get("revenue_prior_period", 0) or 0),
             escrow_total=_sum_escrow(list(data.get("escrow_receipts") or [])),
+            period_schedule=period_schedule,
             rera_registration_number=rera,
             project_name=str(data.get("project_name") or ""),
             revenue_recognition_trigger=recognition_trigger.get(

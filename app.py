@@ -583,6 +583,8 @@ class IFRS15CalculateRequest(BaseModel):
     sla_items: list = Field(default_factory=list)
     performance_obligations: List[PerformanceObligationRequest]
     payment_terms: str = ""
+    realestate_period_schedule: List[Dict[str, Any]] = Field(default_factory=list)
+    realestate_overlay: Optional[Dict[str, Any]] = None
 
 
 class IFRS15ClassifyContractRequest(BaseModel):
@@ -994,12 +996,15 @@ class RealEstateToCalculateRequest(BaseModel):
     spa: Optional[Dict[str, Any]] = None
     spa_mapped: Optional[Dict[str, Any]] = None
     construction_start: str = ""
+    spa_execution_date: str = ""
     expected_handover: str = ""
     contract_value: float = 0.0
     costs_incurred_to_date: float = 0.0
     total_estimated_costs: float = 0.0
     revenue_prior_period: float = 0.0
     escrow_total: float = 0.0
+    period_schedule: List[Dict[str, Any]] = Field(default_factory=list)
+    currency: str = Field(default="AED", pattern="^(AED|USD)$")
     escrow_receipts: List[Dict[str, Any]] = Field(default_factory=list)
     escrow_releases: List[EscrowReleaseEntry] = Field(default_factory=list)
 
@@ -2414,6 +2419,21 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
         calc = IFRS15Calculator()
         results = calc.calculate_full_ifrs15(contract, cash_received=Decimal(str(request.cash_received)))
         results_json = results.copy()
+        re_schedule = list(request.realestate_period_schedule or [])
+        re_overlay = request.realestate_overlay
+        if re_schedule or re_overlay:
+            from backend.app.services.ifrs15_realestate import merge_realestate_into_calculate_results
+
+            po_desc = ""
+            if request.performance_obligations:
+                po_desc = str(request.performance_obligations[0].description or "")
+            results_json = merge_realestate_into_calculate_results(
+                results_json,
+                period_schedule=re_schedule,
+                overlay=re_overlay,
+                obligation_description=po_desc,
+                currency=request.currency or "AED",
+            )
         if 'recognition_schedule' in results_json and hasattr(results_json['recognition_schedule'], 'to_dict'):
             results_json['recognition_schedule'] = results_json['recognition_schedule'].to_dict(orient='records')
         file_id = str(uuid.uuid4())
@@ -4097,12 +4117,15 @@ async def ifrs15_realestate_to_calculate(request: RealEstateToCalculateRequest):
             spa=request.spa,
             spa_mapped=request.spa_mapped,
             construction_start=request.construction_start,
+            spa_execution_date=request.spa_execution_date,
             expected_handover=request.expected_handover,
             contract_value=request.contract_value,
             costs_incurred=request.costs_incurred_to_date,
             total_costs=request.total_estimated_costs,
             revenue_prior=request.revenue_prior_period,
             escrow_total=request.escrow_total,
+            period_schedule=request.period_schedule,
+            currency=request.currency,
         )
         return {"success": True, "calculate_payload": payload}
     except Exception as e:

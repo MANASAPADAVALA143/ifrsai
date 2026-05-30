@@ -943,6 +943,7 @@ export default function IFRS15Page() {
     realestateSyncApplied.current = true;
     setIfrs15DashTab('calculate');
     setActiveTab('manual');
+    const syncCurrency = sanitizeCurrencyCode(String(payload.currency || 'AED'), 'AED');
     updateStep3({
       contract_type: 'fixed_price',
       total_estimated_cost: String(payload.total_estimated_cost ?? ''),
@@ -960,7 +961,7 @@ export default function IFRS15Page() {
           effective_date: payload.effective_date,
           contract_term_months: payload.contract_term_months,
           total_contract_value: payload.fixed_consideration,
-          currency: payload.currency || 'AED',
+          currency: syncCurrency,
         },
       },
       step2_performance_obligations: {
@@ -976,7 +977,12 @@ export default function IFRS15Page() {
       },
       _realestate_overlay: payload.realestate_overlay,
     });
-    void handleCalculate(payload);
+    void handleCalculate({
+      ...payload,
+      realestate_overlay: payload.realestate_overlay,
+      realestate_period_schedule: payload.realestate_period_schedule ?? [],
+      currency: syncCurrency,
+    });
     toast.success('Real estate recognition synced to IFRS 15 schedule');
   }, []);
 
@@ -995,7 +1001,9 @@ export default function IFRS15Page() {
   const disclosureNotes = results?.disclosure_notes || {};
   const currency = sanitizeCurrencyCode(
     contractDetails.currency || lastContractInfo.currency || step1.currency,
-    'USD'
+    (extractedData as { _realestate_overlay?: { currency?: string } })?._realestate_overlay?.currency
+      ? 'AED'
+      : 'USD'
   );
   const balances = results?.contract_balances || {};
   const schedule = Array.isArray(results?.revenue_schedule) ? results.revenue_schedule : [];

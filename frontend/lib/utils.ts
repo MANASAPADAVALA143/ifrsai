@@ -1,3 +1,14 @@
+/** Parse JSON from a fetch body; avoids "Unexpected end of JSON input" on empty responses. */
+export function parseJsonText<T>(text: string): T | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    return null;
+  }
+}
+
 // Format numbers in Indian number system (₹1,24,53,200)
 export function formatIndianCurrency(amount: number): string {
   const formatter = new Intl.NumberFormat('en-IN', {
@@ -23,6 +34,7 @@ export function formatIndianCurrencyWithDecimals(amount: number, decimals: numbe
 const VALID_CURRENCIES_FOR_FORMAT = [
   'INR',
   'USD',
+  'AED',
   'GBP',
   'EUR',
   'AUD',

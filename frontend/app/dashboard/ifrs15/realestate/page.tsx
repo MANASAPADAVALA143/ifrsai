@@ -11,6 +11,7 @@ import {
   saveRealEstateSyncPayload,
 } from '@/lib/realestate-ifrs15-mapper';
 import {
+  filterPeriodScheduleFromSpa,
   formatRealEstateMoney,
   disclosureScoreColor,
   type DisplayCurrency,
@@ -620,7 +621,12 @@ export default function RealEstateIFRS15Page() {
     setOffPlanResult((report.off_plan as Record<string, unknown>) || null);
     setEscrowResult((report.escrow as Record<string, unknown>) || null);
     setVatResult((report.vat as Record<string, unknown>) || null);
-    setPeriodSchedule((report.period_schedule as Record<string, unknown>[]) || []);
+    setPeriodSchedule(
+      filterPeriodScheduleFromSpa(
+        (report.period_schedule as Record<string, unknown>[]) || [],
+        spaExecutionDate
+      )
+    );
     setCostsResult((report.contract_costs as Record<string, unknown>) || null);
     setPaResult((report.principal_agent as Record<string, unknown>) || null);
     const dt = (report.deadline_tracker as Record<string, unknown>) || null;
@@ -981,16 +987,23 @@ export default function RealEstateIFRS15Page() {
     }
     setSyncLoading(true);
     const escrowTotal = escrowReceipts.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
-    const fromReport = fullReport?.ifrs15_calculate_payload as Record<string, unknown> | undefined;
+    const scheduleForSync = filterPeriodScheduleFromSpa(
+      ((fullReport?.period_schedule as Record<string, unknown>[])?.length
+        ? (fullReport?.period_schedule as Record<string, unknown>[])
+        : periodSchedule) || [],
+      spaExecutionDate
+    );
     const localPayload = mapRealEstateToCalculatePayload({
       contractValue: parseFloat(contractValue) || 0,
       constructionStart,
+      spaExecutionDate,
       expectedHandover,
       costsIncurred: parseFloat(costsIncurred) || 0,
       totalCosts: parseFloat(totalCosts) || 0,
       revenuePrior: parseFloat(revenuePrior) || 0,
       escrowTotal,
       offPlan: offPlanResult,
+      periodSchedule: scheduleForSync,
       spaExtracted,
       spaInputs,
       reraRegistrationNumber: reraNumber.trim(),
@@ -1002,19 +1015,22 @@ export default function RealEstateIFRS15Page() {
         fullReport?.recognition_trigger_summary || ''
       ),
     });
-    let payload = fromReport || localPayload;
-    if (!fromReport) {
+    let payload = localPayload;
+    {
       const { data, error, reraViolation } = await ifrs15Api.realestateToCalculatePayload({
         off_plan: offPlanResult,
         spa: spaExtracted ?? undefined,
         spa_mapped: spaInputs ?? undefined,
         construction_start: constructionStart,
+        spa_execution_date: spaExecutionDate,
         expected_handover: expectedHandover,
         contract_value: parseFloat(contractValue) || 0,
         costs_incurred_to_date: parseFloat(costsIncurred) || 0,
         total_estimated_costs: parseFloat(totalCosts) || 0,
         revenue_prior_period: parseFloat(revenuePrior) || 0,
         escrow_total: escrowTotal,
+        period_schedule: scheduleForSync,
+        currency: displayCurrency,
         escrow_receipts: buildReportPayload().escrow_receipts,
         escrow_releases: buildReportPayload().escrow_releases,
       });
@@ -1029,6 +1045,14 @@ export default function RealEstateIFRS15Page() {
         return;
       }
       payload = (data?.calculate_payload as Record<string, unknown>) || localPayload;
+      if (scheduleForSync.length && !Array.isArray(payload.realestate_period_schedule)) {
+        payload = { ...payload, realestate_period_schedule: scheduleForSync };
+      }
+      payload = {
+        ...payload,
+        realestate_overlay: payload.realestate_overlay ?? offPlanResult,
+        currency: displayCurrency,
+      };
     }
     setSyncLoading(false);
     saveRealEstateSyncPayload(payload as Record<string, unknown>);
@@ -1529,6 +1553,7 @@ export default function RealEstateIFRS15Page() {
           projectName={projectName}
           developerName={String(spaExtracted?.developer_name || '')}
           currency={displayCurrency}
+          spaExecutionDate={spaExecutionDate}
           periodSchedule={periodSchedule}
           fmt={fmt}
           onResultChange={setVatRecResult}
