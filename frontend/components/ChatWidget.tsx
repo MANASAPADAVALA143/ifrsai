@@ -17,11 +17,12 @@ interface AskResponse {
   sources: string[];
 }
 
-export function ChatWidget() {
+export function ChatWidget({ defaultLeaseSearch = false }: { defaultLeaseSearch?: boolean }) {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [leaseSearchMode, setLeaseSearchMode] = useState(defaultLeaseSearch);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { getCompanyId } = useAuth();
 
@@ -42,8 +43,10 @@ export function ChatWidget() {
     setIsLoading(true);
 
     try {
-      const companyId = getCompanyId();
-      const { data, error } = await chatApi.ask(companyId, userMessage, 'lease');
+      const companyId = getCompanyId() || 'default';
+      const { data, error } = leaseSearchMode
+        ? await chatApi.leaseSearch(companyId, userMessage)
+        : await chatApi.ask(companyId, userMessage, 'lease');
 
       if (error) {
         throw new Error(error);
@@ -103,13 +106,42 @@ export function ChatWidget() {
         </button>
       </div>
 
+      <div className="flex gap-1 px-3 py-2 border-b border-gray-100 bg-gray-50">
+        <button
+          type="button"
+          onClick={() => setLeaseSearchMode(false)}
+          className={`flex-1 text-xs py-1.5 rounded-md font-medium ${
+            !leaseSearchMode ? 'bg-white shadow text-gray-900' : 'text-gray-500'
+          }`}
+        >
+          General AI
+        </button>
+        <button
+          type="button"
+          onClick={() => setLeaseSearchMode(true)}
+          className={`flex-1 text-xs py-1.5 rounded-md font-medium ${
+            leaseSearchMode ? 'bg-white shadow text-orange-700' : 'text-gray-500'
+          }`}
+        >
+          Lease Search
+        </button>
+      </div>
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
           <div className="text-center text-gray-500 mt-8">
             <MessageCircle className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-            <p className="text-sm">Ask me anything about your IFRS data!</p>
-            <p className="text-xs mt-2">Try: "What is my total lease liability?"</p>
+            <p className="text-sm">
+              {leaseSearchMode
+                ? 'Search indexed lease contracts in natural language.'
+                : 'Ask me anything about your IFRS data!'}
+            </p>
+            <p className="text-xs mt-2">
+              {leaseSearchMode
+                ? 'Try: "Which leases expire in the next 6 months?"'
+                : 'Try: "What is my total lease liability?"'}
+            </p>
           </div>
         )}
 
@@ -131,7 +163,10 @@ export function ChatWidget() {
               {message.sources && message.sources.length > 0 && (
                 <div className="mt-2 pt-2 border-t border-gray-300">
                   <p className="text-xs opacity-75">
-                    Sources: {message.sources.length} documents
+                    Sources:{' '}
+                    {leaseSearchMode && typeof message.sources[0] === 'string'
+                      ? (message.sources as string[]).join(', ')
+                      : `${message.sources.length} document(s)`}
                   </p>
                 </div>
               )}

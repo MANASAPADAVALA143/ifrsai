@@ -2,6 +2,8 @@
  * Map last recognition report + form state → RealEstatePDFInput for client PDF API.
  */
 
+import { applyQuarterlyScheduleTotals } from '@/lib/realestate-format';
+
 export type RealEstatePDFInputPayload = Record<string, unknown>;
 
 export type PDFModalInputs = {
@@ -29,6 +31,8 @@ export type PDFFormState = {
   certOverrideManual: boolean;
   cancelResult: Record<string, unknown> | null;
   deadlineTracker?: Record<string, unknown> | null;
+  spaExecutionDate?: string;
+  revenuePrior?: string;
 };
 
 function currentQuarterLabel(): string {
@@ -65,7 +69,19 @@ export function mapReportToPDFInput(
     return crit ? `${crit}: ${gap}` : gap;
   });
 
-  const schedule = ((report.period_schedule as Record<string, unknown>[]) || []).map((row) => ({
+  const scheduleResult = applyQuarterlyScheduleTotals(
+    (report.period_schedule as Record<string, unknown>[]) || [],
+    {
+      spaExecutionDate: form.spaExecutionDate,
+      revenueToDate: Number(off.revenue_recognised_to_date) || 0,
+      revenuePrior:
+        parseFloat(form.revenuePrior || '') ||
+        Number(report.revenue_prior_period) ||
+        0,
+      revenueCurrent: Number(off.revenue_current_period) || 0,
+    }
+  );
+  const schedule = scheduleResult.schedule.map((row) => ({
     quarter: row.period || row.quarter,
     completion_pct: row.completion_pct,
     revenue: row.revenue_recognised,
@@ -88,7 +104,7 @@ export function mapReportToPDFInput(
     rera_registration_number: form.reraNumber.trim() || 'N/A',
     report_date: modal.reportDate.slice(0, 10),
     reporting_period: modal.reportingPeriod || currentQuarterLabel(),
-    currency: modal.currency,
+    currency: modal.currency === 'USD' ? 'USD' : 'AED',
 
     contract_price: Number(report.contract_value) || parseFloat(form.contractValue) || 0,
     completion_pct: Number(off.completion_pct) || form.completionPctLive,

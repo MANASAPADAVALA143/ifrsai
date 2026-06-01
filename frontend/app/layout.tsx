@@ -3,8 +3,16 @@ import { ToasterClient } from "@/components/ToasterClient";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "IFRS.ai - IFRS Compliance Automated by AI",
-  description: "Stop spending 4 days on lease calculations. Upload your contract, get audit-ready reports in 4 minutes.",
+  applicationName: "IFRS.ai",
+  title: {
+    default: "IFRS.ai — IFRS Compliance Automated by AI",
+    template: "%s | IFRS.ai",
+  },
+  description:
+    "Stop spending 4 days on lease calculations. Upload your contract, get audit-ready reports in 4 minutes.",
+  icons: {
+    icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
+  },
 };
 
 export default function RootLayout({

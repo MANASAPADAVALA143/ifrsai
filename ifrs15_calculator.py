@@ -4687,60 +4687,326 @@ class IFRS15Calculator:
                     "Cumulative": 0,
                 }
             )
-    
+
+    def _is_license_obligation(self, ob: PerformanceObligation) -> bool:
+        d = (ob.description or "").lower()
+        oid = (ob.obligation_id or "").lower()
+        return bool(
+            re.search(
+                r"\b(software\s+)?licen[cs]e\b|licence\s+of\s+ip|ip\s+licen[cs]e|perpetual\s+licen[cs]e|subscription\s+licen[cs]e",
+                d,
+            )
+            or "license" in oid
+            or "licence" in oid
+        )
+
+    def _is_support_obligation(self, ob: PerformanceObligation) -> bool:
+        d = (ob.description or "").lower()
+        return bool(
+            re.search(
+                r"\b(support|maintenance|help\s*desk|technical\s+support|customer\s+support)\b",
+                d,
+            )
+        )
+
+    def _support_starts_post_implementation(self, contract: IFRS15Input, ob: PerformanceObligation) -> bool:
+        text = " ".join(
+            [
+                ob.description or "",
+                contract.payment_terms or "",
+                " ".join(o.description for o in contract.performance_obligations),
+            ]
+        ).lower()
+        return bool(
+            re.search(
+                r"support\s+commenc(es|ing)\s+post\s+go[- ]?live|"
+                r"commenc(es|ing)\s+post\s+go[- ]?live|"
+                r"after\s+(go[- ]?live|implementation)|"
+                r"following\s+implementation|"
+                r"post[- ]?implementation|"
+                r"support\s+commenc(es|ing)\s+(after|following)\s+implementation",
+                text,
+            )
+        )
+
+    def _is_implementation_obligation(self, ob: PerformanceObligation) -> bool:
+        d = (ob.description or "").lower()
+        return bool(
+            re.search(
+                r"\b(implementation|customi[sz]ation|deployment|installation|integration)\b",
+                d,
+            )
+        )
+
+    def _implementation_completion_date(self, contract: IFRS15Input) -> Optional[date]:
+        """Latest implementation PO end date (start + duration), else None."""
+        eff = contract.effective_date
+        start = eff.date() if isinstance(eff, datetime) else eff
+        best: Optional[date] = None
+        for ob in contract.performance_obligations:
+            if not self._is_implementation_obligation(ob):
+                continue
+            months = max(int(ob.duration_months or 0), 1)
+            end = start + relativedelta(months=months)
+            if best is None or end > best:
+                best = end
+        return best
+
+    def _parse_date_from_text(self, text: str) -> Optional[date]:
+        if not text:
+            return None
+        for pat in (
+            r"(\d{4}-\d{2}-\d{2})",
+            r"(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4})",
+        ):
+            m = re.search(pat, text, re.I)
+            if not m:
+                continue
+            raw = m.group(1).strip()
+            try:
+                return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+            except ValueError:
+                pass
+            try:
+                return datetime.strptime(raw, "%d %b %Y").date()
+            except ValueError:
+                try:
+                    return datetime.strptime(raw, "%d %B %Y").date()
+                except ValueError:
+                    continue
+        return None
+
+    def _infer_go_live_date(
+        self, ob: PerformanceObligation, contract: IFRS15Input
+    ) -> Optional[datetime]:
+        if ob.transfer_date:
+            return ob.transfer_date
+        blob = (ob.description or "").lower()
+        for other in contract.performance_obligations:
+            if other.obligation_id != ob.obligation_id:
+                blob += " " + (other.description or "").lower()
+        blob += " " + (contract.payment_terms or "").lower()
+        for phrase in (
+            r"go[- ]?live\s*(?:date)?\s*[:\-]?\s*(\d{4}-\d{2}-\d{2})",
+            r"live\s+date\s*[:\-]?\s*(\d{4}-\d{2}-\d{2})",
+            r"accessible\s+(?:from|on)\s+(\d{4}-\d{2}-\d{2})",
+            r"grant\s+date\s*[:\-]?\s*(\d{4}-\d{2}-\d{2})",
+        ):
+            m = re.search(phrase, blob, re.I)
+            if m:
+                try:
+                    return datetime.strptime(m.group(1), "%Y-%m-%d")
+                except ValueError:
+                    pass
+        parsed = self._parse_date_from_text(blob)
+        if parsed:
+            return datetime(parsed.year, parsed.month, parsed.day)
+        impl_end = self._implementation_completion_date(contract)
+        if impl_end:
+            return datetime(impl_end.year, impl_end.month, impl_end.day)
+        eff = contract.effective_date
+        return eff if isinstance(eff, datetime) else datetime(eff.year, eff.month, eff.day)
+
+    def _classify_license_b58(
+        self, ob: PerformanceObligation, contract: IFRS15Input
+    ) -> Dict[str, Any]:
+        """
+        IFRS 15.B58–B63 — right-to-use (point in time) vs right-to-access (over time).
+        """
+        text = (ob.description or "").lower()
+        for other in contract.performance_obligations:
+            text += " " + (other.description or "").lower()
+        text += " " + (contract.payment_terms or "").lower()
+
+        access_hits = 0
+        for pat in (
+            r"right[- ]?to[- ]?access",
+            r"ongoing\s+activities",
+            r"entity\s+activities\s+affect",
+            r"updates?\s+to\s+the\s+ip",
+            r"dynamic\s+content",
+            r"saas\b",
+            r"cloud\s+access",
+            r"subscription\s+with\s+updates",
+        ):
+            if re.search(pat, text, re.I):
+                access_hits += 1
+
+        use_hits = 0
+        for pat in (
+            r"right[- ]?to[- ]?use",
+            r"perpetual",
+            r"static\s+licen[cs]e",
+            r"go[- ]?live",
+            r"upon\s+(signing|contract\s+signing|delivery|grant)",
+            r"made\s+accessible",
+            r"point\s+in\s+time",
+        ):
+            if re.search(pat, text, re.I):
+                use_hits += 1
+
+        b58a = bool(re.search(r"entity.*activities.*affect|ongoing\s+activities", text, re.I))
+        b58b = bool(re.search(r"exposed.*effect|positive.*negative.*effect", text, re.I))
+        b58c = bool(
+            re.search(
+                r"no\s+separate\s+function|standalone\s+functionality|without\s+entity",
+                text,
+                re.I,
+            )
+        )
+
+        if b58a and b58b and b58c and access_hits >= use_hits:
+            classification = "right-to-access"
+            confidence = min(95, 72 + access_hits * 6 + (3 if b58a and b58b and b58c else 0))
+        elif use_hits > 0 or access_hits == 0:
+            classification = "right-to-use"
+            confidence = min(95, 78 + use_hits * 5)
+        elif access_hits > use_hits:
+            classification = "right-to-access"
+            confidence = min(88, 65 + access_hits * 5)
+        else:
+            classification = "right-to-use"
+            confidence = 70
+
+        review_recommended = confidence < 85 or classification == "right-to-access"
+        return {
+            "license_classification": classification,
+            "confidence": int(confidence),
+            "review_recommended": review_recommended,
+        }
+
+    def _resolve_license_obligation(
+        self, ob: PerformanceObligation, contract: IFRS15Input
+    ) -> Tuple[PerformanceObligation, Dict[str, Any]]:
+        meta = self._classify_license_b58(ob, contract)
+        if meta["license_classification"] == "right-to-access":
+            method = "over_time"
+            duration = max(int(ob.duration_months or 0), int(contract.contract_term_months or 12), 1)
+            transfer = None
+        else:
+            method = "point_in_time"
+            duration = 0
+            transfer = self._infer_go_live_date(ob, contract)
+        return (
+            PerformanceObligation(
+                obligation_id=ob.obligation_id,
+                description=ob.description,
+                standalone_selling_price=ob.standalone_selling_price,
+                recognition_method=method,
+                duration_months=duration,
+                transfer_date=transfer,
+                completion_percentage=ob.completion_percentage,
+            ),
+            meta,
+        )
+
+    def _resolve_obligations_for_schedule(
+        self, contract: IFRS15Input
+    ) -> Tuple[List[PerformanceObligation], Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+        resolved: List[PerformanceObligation] = []
+        per_ob_meta: Dict[str, Dict[str, Any]] = {}
+        license_analysis: List[Dict[str, Any]] = []
+
+        for ob in contract.performance_obligations:
+            meta: Dict[str, Any] = {}
+            working = ob
+            if self._is_license_obligation(ob):
+                working, meta = self._resolve_license_obligation(ob, contract)
+                license_analysis.append(
+                    {
+                        "obligation_id": ob.obligation_id,
+                        "description": ob.description,
+                        **meta,
+                    }
+                )
+            elif self._is_support_obligation(ob) and self._support_starts_post_implementation(
+                contract, ob
+            ):
+                impl_end = self._implementation_completion_date(contract)
+                if impl_end:
+                    meta["support_start_date"] = impl_end.isoformat()
+            resolved.append(working)
+            if meta:
+                per_ob_meta[ob.obligation_id] = meta
+
+        return resolved, per_ob_meta, license_analysis
+
     def generate_recognition_schedule(
         self,
         contract: IFRS15Input,
         allocations: Dict[str, Decimal]
-    ) -> pd.DataFrame:
+    ) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
         """
         Step 5: Generate revenue recognition schedule
         
         For each obligation:
         - Over time: Linear allocation over duration
         - Point in time: Full recognition on transfer date
+        - Licence POs: IFRS 15.B58–B63 classification applied before scheduling
         
         Args:
             contract: IFRS15Input
             allocations: Allocated amounts by obligation
             
         Returns:
-            DataFrame with monthly revenue recognition
+            DataFrame with monthly revenue recognition; licence analysis metadata list
         """
         
         schedule = []
         current_date = contract.effective_date
         today = date.today()
+        obligations, ob_meta, license_analysis = self._resolve_obligations_for_schedule(contract)
         
         for month in range(1, contract.contract_term_months + 1):
             month_date = current_date + relativedelta(months=month - 1)
+            month_day = month_date.date() if hasattr(month_date, "date") else month_date
             
-            for ob in contract.performance_obligations:
+            for ob in obligations:
                 allocated_amount = allocations[ob.obligation_id]
+                meta = ob_meta.get(ob.obligation_id, {})
                 
                 planned_revenue = Decimal('0')
                 recognized_revenue = Decimal('0')
 
                 if ob.recognition_method == "over_time":
-                    # Linear recognition over duration
-                    if ob.duration_months > 0 and month <= ob.duration_months:
-                        planned_revenue = (allocated_amount / Decimal(str(ob.duration_months))).quantize(
+                    duration = max(int(ob.duration_months or 0), 0)
+                    support_start_s = meta.get("support_start_date")
+                    if support_start_s:
+                        try:
+                            support_start = datetime.strptime(support_start_s[:10], "%Y-%m-%d").date()
+                        except ValueError:
+                            support_start = None
+                        if support_start:
+                            if month_day < support_start:
+                                duration = 0
+                            else:
+                                months_into = self._months_between(support_start, month_day) + 1
+                                if duration > 0 and 1 <= months_into <= duration:
+                                    planned_revenue = (
+                                        allocated_amount / Decimal(str(duration))
+                                    ).quantize(self.precision, ROUND_HALF_UP)
+                    elif duration > 0 and month <= duration:
+                        planned_revenue = (allocated_amount / Decimal(str(duration))).quantize(
                             self.precision, ROUND_HALF_UP
                         )
                 
                 elif ob.recognition_method == "point_in_time":
                     if self._is_multi_session_training_obligation(ob):
                         continue
-                    # Full recognition on transfer date
-                    if ob.transfer_date and month_date.month == ob.transfer_date.month and month_date.year == ob.transfer_date.year:
+                    transfer = ob.transfer_date
+                    if transfer:
+                        t_day = transfer.date() if hasattr(transfer, "date") else transfer
+                        if month_day.year == t_day.year and month_day.month == t_day.month:
+                            planned_revenue = allocated_amount
+                    elif meta.get("license_classification") == "right-to-use":
                         planned_revenue = allocated_amount
                 
                 if planned_revenue > 0:
-                    period_is_recognized = month_date.date() <= today
+                    period_is_recognized = month_day <= today
                     recognized_revenue = planned_revenue if period_is_recognized else Decimal('0')
                     status = 'Recognised' if period_is_recognized else 'Deferred'
                 
-                    schedule.append({
+                    row = {
                         'Period': month,
                         'Date': month_date.strftime('%Y-%m-%d'),
                         'Month': month_date.strftime('%b %Y'),
@@ -4750,10 +5016,15 @@ class IFRS15Calculator:
                         'Scheduled_Revenue': float(planned_revenue),
                         'Revenue': float(recognized_revenue),
                         'Status': status,
-                        'Cumulative': 0  # Will calculate below
-                    })
+                        'Cumulative': 0,
+                    }
+                    if meta.get("license_classification"):
+                        row["license_classification"] = meta["license_classification"]
+                        row["confidence"] = meta.get("confidence")
+                        row["review_recommended"] = meta.get("review_recommended")
+                    schedule.append(row)
         
-        for ob in contract.performance_obligations:
+        for ob in obligations:
             if self._is_multi_session_training_obligation(ob):
                 self._append_training_session_rows(
                     contract, ob, allocations[ob.obligation_id], schedule
@@ -4773,11 +5044,11 @@ class IFRS15Calculator:
                 df = df.sort_values(by=list(sort_cols), kind="mergesort").reset_index(drop=True)
 
         if not df.empty and "Obligation_ID" in df.columns and "Revenue" in df.columns:
-            for ob in contract.performance_obligations:
+            for ob in obligations:
                 ob_mask = df["Obligation_ID"] == ob.obligation_id
                 df.loc[ob_mask, "Cumulative"] = df.loc[ob_mask, "Revenue"].cumsum()
 
-        return df
+        return df, license_analysis
     
     def _months_between(self, start_dt: date, end_dt: date) -> int:
         months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
@@ -5111,7 +5382,9 @@ class IFRS15Calculator:
         )
         
         # Step 5: Recognize revenue (schedule rows carry today-aware Status / Revenue)
-        recognition_schedule = self.generate_recognition_schedule(contract, allocations)
+        recognition_schedule, license_recognition_analysis = self.generate_recognition_schedule(
+            contract, allocations
+        )
 
         if not recognition_schedule.empty and "Revenue" in recognition_schedule.columns:
             total_recognised = float(pd.to_numeric(recognition_schedule["Revenue"], errors="coerce").fillna(0).sum())
@@ -5169,6 +5442,7 @@ class IFRS15Calculator:
             'contract_asset_note': contract_asset_note,
             'payment_terms_mode': payment_mode,
             'revenue_schedule': revenue_schedule,
+            'license_recognition_analysis': license_recognition_analysis,
             'performance_obligations': performance_obligations,
             'disclosure_notes': {
                 'accounting_policy': 'Revenue is recognised when control of promised goods or services transfers to the customer.',

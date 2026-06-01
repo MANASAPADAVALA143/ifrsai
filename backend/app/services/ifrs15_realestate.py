@@ -418,6 +418,64 @@ def _quarter_end_dates(start: date, end: date) -> List[date]:
     return results
 
 
+def _spread_period_revenues(
+    n: int,
+    revenue_to_date: float,
+    revenue_prior: float,
+    revenue_current: float,
+) -> List[float]:
+    """Split revenue_to_date across n quarters using prior-period and current-period inputs."""
+    if n <= 0:
+        return []
+    if n == 1:
+        return [round(revenue_to_date, 2)]
+    if revenue_prior > 0:
+        prior_quarters = n - 1
+        per_prior = round(revenue_prior / prior_quarters, 2) if prior_quarters > 0 else 0.0
+        period_revenues = [per_prior] * max(0, prior_quarters - 1)
+        if prior_quarters > 0:
+            period_revenues.append(
+                round(revenue_prior - per_prior * (prior_quarters - 1), 2)
+            )
+        period_revenues.append(round(revenue_current, 2))
+        return period_revenues
+    per_period = round(revenue_to_date / n, 2)
+    return [per_period] * (n - 1) + [round(revenue_to_date - per_period * (n - 1), 2)]
+
+
+def _resolve_revenue_to_date(data: Dict[str, Any], cv: float, completion_pct: float) -> float:
+    """Prefer off-plan / user totals over re-deriving from contract × completion."""
+    for key in (
+        "revenue_to_date",
+        "revenue_recognised_to_date",
+    ):
+        val = data.get(key)
+        if val is not None and str(val).strip() != "":
+            return round(float(val), 2)
+    return round(cv * (completion_pct / 100.0), 2)
+
+
+def validate_quarterly_schedule_total(
+    schedule: List[Dict[str, Any]], revenue_to_date: float
+) -> Dict[str, Any]:
+    actual = round(sum(float(r.get("revenue_recognised", 0) or 0) for r in schedule), 2)
+    expected = round(float(revenue_to_date), 2)
+    valid = abs(actual - expected) <= 0.02
+    return {
+        "valid": valid,
+        "expected_total": expected,
+        "actual_total": actual,
+        "error": (
+            None
+            if valid
+            else (
+                f"Quarterly schedule total AED {actual:,.2f} does not equal "
+                f"revenue to date AED {expected:,.2f}"
+            )
+        ),
+    }
+
+
 def generate_quarterly_revenue_schedule(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Quarterly revenue from SPA contract inception (IFRS 15.9) through measurement date."""
     schedule_start = _schedule_start_date(data)
@@ -428,7 +486,7 @@ def generate_quarterly_revenue_schedule(data: Dict[str, Any]) -> List[Dict[str, 
 
     cv = float(data.get("contract_value", 0) or 0)
     completion_pct = effective_completion_pct(data)
-    revenue_to_date = round(cv * (completion_pct / 100.0), 2)
+    revenue_to_date = _resolve_revenue_to_date(data, cv, completion_pct)
     cap_date = min(current, end)
     escrow_receipts = list(data.get("escrow_receipts") or [])
 
@@ -440,12 +498,23 @@ def generate_quarterly_revenue_schedule(data: Dict[str, Any]) -> List[Dict[str, 
     if n == 0:
         return []
 
-    per_period = round(revenue_to_date / n, 2)
+    revenue_prior = round(float(data.get("revenue_prior_period", 0) or 0), 2)
+    revenue_current = round(
+        float(
+            data.get("revenue_current_period")
+            or data.get("this_period_revenue")
+            or (revenue_to_date - revenue_prior)
+        ),
+        2,
+    )
+    period_revenues = _spread_period_revenues(
+        n, revenue_to_date, revenue_prior, revenue_current
+    )
+
     cumulative = 0.0
     schedule: List[Dict[str, Any]] = []
     for i, q_end in enumerate(quarter_ends):
-        is_last = i == n - 1
-        period_rev = round(revenue_to_date - cumulative, 2) if is_last else per_period
+        period_rev = period_revenues[i] if i < len(period_revenues) else 0.0
         cumulative = round(cumulative + period_rev, 2)
         completion = round(completion_pct * (i + 1) / n, 1)
         period_start, period_end = _period_bounds_for_quarter_end(q_end, schedule_start)
@@ -1053,10 +1122,41 @@ def merge_realestate_into_calculate_results(
     tp = float(out.get("transaction_price") or out.get("total_contract_value") or 0)
     if rev_td > 0:
         out["total_recognised"] = rev_td
-        out["total_deferred"] = max(0.0, tp - rev_td)
+        ca = float(ov.get("contract_asset") or 0)
+        cl = float(ov.get("contract_liability") or 0)
+        rpo = float(ov.get("remaining_revenue") or max(0.0, tp - rev_td))
+        out["total_deferred"] = cl if cl > 0 else rpo
         balances = dict(out.get("contract_balances") or {})
         balances["revenue_recognized_to_date"] = rev_td
+        balances["contract_asset_amount"] = ca
+        balances["contract_liability_amount"] = cl
         out["contract_balances"] = balances
+        cur_label = cur
+        out["disclosure_notes"] = {
+            "accounting_policy": (
+                "Revenue is recognised over time using the input method (cost-to-cost) "
+                "per IFRS 15.35(c) for this UAE off-plan residential unit."
+            ),
+            "disaggregation_of_revenue": (
+                f"Revenue recognised to date: {cur_label} {rev_td:,.2f} "
+                f"(quarterly schedule from SPA execution)."
+            ),
+            "contract_balances": (
+                f"Contract assets: {cur_label} {ca:,.2f}; "
+                f"Contract liabilities: {cur_label} {cl:,.2f}."
+            ),
+            "performance_obligations_note": (
+                obligation_description or "Single off-plan unit — recognised over time until handover."
+            ),
+            "transaction_price_rpo": (
+                f"Unrecognised transaction price (remaining performance obligation): "
+                f"{cur_label} {rpo:,.2f}."
+            ),
+            "significant_judgements": (
+                "Completion % (input method), RERA escrow timing, FTA VAT alignment, "
+                "and handover trigger per UAE Law No. 8 of 2007."
+            ),
+        }
 
     engine = dict(out.get("revenue_engine_result") or {})
     if completion > 0:
@@ -1083,6 +1183,10 @@ def merge_realestate_into_calculate_results(
                     item["recognised_to_date"] = rev_td
                 if completion > 0:
                     item["pct_complete"] = completion
+    if ov:
+        out["realestate_overlay"] = ov
+    if period_schedule:
+        out["realestate_period_schedule"] = list(period_schedule)
     return out
 
 
@@ -1194,7 +1298,17 @@ class RealEstateReportEngine:
         if data.get("escrow_receipts") or data.get("milestone_releases"):
             escrow_result = ReraEscrowTracker().analyse(data)
 
-        period_schedule = generate_quarterly_revenue_schedule(data)
+        schedule_input = {
+            **data,
+            "revenue_to_date": off_plan.get("revenue_recognised_to_date"),
+            "revenue_recognised_to_date": off_plan.get("revenue_recognised_to_date"),
+            "revenue_current_period": off_plan.get("revenue_current_period"),
+        }
+        period_schedule = generate_quarterly_revenue_schedule(schedule_input)
+        schedule_validation = validate_quarterly_schedule_total(
+            period_schedule,
+            float(off_plan.get("revenue_recognised_to_date") or 0),
+        )
         vat = UaeVatTimingEngine().align(
             {"revenue_schedule": period_schedule, "currency": "AED"}
         )
@@ -1258,6 +1372,7 @@ class RealEstateReportEngine:
             "off_plan": off_plan,
             "escrow": escrow_result,
             "period_schedule": period_schedule,
+            "schedule_validation": schedule_validation,
             "vat": vat,
             "contract_costs": costs_result,
             "principal_agent": pa_result,

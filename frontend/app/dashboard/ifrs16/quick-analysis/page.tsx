@@ -9,7 +9,6 @@ import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { ifrs16Api } from '@/lib/api';
 import { saveToLeaseRepository, buildLeaseEntry } from '@/lib/lease-repository';
-import { formatIndianCurrency } from '@/lib/utils';
 
 const cardClass =
   'bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]';
@@ -729,6 +728,8 @@ function leaseEndDate(start: string, termMonths: number): string {
 
 function getCurrencySymbol(currency?: string): string {
   switch ((currency || 'INR').toUpperCase()) {
+    case 'AED':
+      return 'AED ';
     case 'GBP':
       return '£';
     case 'USD':
@@ -1703,7 +1704,7 @@ Do not use bullet points.`;
                     <tr key={r.lease_id} className="border-b border-[#f8fafc]">
                       <td className="px-4 py-2 font-mono text-xs">{r.lease_id}</td>
                       <td className="px-4 py-2 max-w-[180px] truncate">{r.asset_description}</td>
-                      <td className="px-4 py-2 text-right">{formatIndianCurrency(r.monthly_payment)}</td>
+                      <td className="px-4 py-2 text-right">{formatAmount(r.monthly_payment, r.currency)}</td>
                       <td className="px-4 py-2 text-right">{r.lease_term_months}</td>
                       <td className="px-4 py-2 text-right">{formatIbrPct(r.annual_discount_rate)}</td>
                     </tr>

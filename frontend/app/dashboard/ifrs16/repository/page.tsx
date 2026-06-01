@@ -18,7 +18,7 @@ import {
   Plus,
 } from 'lucide-react';
 import { getLeaseRepository, deleteLeaseFromRepository } from '@/lib/lease-repository';
-import { formatIndianCurrency } from '@/lib/utils';
+import { formatLeaseMoney, resolveLeaseCurrency } from '@/lib/ifrs16-currency';
 import { ifrs16Api } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -240,6 +240,7 @@ export default function LeaseRepositoryPage() {
                       <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Title</th>
                       <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Lease Type</th>
                       <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Lessee</th>
+                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Currency</th>
                       <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Start Date</th>
                       <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">End Date</th>
                       <th className="text-right py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Monthly Payment</th>
@@ -274,13 +275,14 @@ export default function LeaseRepositoryPage() {
                           <td className="py-3 px-4 text-[#1e293b]">{l.title || l.asset || '—'}</td>
                           <td className="py-3 px-4 text-[#64748b]">{l.lease_type || '—'}</td>
                           <td className="py-3 px-4 text-[#64748b]">{l.lessee || l.lessee_name || '—'}</td>
+                          <td className="py-3 px-4 text-[#64748b] font-mono text-xs">{resolveLeaseCurrency(l)}</td>
                           <td className="py-3 px-4 text-[#64748b]">{l.start_date || l.dates?.commencement || '—'}</td>
                           <td className="py-3 px-4 text-[#64748b]">{l.end_date || l.dates?.end || '—'}</td>
                           <td className="py-3 px-4 text-right font-mono text-[#1e293b]">
-                            {formatIndianCurrency(l.monthly_payment ?? l.payments?.monthly ?? 0)}
+                            {formatLeaseMoney(l.monthly_payment ?? l.payments?.monthly ?? 0, resolveLeaseCurrency(l))}
                           </td>
                           <td className="py-3 px-4 text-right font-mono text-[#1e293b]">
-                            {formatIndianCurrency(l.liability ?? 0)}
+                            {formatLeaseMoney(l.liability ?? 0, resolveLeaseCurrency(l))}
                           </td>
                           <td className="py-3 px-4">
                             <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${status.className}`}>

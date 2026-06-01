@@ -11,6 +11,7 @@ def currency_display_symbol(currency: str) -> str:
     if c == "INR":
         return "₹"
     return {
+        "AED": "AED ",
         "GBP": "£",
         "USD": "$",
         "EUR": "€",
@@ -51,6 +52,7 @@ def format_currency_value(amount: float, currency: str = "INR") -> str:
         return f"{'−' if neg else ''}₹{s}"
 
     symbol = {
+        "AED": "AED ",
         "GBP": "£",
         "USD": "$",
         "EUR": "€",

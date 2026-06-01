@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend.app.services.nova_service import call_nova
@@ -397,4 +397,124 @@ Write:
         "accounts": accounts,
         "ifrs15_disclosure_note": ifrs15_disclosure_note,
         "nova_commentary": nova_commentary,
+    }
+
+
+# ─── Period GL vs IFRS.ai revenue reconciliation (Prompt 17) ───────────────
+
+
+class GlEntryInput(BaseModel):
+    contract_id: str
+    gl_revenue: float
+    gl_date: str = ""
+
+
+class IfrsContractRevenueInput(BaseModel):
+    contract_id: str
+    customer_name: str = ""
+    ifrs_revenue: float
+
+
+class RevRecPeriodRequest(BaseModel):
+    period: str
+    gl_entries: List[GlEntryInput] = Field(default_factory=list)
+    ifrs_contracts: List[IfrsContractRevenueInput] = Field(default_factory=list)
+
+
+def _rec_status(variance: float) -> str:
+    av = abs(variance)
+    if av < 100:
+        return "MATCHED"
+    if av < 1000:
+        return "MINOR VARIANCE"
+    return "MAJOR VARIANCE"
+
+
+@router.post("/period-reconciliation")
+async def period_reconciliation(body: RevRecPeriodRequest) -> Dict[str, Any]:
+    ifrs_map = {c.contract_id: c for c in body.ifrs_contracts}
+    gl_map = {g.contract_id: g for g in body.gl_entries}
+
+    all_ids = set(ifrs_map.keys()) | set(gl_map.keys())
+    rows: List[Dict[str, Any]] = []
+    matched = minor = major = unmatched = gl_only = 0
+    total_ifrs = 0.0
+    total_gl = 0.0
+
+    for cid in sorted(all_ids):
+        ifrs_row = ifrs_map.get(cid)
+        gl_row = gl_map.get(cid)
+        ifrs_rev = float(ifrs_row.ifrs_revenue) if ifrs_row else 0.0
+        gl_rev = float(gl_row.gl_revenue) if gl_row else 0.0
+        variance = round(gl_rev - ifrs_rev, 2)
+        total_ifrs += ifrs_rev
+        total_gl += gl_rev
+
+        if ifrs_row and not gl_row:
+            status = "UNMATCHED"
+            unmatched += 1
+        elif gl_row and not ifrs_row:
+            status = "GL ONLY"
+            gl_only += 1
+        else:
+            status = _rec_status(variance)
+            if status == "MATCHED":
+                matched += 1
+            elif status == "MINOR VARIANCE":
+                minor += 1
+            else:
+                major += 1
+
+        rows.append(
+            {
+                "contract_id": cid,
+                "customer_name": (ifrs_row.customer_name if ifrs_row else "") or "",
+                "ifrs_revenue": round(ifrs_rev, 2),
+                "gl_revenue": round(gl_rev, 2),
+                "variance": variance,
+                "variance_pct": round((variance / ifrs_rev * 100) if ifrs_rev else 0, 2),
+                "status": status,
+            }
+        )
+
+    blackline_export = [
+        {
+            "Account": "Revenue",
+            "Description": f"{r['contract_id']} — {r['customer_name']}",
+            "Balance per IFRS": r["ifrs_revenue"],
+            "Balance per GL": r["gl_revenue"],
+            "Variance": r["variance"],
+            "Status": r["status"],
+            "Preparer": "IFRS AI",
+            "Date": body.period,
+        }
+        for r in rows
+    ]
+
+    return {
+        "period": body.period,
+        "summary": {
+            "total_contracts": len(rows),
+            "matched": matched,
+            "minor_variance": minor,
+            "major_variance": major,
+            "unmatched": unmatched,
+            "gl_only": gl_only,
+            "total_ifrs_revenue": round(total_ifrs, 2),
+            "total_gl_revenue": round(total_gl, 2),
+            "net_variance": round(total_gl - total_ifrs, 2),
+        },
+        "reconciliation": rows,
+        "blackline_export": blackline_export,
+    }
+
+
+@router.get("/period-export")
+async def period_export_csv(period: str = Query(..., description="YYYY-MM")):
+    import csv
+    import io
+
+    return {
+        "period": period,
+        "message": "POST /api/rev-rec/period-reconciliation with data, then use blackline_export from response",
     }

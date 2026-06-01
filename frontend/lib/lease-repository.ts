@@ -2,6 +2,11 @@
  * Lease Repository - localStorage management for IFRS 16 leases
  */
 
+import {
+  getDefaultIfrs16Currency,
+  migrateLeaseEntry,
+} from './ifrs16-currency';
+
 export interface LeaseRepositoryEntry {
   id: string;
   asset: string;
@@ -107,13 +112,95 @@ export interface LeaseRepositoryEntry {
 
 const STORAGE_KEY = 'lease_repository';
 
+function formatDisclosureAmount(amount: number, currency: string): string {
+  const ccy = String(currency || 'INR').toUpperCase();
+  const numeric = Number(amount) || 0;
+  if (ccy === 'INR') {
+    return `₹${numeric.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+  }
+  if (ccy === 'GBP') {
+    return `£${numeric.toLocaleString('en-GB', { maximumFractionDigits: 0 })}`;
+  }
+  if (ccy === 'AED') {
+    return `AED ${numeric.toLocaleString('en-GB', { maximumFractionDigits: 0 })}`;
+  }
+  return `${ccy} ${numeric.toLocaleString('en-GB', { maximumFractionDigits: 0 })}`;
+}
+
+function inferAssetType(entry: LeaseRepositoryEntry): string {
+  const text = String(entry.lease_type || entry.asset || entry.title || '').toLowerCase();
+  if (text.includes('office')) return 'office space';
+  if (text.includes('vehicle') || text.includes('car')) return 'vehicle asset';
+  if (text.includes('warehouse')) return 'warehouse facility';
+  if (text.includes('retail') || text.includes('store')) return 'retail premises';
+  return 'asset';
+}
+
+function inferOptionFlag(value: unknown): string {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (!text) return 'No';
+  if (text === 'none' || text === 'na' || text === 'n/a') return 'No';
+  return 'Yes';
+}
+
+function ensureDisclosureNotes(entry: LeaseRepositoryEntry): LeaseRepositoryEntry {
+  const currentResults = { ...((entry.results as Record<string, unknown>) || {}) };
+  const current = currentResults.disclosure_notes;
+  if (typeof current === 'string' && current.trim().length > 0) {
+    if (entry.disclosure_generated === true) return entry;
+    return { ...entry, disclosure_generated: true };
+  }
+
+  const currency = String(entry.currency || entry.payments?.currency || 'INR').toUpperCase();
+  const leaseTermMonths = Number(entry.dates?.term_months || 0);
+  const endDate = String(entry.end_date || entry.dates?.end || 'N/A');
+  const liability = Number(entry.liability ?? currentResults.lease_liability ?? 0);
+  const rou = Number(entry.rou ?? currentResults.rou_asset ?? 0);
+  const variableDetails = String(entry.variable_description || '').trim();
+  const variablePayments = variableDetails
+    ? variableDetails
+    : entry.variable_payments
+      ? 'Based on contractual variable terms'
+      : 'None';
+  const title = String(entry.title || entry.asset || entry.id || 'Lease');
+  const location = String(entry.location || entry.city || entry.country || 'N/A');
+  const note = [
+    `Lease: ${title}`,
+    `The Group leases ${inferAssetType(entry)} at ${location}.`,
+    `Lease term: ${leaseTermMonths} months ending ${endDate}.`,
+    `Lease liability at period end: ${formatDisclosureAmount(liability, currency)}.`,
+    `ROU asset at period end: ${formatDisclosureAmount(rou, currency)}.`,
+    `IBR applied: ${Number(entry.discount_rate || 0).toFixed(2)}%.`,
+    `Variable payments: ${variablePayments}.`,
+    `Extension options: ${inferOptionFlag(entry.renewal_options)}.`,
+    `Termination options: ${inferOptionFlag(entry.termination_clauses)}.`,
+  ].join('\n');
+
+  currentResults.disclosure_notes = note;
+  return {
+    ...entry,
+    results: currentResults,
+    disclosure_generated: true,
+  };
+}
+
 export function getLeaseRepository(): LeaseRepositoryEntry[] {
   if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    let changed = false;
+    const migrated = parsed.map((entry: LeaseRepositoryEntry) => {
+      const next = ensureDisclosureNotes(migrateLeaseEntry(entry));
+      if (JSON.stringify(next) !== JSON.stringify(entry)) changed = true;
+      return next;
+    });
+    if (changed) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+    }
+    return migrated;
   } catch {
     return [];
   }
@@ -121,11 +208,12 @@ export function getLeaseRepository(): LeaseRepositoryEntry[] {
 
 export function saveToLeaseRepository(entry: LeaseRepositoryEntry): void {
   const repo = getLeaseRepository();
+  const enrichedEntry = ensureDisclosureNotes(entry);
   const exists = repo.findIndex((e) => e.id === entry.id || e.lease_id === entry.lease_id);
   if (exists >= 0) {
-    repo[exists] = entry;
+    repo[exists] = enrichedEntry;
   } else {
-    repo.unshift(entry);
+    repo.unshift(enrichedEntry);
   }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(repo));
 }
@@ -179,8 +267,9 @@ export function buildLeaseEntry(params: {
     },
     payments: {
       monthly: params.monthly_payment,
-      currency: params.currency || 'INR',
+      currency: params.currency || getDefaultIfrs16Currency(),
     },
+    currency: params.currency || getDefaultIfrs16Currency(),
     liability: Number((params.results as any).lease_liability ?? 0),
     rou: Number((params.results as any).rou_asset ?? 0),
     results: params.results,
@@ -220,7 +309,7 @@ export function buildLeaseEntryFromForm(
     ? parseInt(String(form.lease_term_months), 10)
     : existing?.dates?.term_months || (start && end ? Math.ceil((new Date(end).getTime() - new Date(start).getTime()) / (1000 * 60 * 60 * 24 * 30)) : 12);
   const monthly = Number(form.baseRentAmount ?? form.monthly_payment ?? existing?.payments?.monthly ?? existing?.monthly_payment ?? 0);
-  const currency = form.currency || existing?.payments?.currency || 'INR';
+  const currency = form.currency || existing?.currency || existing?.payments?.currency || getDefaultIfrs16Currency();
   const res = results ?? existing?.results ?? {};
   const liability = Number((res as any).lease_liability ?? existing?.liability ?? 0);
   const rou = Number((res as any).rou_asset ?? existing?.rou ?? 0);
@@ -234,7 +323,8 @@ export function buildLeaseEntryFromForm(
       end: end || (() => { const d = new Date(start); d.setMonth(d.getMonth() + termMonths); return d.toISOString().split('T')[0]; })(),
       term_months: termMonths,
     },
-    payments: { monthly, currency: currency || 'INR' },
+    payments: { monthly, currency: currency || getDefaultIfrs16Currency() },
+    currency: currency || getDefaultIfrs16Currency(),
     liability,
     rou,
     results: res,
@@ -321,7 +411,10 @@ export function buildLeaseEntryFromForm(
         ? parseInt(String(form.cpiAdjustmentFrequencyMonths), 10)
         : existing?.cpi_adjustment_frequency_months,
     last_adjustment_date: form.lastAdjustmentDate ?? existing?.last_adjustment_date,
-    functional_currency: (form as any).functionalCurrency ?? existing?.functional_currency ?? 'INR',
+    functional_currency:
+      (form as any).functionalCurrency ??
+      existing?.functional_currency ??
+      (currency || getDefaultIfrs16Currency()),
     restoration_cost: (form as any).restorationCost != null && (form as any).restorationCost !== '' ? parseFloat(String((form as any).restorationCost)) : existing?.restoration_cost,
     contract_data:
       contractData != null && Object.keys(contractData).length > 0

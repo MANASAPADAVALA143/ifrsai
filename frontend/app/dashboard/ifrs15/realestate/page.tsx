@@ -11,9 +11,11 @@ import {
   saveRealEstateSyncPayload,
 } from '@/lib/realestate-ifrs15-mapper';
 import {
+  applyQuarterlyScheduleTotals,
   filterPeriodScheduleFromSpa,
   formatRealEstateMoney,
   disclosureScoreColor,
+  vatAlignmentFromPeriodSchedule,
   type DisplayCurrency,
   UAE_PEG,
 } from '@/lib/realestate-format';
@@ -618,15 +620,36 @@ export default function RealEstateIFRS15Page() {
     setReraEscrowViolation(null);
     const report = (data?.report as Record<string, unknown>) || {};
     setFullReport(report);
-    setOffPlanResult((report.off_plan as Record<string, unknown>) || null);
+    const offPlan = (report.off_plan as Record<string, unknown>) || {};
+    setOffPlanResult(offPlan);
     setEscrowResult((report.escrow as Record<string, unknown>) || null);
-    setVatResult((report.vat as Record<string, unknown>) || null);
-    setPeriodSchedule(
-      filterPeriodScheduleFromSpa(
-        (report.period_schedule as Record<string, unknown>[]) || [],
-        spaExecutionDate
-      )
+    const scheduleResult = applyQuarterlyScheduleTotals(
+      (report.period_schedule as Record<string, unknown>[]) || [],
+      {
+        spaExecutionDate,
+        revenueToDate: Number(offPlan.revenue_recognised_to_date) || 0,
+        revenuePrior: parseFloat(revenuePrior) || 0,
+        revenueCurrent: Number(offPlan.revenue_current_period) || 0,
+      }
     );
+    if (!scheduleResult.valid && scheduleResult.error) {
+      toast.error(scheduleResult.error);
+    }
+    setPeriodSchedule(scheduleResult.schedule);
+    const vatBase = (report.vat as Record<string, unknown>) || {};
+    const alignedVatRows = vatAlignmentFromPeriodSchedule(
+      scheduleResult.schedule,
+      displayCurrency
+    );
+    setVatResult({
+      ...vatBase,
+      alignment_table: alignedVatRows,
+      total_revenue: alignedVatRows.reduce(
+        (s, r) => s + (Number(r.revenue_recognised) || 0),
+        0
+      ),
+      total_vat: alignedVatRows.reduce((s, r) => s + (Number(r.vat_5pct) || 0), 0),
+    });
     setCostsResult((report.contract_costs as Record<string, unknown>) || null);
     setPaResult((report.principal_agent as Record<string, unknown>) || null);
     const dt = (report.deadline_tracker as Record<string, unknown>) || null;
@@ -669,6 +692,8 @@ export default function RealEstateIFRS15Page() {
         certOverrideManual,
         cancelResult,
         deadlineTracker: deadlineTrackerReport,
+        spaExecutionDate,
+        revenuePrior,
       },
       { reportingPeriod: period, reportDate: pdfReportDate, currency: displayCurrency }
     );
@@ -876,7 +901,13 @@ export default function RealEstateIFRS15Page() {
     }));
   }, [escrowResult]);
 
-  const vatRows = (vatResult?.alignment_table as Record<string, unknown>[]) || [];
+  const vatRows = useMemo(
+    () =>
+      periodSchedule.length
+        ? vatAlignmentFromPeriodSchedule(periodSchedule, displayCurrency)
+        : ((vatResult?.alignment_table as Record<string, unknown>[]) || []),
+    [periodSchedule, displayCurrency, vatResult]
+  );
   const scheduleChart = useMemo(
     () =>
       periodSchedule.map((p) => ({
@@ -987,12 +1018,17 @@ export default function RealEstateIFRS15Page() {
     }
     setSyncLoading(true);
     const escrowTotal = escrowReceipts.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
-    const scheduleForSync = filterPeriodScheduleFromSpa(
+    const scheduleForSync = applyQuarterlyScheduleTotals(
       ((fullReport?.period_schedule as Record<string, unknown>[])?.length
         ? (fullReport?.period_schedule as Record<string, unknown>[])
         : periodSchedule) || [],
-      spaExecutionDate
-    );
+      {
+        spaExecutionDate,
+        revenueToDate: Number(offPlanResult?.revenue_recognised_to_date) || 0,
+        revenuePrior: parseFloat(revenuePrior) || 0,
+        revenueCurrent: Number(offPlanResult?.revenue_current_period) || 0,
+      }
+    ).schedule;
     const localPayload = mapRealEstateToCalculatePayload({
       contractValue: parseFloat(contractValue) || 0,
       constructionStart,

@@ -52,6 +52,11 @@ class IFRS16ExcelExporter:
             top=Side(style='medium', color='000000'),
             bottom=Side(style='medium', color='000000')
         )
+
+    def _money_fmt(self, results: Dict[str, Any]) -> str:
+        return excel_money_number_format(
+            (results.get("disclosure_data") or {}).get("currency") or "INR"
+        )
     
     def _build_workbook(self, results: Dict[str, Any]) -> Workbook:
         results = normalize_results_for_excel_export(results)
@@ -95,7 +100,8 @@ class IFRS16ExcelExporter:
     
     def _create_summary_sheet(self, wb: Workbook, results: Dict):
         """Summary sheet with key metrics and overview"""
-        
+        money_fmt = self._money_fmt(results)
+
         ws = wb.create_sheet("Summary", 0)
         
         # Title
@@ -492,7 +498,8 @@ class IFRS16ExcelExporter:
     
     def _create_maturity_sheet(self, wb: Workbook, results: Dict):
         """Maturity analysis sheet with payment breakdown by year"""
-        
+        mf = self._money_fmt(results)
+
         ws = wb.create_sheet("Maturity Analysis")
         
         ws['A1'] = "LEASE PAYMENT MATURITY ANALYSIS"

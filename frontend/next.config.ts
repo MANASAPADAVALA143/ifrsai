@@ -13,6 +13,8 @@ const appDir = path.dirname(fileURLToPath(import.meta.url));
  */
 const nextConfig: NextConfig = {
   typescript: { ignoreBuildErrors: true },
+  /** Keep tracing rooted here even if a lockfile exists under the user profile (see turbopack comment). */
+  outputFileTracingRoot: appDir,
   turbopack: {
     root: appDir,
   },

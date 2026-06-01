@@ -141,8 +141,12 @@ class _NumberedCanvas(canvas.Canvas):
         self.line(MARGIN, 1.6 * cm, PAGE_W - MARGIN, 1.6 * cm)
         self.setFont("Helvetica", 7)
         self.setFillColor(GREY)
-        self.drawString(MARGIN, y, "FinReportAI — IFRS 15 Real Estate UAE")
-        self.drawCentredString(PAGE_W / 2, y, f"RERA Reg: {self._rera_number}")
+        self.drawString(MARGIN, y, "FinReportAI — IFRS 15 Real Estate UAE | ifrsai.vercel.app")
+        self.drawCentredString(
+            PAGE_W / 2,
+            y,
+            f"RERA: {self._rera_number} | FTA Law 8/2017 | UAE Law 8/2007",
+        )
         self.drawRightString(PAGE_W - MARGIN, y, f"Page {page_no} of {total}")
 
 
@@ -405,7 +409,7 @@ def _draw_schedule_and_journals(
     c.setFillColor(NAVY)
     c.setFont("Helvetica-Bold", 8)
     x = MARGIN
-    totals = ["TOTAL", "—", format_money(total_rev, cur), format_money(data.contract_price, cur), format_money(total_vat, cur), "—"]
+    totals = ["TOTAL", "—", format_money(total_rev, cur), format_money(data.revenue_recognised, cur), format_money(total_vat, cur), "—"]
     for cell, w in zip(totals, widths):
         c.drawString(x + 0.08 * cm, y - 0.32 * cm, str(cell)[:22])
         x += w

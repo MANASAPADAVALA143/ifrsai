@@ -1022,6 +1022,8 @@ class RealEstateContractInput(BaseModel):
     )
     rera_completion_date: Optional[str] = None
     spa_handover_date: Optional[str] = None
+    spa_execution_date: Optional[str] = None
+    contract_date: Optional[str] = None
 
     @field_validator("rera_registration_number")
     @classmethod

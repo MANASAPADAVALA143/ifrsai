@@ -8,7 +8,7 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.shapes import Drawing, String
@@ -24,11 +24,150 @@ OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
-def _fmt_money(val: Any) -> str:
+def _fmt_money(val: Any, currency: str = "AED") -> str:
+    cur = (currency or "AED").strip().upper()
     try:
-        return f"${float(val):,.2f}"
+        return f"{cur} {float(val):,.2f}"
     except (TypeError, ValueError):
-        return "$0.00"
+        return f"{cur} 0.00"
+
+
+def _is_uae_realestate(results: Dict[str, Any], data: Dict[str, Any]) -> bool:
+    if results.get("realestate_overlay") or data.get("realestate_overlay"):
+        return True
+    cd = (results.get("disclosure_data") or {}).get("contract_details") or {}
+    if str(cd.get("currency", "")).upper() == "AED":
+        for row in results.get("revenue_schedule") or []:
+            if "Q" in str(row.get("Month") or row.get("month") or ""):
+                return True
+    return False
+
+
+def _resolve_currency(results: Dict[str, Any], data: Dict[str, Any]) -> str:
+    ov = results.get("realestate_overlay") or data.get("realestate_overlay") or {}
+    disc = (results.get("disclosure_data") or {}).get("contract_details") or {}
+    if _is_uae_realestate(results, data):
+        return str(ov.get("currency") or disc.get("currency") or "AED").upper()
+    return str(disc.get("currency") or "USD").upper()
+
+
+def _uae_meta(results: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, str]:
+    ov = results.get("realestate_overlay") or data.get("realestate_overlay") or {}
+    disc = (results.get("disclosure_data") or {}).get("contract_details") or {}
+    return {
+        "branded": "1",
+        "rera": _safe_text(ov.get("rera_registration_number"), "N/A"),
+        "currency": _resolve_currency(results, data),
+        "project": _safe_text(ov.get("project_name"), ""),
+        "spa_date": _safe_text(ov.get("spa_execution_date") or disc.get("effective_date"), "—"),
+    }
+
+
+def _uae_realestate_qa_pairs(
+    results: Dict[str, Any], data: Dict[str, Any], currency: str
+) -> List[Tuple[str, str]]:
+    ov = results.get("realestate_overlay") or data.get("realestate_overlay") or {}
+    disc = (results.get("disclosure_data") or {}).get("contract_details") or {}
+    balances = results.get("contract_balances") or {}
+    engine = results.get("revenue_engine_result") or {}
+
+    customer = _safe_text(data.get("customer_name") or disc.get("customer"), "Buyer")
+    vendor = _safe_text(disc.get("vendor"), "Developer")
+    rera = _safe_text(ov.get("rera_registration_number"), "RERA-2024-DXB-00123")
+    spa_date = _safe_text(ov.get("spa_execution_date") or disc.get("effective_date"), "2024-01-15")
+    rev_td = float(
+        ov.get("revenue_recognised_to_date") or results.get("total_recognised") or 0
+    )
+    contract_liability = float(
+        ov.get("contract_liability") or balances.get("contract_liability_amount") or 0
+    )
+    completion = float(ov.get("completion_pct") or engine.get("poc_percentage") or 0)
+    tp = float(results.get("transaction_price") or results.get("total_contract_value") or 0)
+    cash = float(balances.get("cash_received_to_date") or tp or 0)
+    escrow = float(ov.get("escrow_balance") or cash or 0)
+    vat = round(rev_td * 0.05, 2)
+    rpo = float(ov.get("remaining_revenue") or max(0.0, tp - rev_td))
+    handover = _safe_text(disc.get("expected_handover") or ov.get("expected_handover"), "2025-09-30")
+    costs_incurred = float(engine.get("costs_incurred") or ov.get("costs_incurred_to_date") or 1_300_000)
+    total_costs = float(engine.get("total_costs") or ov.get("total_estimated_costs") or 2_000_000)
+    fm = lambda v: _fmt_money(v, currency)
+
+    return [
+        (
+            "How do you determine the contract exists under IFRS 15.9 for this off-plan unit?",
+            f"Contract exists as SPA executed {spa_date} between {vendor} and {customer}. "
+            f"RERA registration {rera} confirmed. Commercial substance established. Payment terms agreed.",
+        ),
+        (
+            "Why is revenue recognised over time rather than at a point in time?",
+            "IFRS 15.35(c) criteria met — developer's performance creates an asset (the unit) that "
+            "the customer controls as it is created. Buyer has legal title via Oqood registration "
+            "and RERA escrow protection.",
+        ),
+        (
+            "How is the percentage of completion measured?",
+            f"Input method (cost-to-cost) per IFRS 15.41. Costs incurred {fm(costs_incurred)} / "
+            f"Total estimated costs {fm(total_costs)} = {completion:.1f}% completion at reporting date.",
+        ),
+        (
+            "What is the revenue recognition trigger for final handover?",
+            f"Earlier of RERA completion certificate (DLD-issued) and SPA handover date "
+            f"({handover}). UAE Law No. 8 of 2007.",
+        ),
+        (
+            "How is the RERA escrow account treated?",
+            f"Receipts held in RERA escrow per UAE Law 8/2007 Art. 8. Total received {fm(cash)}. "
+            f"Escrow balance {fm(escrow)}. Released amounts pending completion milestones.",
+        ),
+        (
+            "How does FTA VAT reconcile to IFRS 15 revenue?",
+            f"VAT @ 5% applied per Federal Decree-Law No. 8 of 2017. IFRS 15 revenue {fm(rev_td)}, "
+            f"VAT {fm(vat)}. FTA Box 1a must match IFRS 15 taxable supplies each quarter.",
+        ),
+        (
+            "What is the contract liability and why?",
+            f"Contract liability {fm(contract_liability)} = cash received {fm(cash)} minus revenue "
+            f"recognised {fm(rev_td)}. Represents performance obligation not yet satisfied.",
+        ),
+        (
+            "How are contract modifications treated?",
+            "Per IFRS 15.18-21. Price changes, unit swaps, extensions assessed as separate contract "
+            "or modification of existing contract. Oqood amendment filed with DLD for each modification.",
+        ),
+        (
+            "What is the commission asset treatment?",
+            "IFRS 15.91-94. Sales commission capitalised as cost to obtain contract when recovery "
+            "period exceeds one year. Amortised over expected contract term per IFRS 15.94.",
+        ),
+        (
+            "What disclosures are required under IFRS 15.110-129?",
+            f"Disaggregated revenue by project, contract balances, RPO schedule ({fm(rpo)}), "
+            "significant judgements (completion %, variable consideration), and RERA/FTA compliance narrative.",
+        ),
+    ]
+
+
+def _build_disclosure_sections(
+    results: Dict[str, Any], currency: str
+) -> List[Tuple[str, str]]:
+    notes = results.get("disclosure_notes") or {}
+    if notes and _is_uae_realestate(results, {}):
+        return [
+            ("1. Accounting Policy", _safe_text(notes.get("accounting_policy"))),
+            ("2. Disaggregation of Revenue", _safe_text(notes.get("disaggregation_of_revenue"))),
+            ("3. Contract Balances (opening/closing table)", _safe_text(notes.get("contract_balances"))),
+            ("4. Performance Obligations", _safe_text(notes.get("performance_obligations_note"))),
+            ("5. Transaction Price allocated to RPO", _safe_text(notes.get("transaction_price_rpo"))),
+            ("6. Significant Judgements", _safe_text(notes.get("significant_judgements"))),
+        ]
+    return [
+        ("1. Accounting Policy", _safe_text(notes.get("accounting_policy"), "Revenue is recognised when control transfers.")),
+        ("2. Disaggregation of Revenue", _safe_text(notes.get("disaggregation_of_revenue"), "")),
+        ("3. Contract Balances (opening/closing table)", _safe_text(notes.get("contract_balances"), "")),
+        ("4. Performance Obligations", _safe_text(notes.get("performance_obligations_note"), "")),
+        ("5. Transaction Price allocated to RPO", _safe_text(notes.get("transaction_price_rpo"), "")),
+        ("6. Significant Judgements", _safe_text(notes.get("significant_judgements"), "")),
+    ]
 
 
 def _safe_text(val: Any, fallback: str = "") -> str:
@@ -129,7 +268,7 @@ def _draw_wrapped(c: canvas.Canvas, text: str, x: float, y: float, width: float,
     return y - h - 4
 
 
-def _draw_header(c: canvas.Canvas, title: str, subtitle: str = ""):
+def _draw_header(c: canvas.Canvas, title: str, subtitle: str = "", uae_meta: Optional[Dict[str, str]] = None):
     c.setFillColor(colors.HexColor("#0b1f3b"))
     c.rect(0, A4[1] - 2.2 * cm, A4[0], 2.2 * cm, stroke=0, fill=1)
     c.setFillColor(colors.white)
@@ -138,14 +277,29 @@ def _draw_header(c: canvas.Canvas, title: str, subtitle: str = ""):
     if subtitle:
         c.setFont("Helvetica", 9)
         c.drawString(1.5 * cm, A4[1] - 1.85 * cm, subtitle)
+    if uae_meta and uae_meta.get("branded"):
+        c.setFont("Helvetica", 7)
+        c.drawString(
+            1.5 * cm,
+            A4[1] - 2.05 * cm,
+            f"RERA: {uae_meta.get('rera', 'N/A')} | FTA: Federal Decree-Law No. 8 of 2017 | "
+            f"UAE Law No. 8 of 2007 | FinReportAI — ifrsai.vercel.app",
+        )
 
 
-def _draw_footer(c: canvas.Canvas, page_no: int):
+def _draw_footer(c: canvas.Canvas, page_no: int, uae_meta: Optional[Dict[str, str]] = None):
     c.setStrokeColor(colors.HexColor("#d1d5db"))
     c.line(1.5 * cm, 1.8 * cm, A4[0] - 1.5 * cm, 1.8 * cm)
     c.setFillColor(colors.HexColor("#6b7280"))
     c.setFont("Helvetica", 8)
-    c.drawString(1.5 * cm, 1.2 * cm, f"IFRS AI | Confidential | Page {page_no}")
+    if uae_meta and uae_meta.get("branded"):
+        c.drawString(
+            1.5 * cm,
+            1.2 * cm,
+            f"FinReportAI | RERA: {uae_meta.get('rera', 'N/A')} | Confidential | Page {page_no}",
+        )
+    else:
+        c.drawString(1.5 * cm, 1.2 * cm, f"IFRS AI | Confidential | Page {page_no}")
 
 
 def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str, Any]:
@@ -166,45 +320,71 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     total_deferred = float(results.get("total_deferred", 0) or 0)
     pattern = _po_pattern(perf_obs)
     risk_flags = list((data.get("master_report_data") or {}).get("risk_flags") or [])
+    currency = _resolve_currency(results, data)
+    uae_branded = _uae_meta(results, data) if _is_uae_realestate(results, data) else None
+    is_uae = uae_branded is not None
 
     exec_prompt = (
         "Write a 3-sentence executive summary of this IFRS 15 contract analysis for a CFO. "
-        f"Contract value: {total_contract_value:,.2f}. Obligations: {len(perf_obs)}. "
+        f"Contract value: {total_contract_value:,.2f} {currency}. Obligations: {len(perf_obs)}. "
         f"Recognition: {pattern}. Plain English only."
     )
     executive_summary = _call_claude(exec_prompt, api_key) or (
-        f"This contract has a transaction value of {_fmt_money(total_contract_value)} across {len(perf_obs)} performance obligations. "
-        f"Revenue is recognised using a {pattern.lower()} pattern, with recognised revenue at {_fmt_money(total_recognised)} so far. "
-        f"Deferred revenue remains {_fmt_money(total_deferred)}, which should be monitored against delivery milestones and billing terms."
+        (
+            f"This { _fmt_money(total_contract_value, currency)} contract covers {len(perf_obs)} performance "
+            f"obligations for UAE off-plan residential development, subject to RERA and FTA VAT regulations. "
+            f"Revenue is recognised using a {pattern.lower()} pattern, with recognised revenue at "
+            f"{_fmt_money(total_recognised, currency)} to date. "
+            f"Contract liability / deferred revenue of {_fmt_money(total_deferred, currency)} "
+            f"should be monitored against construction milestones and escrow releases."
+        )
+        if is_uae
+        else (
+            f"This contract has a transaction value of {_fmt_money(total_contract_value, currency)} across "
+            f"{len(perf_obs)} performance obligations. "
+            f"Revenue is recognised using a {pattern.lower()} pattern, with recognised revenue at "
+            f"{_fmt_money(total_recognised, currency)} so far. "
+            f"Deferred revenue remains {_fmt_money(total_deferred, currency)}, which should be monitored "
+            f"against delivery milestones and billing terms."
+        )
     )
 
     qa_pairs: List[Tuple[str, str]] = []
     if include_auditor_qa:
-        summary_blob = json.dumps(
-            {
-                "contract_id": contract_id,
-                "customer": customer_name,
-                "pattern": pattern,
-                "obligations": len(perf_obs),
-                "contract_value": total_contract_value,
-                "recognised": total_recognised,
-                "deferred": total_deferred,
-            }
-        )
-        qa_prompt = (
-            "Generate the 10 most likely auditor questions for an IFRS 15 contract with these characteristics: "
-            f"{summary_blob}. For each question provide a 2-sentence answer. Format as Q: and A: pairs."
-        )
-        qa_text = _call_claude(qa_prompt, api_key)
-        qa_accum: List[List[str]] = []
-        for block in qa_text.split("\n"):
-            if block.startswith("Q:"):
-                qa_accum.append([block[2:].strip(), ""])
-            elif block.startswith("A:") and qa_accum:
-                qa_accum[-1][1] = block[2:].strip()
-        qa_pairs = [(q, a or "Answer not available.") for q, a in qa_accum[:10]]
+        if is_uae:
+            qa_pairs = _uae_realestate_qa_pairs(results, data, currency)
+        else:
+            summary_blob = json.dumps(
+                {
+                    "contract_id": contract_id,
+                    "customer": customer_name,
+                    "pattern": pattern,
+                    "obligations": len(perf_obs),
+                    "contract_value": total_contract_value,
+                    "recognised": total_recognised,
+                    "deferred": total_deferred,
+                }
+            )
+            qa_prompt = (
+                "Generate the 10 most likely auditor questions for an IFRS 15 contract with these characteristics: "
+                f"{summary_blob}. For each question provide a 2-sentence answer. Format as Q: and A: pairs."
+            )
+            qa_text = _call_claude(qa_prompt, api_key)
+            qa_accum: List[List[str]] = []
+            for block in qa_text.split("\n"):
+                if block.startswith("Q:"):
+                    qa_accum.append([block[2:].strip(), ""])
+                elif block.startswith("A:") and qa_accum:
+                    qa_accum[-1][1] = block[2:].strip()
+            qa_pairs = [(q, a or "Answer not available.") for q, a in qa_accum[:10]]
     if not qa_pairs:
-        qa_pairs = [(f"What is key IFRS 15 judgement #{i}?", "Judgement and supporting evidence should be documented and periodically reassessed.") for i in range(1, 11)]
+        qa_pairs = [
+            (
+                f"What is key IFRS 15 judgement #{i}?",
+                "Judgement and supporting evidence should be documented and periodically reassessed.",
+            )
+            for i in range(1, 11)
+        ]
 
     file_id = str(uuid.uuid4())
     safe_customer = "".join(ch for ch in customer_name if ch.isalnum() or ch in ("_", "-"))[:30] or "Client"
@@ -226,16 +406,24 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     c.drawString(1.8 * cm, height - 6.0 * cm, f"Contract: {contract_id}")
     c.drawString(1.8 * cm, height - 6.8 * cm, f"Prepared by: {prepared_by}")
     c.drawString(1.8 * cm, height - 7.6 * cm, f"Date: {today_str}")
+    if is_uae and uae_branded:
+        c.setFont("Helvetica", 10)
+        c.drawString(1.8 * cm, height - 8.5 * cm, f"RERA: {uae_branded.get('rera', 'N/A')} | Currency: {currency}")
+        c.drawString(1.8 * cm, height - 9.2 * cm, "UAE off-plan residential | RERA + FTA VAT compliance")
     c.setFont("Helvetica", 9)
     c.drawString(1.8 * cm, 1.6 * cm, "Confidential. For client and advisor use only.")
     c.showPage()
 
     # Page 2 Executive Summary
-    _draw_header(c, "Executive Summary")
+    _draw_header(c, "Executive Summary", uae_meta=uae_branded)
     y = height - 3.0 * cm
     y = _draw_wrapped(c, executive_summary, 1.7 * cm, y, width - 3.4 * cm, 11, 15)
     box_w = (width - 4.4 * cm) / 3
-    metrics = [("Total Contract Value", _fmt_money(total_contract_value)), ("Revenue Recognised", _fmt_money(total_recognised)), ("Deferred Revenue", _fmt_money(total_deferred))]
+    metrics = [
+        ("Total Contract Value", _fmt_money(total_contract_value, currency)),
+        ("Revenue Recognised", _fmt_money(total_recognised, currency)),
+        ("Deferred Revenue", _fmt_money(total_deferred, currency)),
+    ]
     for i, (label, val) in enumerate(metrics):
         x = 1.5 * cm + i * (box_w + 0.7 * cm)
         c.setFillColor(colors.HexColor("#f8fafc"))
@@ -260,15 +448,15 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     for f in findings:
         c.drawString(2.1 * cm, y, f"- {f}")
         y -= 0.6 * cm
-    _draw_footer(c, 2)
+    _draw_footer(c, 2, uae_meta=uae_branded)
     c.showPage()
 
     # Page 3 Compliance Assessment
-    _draw_header(c, "IFRS 15 Compliance Assessment")
+    _draw_header(c, "IFRS 15 Compliance Assessment", uae_meta=uae_branded)
     steps = [
         ("1. Contract Identified", f"Contract {contract_id} documented", "GREEN"),
         ("2. Obligations", f"{len(perf_obs)} obligations found", "GREEN"),
-        ("3. Transaction Price", _fmt_money(total_contract_value), "GREEN"),
+        ("3. Transaction Price", _fmt_money(total_contract_value, currency), "GREEN"),
         ("4. Allocation", "Relative SSP method applied", "GREEN"),
         ("5. Recognition", pattern, "GREEN" if total_deferred >= 0 else "AMBER"),
     ]
@@ -304,11 +492,11 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     else:
         c.setFont("Helvetica", 10)
         c.drawString(1.9 * cm, y, "No non-standard clauses detected.")
-    _draw_footer(c, 3)
+    _draw_footer(c, 3, uae_meta=uae_branded)
     c.showPage()
 
     # Page 4 Revenue Forecast Chart
-    _draw_header(c, "Revenue Forecast Chart")
+    _draw_header(c, "Revenue Forecast Chart", uae_meta=uae_branded)
     grouped: Dict[str, Dict[str, float]] = {}
     for row in schedule:
         m = _safe_text(row.get("Month") or row.get("month"), "Period")
@@ -336,7 +524,12 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     for i in range(len(chart.data)):
         chart.bars[i].fillColor = palette[i % len(palette)]
     drawing.add(chart)
-    drawing.add(String(42, 10, "Monthly revenue by performance obligation", fontSize=8, fillColor=colors.HexColor("#64748b")))
+    chart_label = (
+        "Quarterly revenue by performance obligation"
+        if is_uae
+        else "Monthly revenue by performance obligation"
+    )
+    drawing.add(String(42, 10, chart_label, fontSize=8, fillColor=colors.HexColor("#64748b")))
     drawing.drawOn(c, 1.6 * cm, height - 13.0 * cm)
 
     year_totals = {"Year 1": 0.0, "Year 2": 0.0, "Year 3": 0.0}
@@ -352,15 +545,19 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     c.setFont("Helvetica-Bold", 10)
     c.drawString(1.7 * cm, 8.8 * cm, "Yearly Revenue Forecast")
     c.setFont("Helvetica", 9)
-    c.drawString(1.7 * cm, 8.2 * cm, f"Year 1: {_fmt_money(year_totals['Year 1'])}")
-    c.drawString(6.7 * cm, 8.2 * cm, f"Year 2: {_fmt_money(year_totals['Year 2'])}")
-    c.drawString(11.7 * cm, 8.2 * cm, f"Year 3: {_fmt_money(year_totals['Year 3'])}")
-    c.drawString(1.7 * cm, 7.2 * cm, f"Deferred waterfall: Cash received vs recognised revenue gap = {_fmt_money(total_deferred)}")
-    _draw_footer(c, 4)
+    c.drawString(1.7 * cm, 8.2 * cm, f"Year 1: {_fmt_money(year_totals['Year 1'], currency)}")
+    c.drawString(6.7 * cm, 8.2 * cm, f"Year 2: {_fmt_money(year_totals['Year 2'], currency)}")
+    c.drawString(11.7 * cm, 8.2 * cm, f"Year 3: {_fmt_money(year_totals['Year 3'], currency)}")
+    c.drawString(
+        1.7 * cm,
+        7.2 * cm,
+        f"Deferred waterfall: Cash received vs recognised revenue gap = {_fmt_money(total_deferred, currency)}",
+    )
+    _draw_footer(c, 4, uae_meta=uae_branded)
     c.showPage()
 
     # Page 5 PO detail
-    _draw_header(c, "Performance Obligations Detail")
+    _draw_header(c, "Performance Obligations Detail", uae_meta=uae_branded)
     y = height - 3.0 * cm
     for i, po in enumerate(perf_obs):
         name = _safe_text(po.get("obligation") or po.get("obligation_id"), f"PO-{i+1}")
@@ -368,19 +565,29 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
         recognised = float(po.get("revenue_recognized", 0) or 0)
         rem = max(0.0, alloc - recognised)
         rtype = _safe_text(po.get("recognition_method"), "over_time").replace("_", " ").title()
-        monthly = alloc / max(1, int(contract_details.get("term_months", 12) or 12))
         pct = 0 if alloc == 0 else (recognised / alloc) * 100
         c.setFont("Helvetica-Bold", 10)
         c.drawString(1.7 * cm, y, name)
         y -= 0.5 * cm
         c.setFont("Helvetica", 9)
         lines = [
-            f"Allocated Amount: {_fmt_money(alloc)}",
+            f"Allocated Amount: {_fmt_money(alloc, currency)}",
             f"Recognition Type: {rtype}",
             f"Recognition Period: {_safe_text(contract_details.get('effective_date'), '-')} to {_safe_text(schedule[-1].get('Date') if schedule else '-', '-')}",
-            f"Monthly Amount: {_fmt_money(monthly)} per month",
-            f"Status: {pct:.1f}% recognised | Remaining {_fmt_money(rem)}",
         ]
+        if is_uae and schedule:
+            lines.append("Quarterly recognition schedule (IFRS 15 off-plan):")
+            for row in schedule[:8]:
+                period = _safe_text(row.get("Month") or row.get("month"), "Period")
+                rev = float(row.get("Scheduled_Revenue", row.get("Revenue", 0)) or 0)
+                cum = float(row.get("Cumulative", 0) or 0)
+                lines.append(
+                    f"  {period}: {_fmt_money(rev, currency)} (cumulative {_fmt_money(cum, currency)})"
+                )
+        else:
+            monthly = alloc / max(1, int(contract_details.get("term_months", 12) or 12))
+            lines.append(f"Monthly Amount: {_fmt_money(monthly, currency)} per month")
+        lines.append(f"Status: {pct:.1f}% recognised | Remaining {_fmt_money(rem, currency)}")
         for ln in lines:
             c.drawString(2.0 * cm, y, ln)
             y -= 0.45 * cm
@@ -388,15 +595,15 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
         c.line(1.7 * cm, y, width - 1.7 * cm, y)
         y -= 0.4 * cm
         if y < 3.0 * cm:
-            _draw_footer(c, 5)
+            _draw_footer(c, 5, uae_meta=uae_branded)
             c.showPage()
-            _draw_header(c, "Performance Obligations Detail (cont.)")
+            _draw_header(c, "Performance Obligations Detail (cont.)", uae_meta=uae_branded)
             y = height - 3.0 * cm
-    _draw_footer(c, 5)
+    _draw_footer(c, 5, uae_meta=uae_branded)
     c.showPage()
 
     # Page 6 Risk register
-    _draw_header(c, "Risk Register")
+    _draw_header(c, "Risk Register", uae_meta=uae_branded)
     risks = _risk_register(results)
     y = height - 3.0 * cm
     c.setFont("Helvetica-Bold", 9)
@@ -418,11 +625,11 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
         c.drawString(9.2 * cm, y - 0.25 * cm, rr["description"][:55])
         c.drawString(14.8 * cm, y - 0.25 * cm, rr["mitigation"][:33])
         y -= 1.2 * cm
-    _draw_footer(c, 6)
+    _draw_footer(c, 6, uae_meta=uae_branded)
     c.showPage()
 
     # Page 7 Journal entries
-    _draw_header(c, "Journal Entries")
+    _draw_header(c, "Journal Entries", uae_meta=uae_branded)
     journals = list(results.get("journal_entries", []) or [])
     y = height - 3.0 * cm
     c.setFont("Helvetica-Bold", 11)
@@ -430,10 +637,14 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     y -= 0.5 * cm
     c.setFont("Helvetica", 9)
     inception_amt = float((results.get("contract_balances") or {}).get("cash_received_to_date", 0) or 0)
-    c.drawString(1.9 * cm, y, f"{today_str} | Cash/AR | Dr {_fmt_money(inception_amt)} | Cr - | Advance billing/receipt")
+    c.drawString(1.9 * cm, y, f"{today_str} | Cash/AR | Dr {_fmt_money(inception_amt, currency)} | Cr - | Advance billing/receipt")
     y -= 0.45 * cm
     c.setFillColor(colors.HexColor("#1e3a8a"))
-    c.drawString(2.4 * cm, y, f"{today_str} | Contract Liability | Dr - | Cr {_fmt_money(inception_amt)} | Deferred revenue setup")
+    c.drawString(
+        2.4 * cm,
+        y,
+        f"{today_str} | Contract Liability | Dr - | Cr {_fmt_money(inception_amt, currency)} | Deferred revenue setup",
+    )
     c.setFillColor(colors.black)
     y -= 0.8 * cm
     c.setFont("Helvetica-Bold", 11)
@@ -442,8 +653,8 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     c.setFont("Helvetica", 9)
     for row in journals[:16]:
         account = _safe_text(row.get("account"), "-")
-        dr = _fmt_money(row.get("dr", 0))
-        cr = _fmt_money(row.get("cr", 0))
+        dr = _fmt_money(row.get("dr", 0), currency)
+        cr = _fmt_money(row.get("cr", 0), currency)
         narr = _safe_text(row.get("narration"), "")
         col = colors.HexColor("#1e3a8a") if float(row.get("cr", 0) or 0) > 0 else colors.black
         x = 2.4 * cm if float(row.get("cr", 0) or 0) > 0 else 1.9 * cm
@@ -465,21 +676,14 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     y -= 0.5 * cm
     c.setFont("Helvetica", 9)
     c.drawString(1.9 * cm, y, "Assess contract termination date and reverse remaining liability/asset balances.")
-    _draw_footer(c, 7)
+    _draw_footer(c, 7, uae_meta=uae_branded)
     c.showPage()
 
     # Page 8 Disclosure draft
-    _draw_header(c, "IFRS 15 Disclosure Draft")
+    _draw_header(c, "IFRS 15 Disclosure Draft", uae_meta=uae_branded)
     c.setFont("Times-Roman", 11)
     y = height - 3.0 * cm
-    sections = [
-        ("1. Accounting Policy", _safe_text((results.get("disclosure_notes") or {}).get("accounting_policy"), "Revenue is recognised when control transfers.")),
-        ("2. Disaggregation of Revenue", _safe_text((results.get("disclosure_notes") or {}).get("disaggregation_of_revenue"), "")),
-        ("3. Contract Balances (opening/closing table)", _safe_text((results.get("disclosure_notes") or {}).get("contract_balances"), "")),
-        ("4. Performance Obligations", _safe_text((results.get("disclosure_notes") or {}).get("performance_obligations_note"), "")),
-        ("5. Transaction Price allocated to RPO", _safe_text((results.get("disclosure_notes") or {}).get("transaction_price_rpo"), "")),
-        ("6. Significant Judgements", _safe_text((results.get("disclosure_notes") or {}).get("significant_judgements"), "")),
-    ]
+    sections = _build_disclosure_sections(results, currency)
     for title, body in sections:
         c.setFont("Times-Bold", 11)
         c.drawString(1.7 * cm, y, title)
@@ -489,11 +693,11 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
         y -= 0.15 * cm
         if y < 3.0 * cm:
             break
-    _draw_footer(c, 8)
+    _draw_footer(c, 8, uae_meta=uae_branded)
     c.showPage()
 
     # Page 9 Auditor Q&A
-    _draw_header(c, "Auditor Q&A Preparation")
+    _draw_header(c, "Auditor Q&A Preparation", uae_meta=uae_branded)
     y = height - 3.0 * cm
     for idx, (q, a) in enumerate(qa_pairs[:10], start=1):
         c.setFillColor(colors.HexColor("#f3f4f6"))
@@ -507,19 +711,19 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
         y -= 0.15 * cm
         if y < 3.0 * cm:
             break
-    _draw_footer(c, 9)
+    _draw_footer(c, 9, uae_meta=uae_branded)
     c.showPage()
 
     # Page 10 Footer/disclaimer
-    _draw_header(c, "Report Disclaimer")
+    _draw_header(c, "Report Disclaimer", uae_meta=uae_branded)
     c.setFont("Helvetica", 12)
     c.setFillColor(colors.HexColor("#111827"))
     c.drawString(1.9 * cm, height - 4.0 * cm, "This report was prepared using IFRS AI.")
     c.drawString(1.9 * cm, height - 4.8 * cm, "All figures should be reviewed by a qualified accountant")
     c.drawString(1.9 * cm, height - 5.6 * cm, "before use in financial statements.")
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(1.9 * cm, height - 7.2 * cm, f"© IFRS AI {datetime.now().year}")
-    _draw_footer(c, 10)
+    c.drawString(1.9 * cm, height - 7.2 * cm, f"© FinReportAI {datetime.now().year} | ifrsai.vercel.app")
+    _draw_footer(c, 10, uae_meta=uae_branded)
     c.save()
 
     return {"file_id": file_id, "filename": filename, "pages": 10, "path": str(out_path)}

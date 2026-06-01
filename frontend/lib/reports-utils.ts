@@ -3,7 +3,7 @@
  */
 
 import { getLeaseRepository, type LeaseRepositoryEntry } from './lease-repository';
-import { formatIndianCurrency } from './utils';
+import { formatLeaseMoney, getDefaultIfrs16Currency, resolveLeaseCurrency } from './ifrs16-currency';
 
 export { getLeaseRepository, getLeaseById } from './lease-repository';
 export type { LeaseRepositoryEntry } from './lease-repository';
@@ -72,19 +72,16 @@ export function getMonthlyDepreciation(lease: LeaseRepositoryEntry): number {
   return term > 0 ? rou / term : 0;
 }
 
-export function formatReportCurrency(amount: number, currency: string = 'INR'): string {
-  const formatter = new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: currency || 'INR',
-    maximumFractionDigits: 0,
-  });
-  return formatter.format(amount);
+export function formatReportCurrency(amount: number, currency?: string): string {
+  return formatLeaseMoney(amount, currency ?? getDefaultIfrs16Currency(), 0);
 }
 
-export function formatNeg(amount: number, currency: string = 'INR'): string {
+export function formatNeg(amount: number, currency?: string): string {
   if (amount < 0) return `(${formatReportCurrency(-amount, currency)})`;
   return formatReportCurrency(amount, currency);
 }
+
+export { resolveLeaseCurrency, formatLeaseMoney, getDefaultIfrs16Currency };
 
 /** Unique values for filters */
 export function getUniqueLessees(leases: LeaseRepositoryEntry[]): string[] {

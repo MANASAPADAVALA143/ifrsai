@@ -110,7 +110,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       </main>
 
       {/* Chat Widget */}
-      <ChatWidget />
+      <ChatWidget defaultLeaseSearch={false} />
     </div>
   );
 }

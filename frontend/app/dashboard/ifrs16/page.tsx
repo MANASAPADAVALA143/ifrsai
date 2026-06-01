@@ -5,8 +5,16 @@ import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { Plus, Upload, FileBarChart, Eye, Calculator, Download, Building2, Car, Warehouse, Landmark, Store, Sparkles, Loader2, X } from 'lucide-react';
 import { getLeaseRepository } from '@/lib/lease-repository';
-import { formatIndianCurrency } from '@/lib/utils';
+import {
+  formatLeaseMoney,
+  getDefaultIfrs16Currency,
+  getIfrs16MarketMode,
+  resolveLeaseCurrency,
+  setIfrs16MarketMode,
+  type Ifrs16MarketMode,
+} from '@/lib/ifrs16-currency';
 import { ifrs16Api } from '@/lib/api';
+import { IFRS16OverviewTools } from '@/components/ifrs16/IFRS16OverviewTools';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
 import {
@@ -119,6 +127,11 @@ function categoryBadgeClass(category: string) {
 
 export default function IFRS16DashboardPage() {
   const [leases, setLeases] = useState<any[]>([]);
+  const [marketMode, setMarketModeState] = useState<Ifrs16MarketMode>(() =>
+    typeof window !== 'undefined' ? getIfrs16MarketMode() : 'AE'
+  );
+  const portfolioCurrency = marketMode === 'IN' ? 'INR' : 'AED';
+  const fmtPortfolio = (amount: number) => formatLeaseMoney(amount, portfolioCurrency);
   const [cfoInsightsOpen, setCfoInsightsOpen] = useState(false);
   const [cfoInsightsLoading, setCfoInsightsLoading] = useState(false);
   const [cfoInsightsResult, setCfoInsightsResult] = useState<CfoInsightsResult | null>(null);
@@ -134,6 +147,15 @@ export default function IFRS16DashboardPage() {
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  useEffect(() => {
+    const onMode = () => {
+      setMarketModeState(getIfrs16MarketMode());
+      load();
+    };
+    window.addEventListener('ifrs16-market-mode-changed', onMode);
+    return () => window.removeEventListener('ifrs16-market-mode-changed', onMode);
   }, [load]);
 
   const today = new Date();
@@ -310,6 +332,42 @@ export default function IFRS16DashboardPage() {
   const cfoHealthColors = healthScoreColor(cfoHealthScore);
   const expiringSoonRows = (cfoMetrics.expiring_soon as Array<Record<string, unknown>>) || [];
   const topLeaseRows = (cfoMetrics.top_leases_by_liability as Array<Record<string, unknown>>) || [];
+  const totalLiabilityForInsights = Number(cfoMetrics.total_liability) || totalLeaseLiability || 0;
+  const weightedIbrAcrossPortfolio = (() => {
+    if (leases.length === 0) return 0;
+    const weighted = leases.reduce((sum, lease) => {
+      const liability = Number(lease.liability ?? lease.results?.lease_liability ?? 0);
+      const rawRate = Number(lease.discount_rate ?? lease.results?.annual_discount_rate ?? 0);
+      const pctRate = rawRate <= 1 ? rawRate * 100 : rawRate;
+      return sum + liability * pctRate;
+    }, 0);
+    return totalLiabilityForInsights > 0 ? weighted / totalLiabilityForInsights : 0;
+  })();
+  const largestLease = topLeaseRows[0];
+  const largestLeaseLiability = Number(largestLease?.liability) || 0;
+  const largestLeasePortfolioPct =
+    totalLiabilityForInsights > 0 ? (largestLeaseLiability / totalLiabilityForInsights) * 100 : 0;
+  const expiringNext12MonthsCount = Number(cfoMetrics.expiring_12_months) || expiring365.length;
+  const highestCostLease = [...leases].sort(
+    (a, b) =>
+      Number(b.monthly_payment ?? b.payments?.monthly ?? 0) -
+      Number(a.monthly_payment ?? a.payments?.monthly ?? 0)
+  )[0];
+  const leaseVsBuyRecommendation = highestCostLease
+    ? (() => {
+        const monthly = Number(highestCostLease.monthly_payment ?? highestCostLease.payments?.monthly ?? 0);
+        const annual = monthly * 12;
+        const years = Math.max(
+          1,
+          Math.round(Number(highestCostLease.dates?.term_months ?? 12) / 12)
+        );
+        return `Highest-cost lease "${highestCostLease.title || highestCostLease.asset || highestCostLease.id}" runs about ${fmtPortfolio(annual)} per year. Run a lease-vs-buy NPV comparison over ${years} year(s); for long-use strategic assets, buying may reduce total cost if financing rates are below current IBR.`;
+      })()
+    : 'No lease-vs-buy recommendation available until at least one lease is present.';
+  const debtCovenantImpact =
+    Number(cfoMetrics.leverage_ratio_pct) > 20
+      ? `Lease liability is ${Number(cfoMetrics.leverage_ratio_pct).toFixed(1)}% of total assets, which may pressure leverage covenants depending on lender thresholds.`
+      : `Current leverage impact is moderate at ${Number(cfoMetrics.leverage_ratio_pct || 0).toFixed(1)}% of assets; monitor covenant headroom as new leases are added.`;
 
   return (
     <SidebarLayout
@@ -317,6 +375,33 @@ export default function IFRS16DashboardPage() {
       pageSubtitle="Lease portfolio KPIs and analytics"
     >
       <div className="space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-white rounded-xl border border-[#e2e8f0] px-4 py-3">
+          <div>
+            <p className="text-sm font-semibold text-[#1e293b]">Market mode</p>
+            <p className="text-xs text-[#64748b]">Default currency for new leases and portfolio totals</p>
+          </div>
+          <div className="inline-flex rounded-lg border border-[#e2e8f0] p-1 bg-[#f8fafc]">
+            {(['AE', 'IN'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => {
+                  setIfrs16MarketMode(mode);
+                  setMarketModeState(mode);
+                  load();
+                }}
+                className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                  marketMode === mode
+                    ? 'bg-[#f97316] text-white shadow-sm'
+                    : 'text-[#64748b] hover:text-[#1e293b]'
+                }`}
+              >
+                {mode === 'AE' ? 'UAE (AED)' : 'India (INR)'}
+              </button>
+            ))}
+          </div>
+        </div>
+        <IFRS16OverviewTools />
         {/* Quick Actions */}
         <div className="flex flex-wrap gap-3">
           <Link href="/dashboard/ifrs16/leases/new">
@@ -356,15 +441,15 @@ export default function IFRS16DashboardPage() {
           </div>
           <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
             <p className="text-xs font-medium text-[#64748b] mb-1">Total Contracted Value</p>
-            <p className="text-xl font-bold text-[#1e293b] font-mono">{formatIndianCurrency(totalContractedValue)}</p>
+            <p className="text-xl font-bold text-[#1e293b] font-mono">{fmtPortfolio(totalContractedValue)}</p>
           </div>
           <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
             <p className="text-xs font-medium text-[#64748b] mb-1">Average Lease Value</p>
-            <p className="text-xl font-bold text-[#1e293b] font-mono">{formatIndianCurrency(averageLeaseValue)}</p>
+            <p className="text-xl font-bold text-[#1e293b] font-mono">{fmtPortfolio(averageLeaseValue)}</p>
           </div>
           <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
             <p className="text-xs font-medium text-[#64748b] mb-1">Total Lease Liability</p>
-            <p className="text-xl font-bold text-[#f97316] font-mono">{formatIndianCurrency(totalLeaseLiability)}</p>
+            <p className="text-xl font-bold text-[#f97316] font-mono">{fmtPortfolio(totalLeaseLiability)}</p>
           </div>
           <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
             <p className="text-xs font-medium text-[#64748b] mb-1">Leases Expiring</p>
@@ -392,7 +477,7 @@ export default function IFRS16DashboardPage() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="month" tick={{ fontSize: 11 }} stroke="#64748b" />
                 <YAxis tick={{ fontSize: 11 }} stroke="#64748b" tickFormatter={(v) => `${(v / 1e6).toFixed(1)}M`} />
-                <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? [formatIndianCurrency(Number(value)), 'Liability'] : '')} />
+                <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? [fmtPortfolio(Number(value)), 'Liability'] : '')} />
                 <Area type="monotone" dataKey="liability" stroke="#f97316" fill="url(#liabilityGrad)" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
@@ -428,7 +513,7 @@ export default function IFRS16DashboardPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
               <XAxis dataKey="month" tick={{ fontSize: 11 }} stroke="#64748b" />
               <YAxis tick={{ fontSize: 11 }} stroke="#64748b" tickFormatter={(v) => `${(v / 1e5).toFixed(1)}L`} />
-              <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? [formatIndianCurrency(Number(value)), 'Payment'] : '')} />
+              <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? [fmtPortfolio(Number(value)), 'Payment'] : '')} />
               <Bar dataKey="payment" fill="#f97316" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -493,8 +578,8 @@ export default function IFRS16DashboardPage() {
                         </td>
                         <td className="py-3 px-4 text-[#64748b]">{l.start_date || l.dates?.commencement || '—'}</td>
                         <td className="py-3 px-4 text-[#64748b]">{l.end_date || l.dates?.end || '—'}</td>
-                        <td className="py-3 px-4 text-right font-mono text-[#1e293b]">{formatIndianCurrency(l.monthly_payment ?? l.payments?.monthly ?? 0)}</td>
-                        <td className="py-3 px-4 text-right font-mono text-[#1e293b]">{formatIndianCurrency(l.liability ?? 0)}</td>
+                        <td className="py-3 px-4 text-right font-mono text-[#1e293b]">{formatLeaseMoney(l.monthly_payment ?? l.payments?.monthly ?? 0, resolveLeaseCurrency(l))}</td>
+                        <td className="py-3 px-4 text-right font-mono text-[#1e293b]">{formatLeaseMoney(l.liability ?? 0, resolveLeaseCurrency(l))}</td>
                         <td className="py-3 px-4 text-center">
                           <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${status.className}`}>
                             {status.label}
@@ -650,8 +735,8 @@ export default function IFRS16DashboardPage() {
 
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                     {[
-                      { label: 'Total Liability', value: formatIndianCurrency(Number(cfoMetrics.total_liability) || 0) },
-                      { label: 'Annual Payments', value: formatIndianCurrency(Number(cfoMetrics.total_annual_payments) || 0) },
+                      { label: 'Total Liability', value: fmtPortfolio(Number(cfoMetrics.total_liability) || 0) },
+                      { label: 'Annual Payments', value: fmtPortfolio(Number(cfoMetrics.total_annual_payments) || 0) },
                       { label: 'Active Leases', value: String(cfoMetrics.active_lease_count ?? 0) },
                       {
                         label: 'Expiring (90 days)',
@@ -665,7 +750,7 @@ export default function IFRS16DashboardPage() {
                       },
                       {
                         label: 'Budget Variance',
-                        value: formatIndianCurrency(Number(cfoMetrics.budget_variance) || 0),
+                        value: fmtPortfolio(Number(cfoMetrics.budget_variance) || 0),
                         alert: Number(cfoMetrics.budget_variance) > 0,
                       },
                     ].map((card) => (
@@ -679,6 +764,25 @@ export default function IFRS16DashboardPage() {
                         </p>
                       </div>
                     ))}
+                  </div>
+
+                  <div className="rounded-xl border border-[#e2e8f0] bg-white p-4 space-y-2">
+                    <h4 className="text-sm font-bold text-[#1e293b]">CFO Focus Analytics</h4>
+                    <p className="text-sm text-[#475569]">
+                      Weighted average IBR across portfolio: <span className="font-semibold text-[#1e293b]">{weightedIbrAcrossPortfolio.toFixed(2)}%</span>
+                    </p>
+                    <p className="text-sm text-[#475569]">
+                      Largest lease as % of total liability: <span className="font-semibold text-[#1e293b]">{largestLeasePortfolioPct.toFixed(2)}%</span>
+                    </p>
+                    <p className="text-sm text-[#475569]">
+                      Leases expiring in next 12 months: <span className="font-semibold text-[#1e293b]">{expiringNext12MonthsCount}</span>
+                    </p>
+                    <p className="text-sm text-[#475569]">
+                      <span className="font-semibold text-[#1e293b]">Lease vs buy:</span> {leaseVsBuyRecommendation}
+                    </p>
+                    <p className="text-sm text-[#475569]">
+                      <span className="font-semibold text-[#1e293b]">Debt covenant impact:</span> {debtCovenantImpact}
+                    </p>
                   </div>
 
                   <div className="space-y-4">
@@ -729,7 +833,7 @@ export default function IFRS16DashboardPage() {
                               <td className="py-2 px-4">{String(row.title)}</td>
                               <td className="py-2 px-4">{String(row.end_date)}</td>
                               <td className="py-2 px-4 text-right font-mono">
-                                {formatIndianCurrency(Number(row.monthly_payment) || 0)}
+                                {fmtPortfolio(Number(row.monthly_payment) || 0)}
                               </td>
                             </tr>
                           ))}
@@ -757,10 +861,10 @@ export default function IFRS16DashboardPage() {
                             <tr key={i} className="border-t border-[#e2e8f0]">
                               <td className="py-2 px-4">{String(row.title)}</td>
                               <td className="py-2 px-4 text-right font-mono">
-                                {formatIndianCurrency(Number(row.liability) || 0)}
+                                {fmtPortfolio(Number(row.liability) || 0)}
                               </td>
                               <td className="py-2 px-4 text-right font-mono">
-                                {formatIndianCurrency(Number(row.monthly_payment) || 0)}
+                                {fmtPortfolio(Number(row.monthly_payment) || 0)}
                               </td>
                               <td className="py-2 px-4">{String(row.end_date)}</td>
                             </tr>

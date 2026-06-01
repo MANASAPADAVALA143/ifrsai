@@ -738,7 +738,7 @@ export default function IFRS15Page() {
   const [isClientReportModalOpen, setIsClientReportModalOpen] = useState(false);
   const [isGeneratingClientReport, setIsGeneratingClientReport] = useState(false);
   const [clientReportPreparedFor, setClientReportPreparedFor] = useState('');
-  const [clientReportPreparedBy, setClientReportPreparedBy] = useState('IFRS AI');
+  const [clientReportPreparedBy, setClientReportPreparedBy] = useState('FinReportAI — ifrsai.vercel.app');
   const [clientReportIncludeQa, setClientReportIncludeQa] = useState(true);
   const [clauseDetection, setClauseDetection] = useState<Record<string, unknown> | null>(null);
   const [clauseAcknowledged, setClauseAcknowledged] = useState<Record<number, boolean>>({});
