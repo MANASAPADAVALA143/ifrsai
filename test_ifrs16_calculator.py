@@ -38,6 +38,35 @@ class IFRS16CalculatorTests(unittest.TestCase):
         self.assertEqual(initial_je["entries"][2]["account"], "Cash/Bank")
         self.assertEqual(initial_je["entries"][2]["cr"], 25000)
 
+    def test_re_uk_001_rent_free_and_non_lease(self):
+        """RE-UK-001: 3 months rent-free, 95k non-lease on 850k gross, 120 months @ 5.5%."""
+        lease = LeaseInput(
+            lease_id="RE-UK-001",
+            asset_description="Manchester Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=120,
+            monthly_payment=Decimal("850000"),
+            non_lease_component=Decimal("95000"),
+            annual_discount_rate=Decimal("0.055"),
+            initial_direct_costs=Decimal("250000"),
+            legal_fees=Decimal("120000"),
+            brokerage_fees=Decimal("80000"),
+            other_initial_direct_costs=Decimal("50000"),
+            rent_free_months=3,
+            currency="GBP",
+        )
+        results = IFRS16Calculator().calculate_full_ifrs16(lease)
+        schedule = results["amortization_schedule"]
+
+        self.assertEqual(schedule.iloc[0]["Payment"], 0)
+        self.assertEqual(schedule.iloc[1]["Payment"], 0)
+        self.assertEqual(schedule.iloc[2]["Payment"], 0)
+        self.assertEqual(schedule.iloc[3]["Payment"], 755000)
+        self.assertAlmostEqual(results["lease_liability"], 67324009.44, places=2)
+        self.assertAlmostEqual(schedule.iloc[0]["Interest"], 308568.38, places=2)
+        self.assertTrue(schedule.iloc[0]["Rent_Free"])
+        self.assertEqual(results["component_analysis"]["lease_component"], 755000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

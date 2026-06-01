@@ -34,6 +34,7 @@ import { useAuth } from '@/hooks/useAuth';
 import {
   getLeaseById,
   saveToLeaseRepository,
+  scheduleMismatchStoredInputs,
   deleteLeaseFromRepository,
   buildLeaseEntryFromForm,
 } from '@/lib/lease-repository';
@@ -448,6 +449,47 @@ const SAMPLE_LEASES = {
       city: 'Hyderabad',
     },
   },
+  reuk: {
+    label: '🇬🇧 RE-UK-001 Manchester (Rent-free + Non-lease)',
+    data: {
+      title: 'Manchester Office — Spinningfields',
+      assetDescription: 'Manchester Office — Spinningfields',
+      lessor: 'Meridian Property Group PLC',
+      lessee: 'Meridian Digital Services Ltd',
+      startDate: '2024-01-01',
+      endDate: '2033-12-31',
+      lease_term_months: '120',
+      baseRentAmount: '850000',
+      discountRate: '5.5',
+      currency: 'GBP',
+      paymentType: 'Arrears',
+      paymentFrequency: 'Monthly',
+      rentFreeMonths: 3,
+      escalationType: 'None',
+      escalationValue: '',
+      legalFees: '120000',
+      brokerageFees: '80000',
+      otherInitialDirectCosts: '50000',
+      initialDirectCostsDescription: 'Legal fees, brokerage, other IDC',
+      cashIncentive: '0',
+      rvgAmount: '0',
+      rvgGuaranteedBy: 'None',
+      rvgExpectedPayment: '0',
+      cpiAdjustments: false,
+      baseIndexValue: '0',
+      currentIndexValue: '0',
+      cpiAdjustmentFrequencyMonths: '12',
+      nonLeaseComponent: '95000',
+      nonLeaseDescription: 'Building maintenance, security, facilities management',
+      practicalExpedientElected: false,
+      leaseType: 'Office',
+      assetType: 'Office Building',
+      country: 'UK',
+      city: 'Manchester',
+      location: 'Spinningfields',
+      functionalCurrency: 'GBP',
+    },
+  },
   ibmserver: {
     label: '⚙️ IBM Server (Full — All Features)',
     data: {
@@ -614,6 +656,17 @@ export default function LeaseDetailTabbedPage() {
     rvgPayment: row.RVG_Payment ?? row.rvg_payment ?? 0,
   });
 
+  const monthlyNonLeaseComponent = form.practicalExpedientElected
+    ? 0
+    : parseFloat(String(form.nonLeaseComponent || '0')) || 0;
+  const paymentScheduleBreakdown = (row: any) => {
+    const r = scheduleRow(row);
+    const leasePay = Number(r.payment ?? 0);
+    const nonLeasePay = monthlyNonLeaseComponent;
+    const totalCash = leasePay + nonLeasePay;
+    return { ...r, leasePay, nonLeasePay, totalCash };
+  };
+
   const fetchIbrSuggestion = async () => {
     try {
       setIbrLoading(true);
@@ -745,9 +798,24 @@ function getReportingDateForFY(fy: string): Date {
 }
   useEffect(() => {
     if (!isNew && existingLease) {
-      setForm(leaseToForm(existingLease));
+      const loaded = leaseToForm(existingLease);
+      setForm(loaded);
       setContractData((existingLease as { contract_data?: Record<string, unknown> }).contract_data ?? null);
       if (existingLease.results && !calcResults) setCalcResults(existingLease.results);
+      const sched = (existingLease.results as { amortization_schedule?: unknown })?.amortization_schedule;
+      if (
+        scheduleMismatchStoredInputs(sched, {
+          rentFreeMonths: loaded.rentFreeMonths,
+          nonLeaseComponent: parseFloat(String(loaded.nonLeaseComponent || '0')) || 0,
+          baseRentAmount: parseFloat(String(loaded.baseRentAmount || '0')) || 0,
+          practicalExpedientElected: loaded.practicalExpedientElected,
+        })
+      ) {
+        toast(
+          'Saved schedule was calculated without rent-free / non-lease settings. Click Calculate IFRS 16 to refresh.',
+          { icon: '⚠️', duration: 8000 }
+        );
+      }
     } else if (isNew) {
       setForm((p) => ({ ...p, leaseId: `LEASE-2026-${String(Date.now()).slice(-6)}` }));
       setContractData(null);
@@ -2101,16 +2169,16 @@ function getReportingDateForFY(fy: string): Date {
                       <div className="relative">
                         <p className="text-sm text-[#64748b] mb-2">Calculated using IBR: {(parseFloat(String(form.discountRate || '0')) || 0).toFixed(2)}%</p>
                         <div className="absolute top-0 right-0">
-                          <Button variant="secondary" size="sm" className="border border-[#e2e8f0]" onClick={() => exportScheduleCsv('payment-schedule', ['Period', 'Date', 'Payment Amount', 'Lease Component', 'Non-Lease Component', 'VAT/GST', 'Total Payment'], schedule.map((row: any, i: number) => { const r = scheduleRow(row); const p = r.payment ?? 0; return [r.period ?? i + 1, r.date ?? '', p, p, 0, 0, p]; }))}>
+                          <Button variant="secondary" size="sm" className="border border-[#e2e8f0]" onClick={() => exportScheduleCsv('payment-schedule', ['Period', 'Date', 'Lease Component', 'Non-Lease Component', 'VAT/GST', 'Total Payment'], schedule.map((row: any, i: number) => { const b = paymentScheduleBreakdown(row); return [b.period ?? i + 1, b.date ?? '', b.leasePay, b.nonLeasePay, 0, b.totalCash]; }))}>
                             <Download className="w-4 h-4 mr-1" /> Export This Schedule
                           </Button>
                         </div>
                         <div className="overflow-x-auto rounded-xl border border-[#e2e8f0] bg-white">
                           <table className="w-full text-sm">
-                            <thead className="bg-[#f9fafb]"><tr><th className="text-left py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Period</th><th className="text-left py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Date</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Payment Amount</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Lease Component</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Non-Lease Component</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">VAT/GST</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Total Payment</th></tr></thead>
+                            <thead className="bg-[#f9fafb]"><tr><th className="text-left py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Period</th><th className="text-left py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Date</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Lease Component</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Non-Lease Component</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">VAT/GST</th><th className="text-right py-2 px-3 text-xs font-semibold text-[#64748b] uppercase">Total Cash</th></tr></thead>
                             <tbody>
-                              {schedule.map((row: any, i: number) => { const r = scheduleRow(row); const p = r.payment ?? 0; const isOverdue = r.date && String(r.date) < todayStr; return (<tr key={i} className={`border-t border-[#e2e8f0] ${i % 2 === 1 ? 'bg-[#fafafa]' : 'bg-white'} ${isOverdue ? 'bg-amber-50' : ''}`}><td className="py-2 px-3 font-mono">{r.period ?? i + 1}</td><td className="py-2 px-3">{r.date ?? '—'}</td><td className="py-2 px-3 text-right font-mono">{fmt(p)}</td><td className="py-2 px-3 text-right font-mono">{fmt(p)}</td><td className="py-2 px-3 text-right font-mono">{fmt(0)}</td><td className="py-2 px-3 text-right font-mono">{fmt(0)}</td><td className="py-2 px-3 text-right font-mono">{fmt(p)}</td></tr>); })}
-                              <tr className="border-t-2 border-[#e2e8f0] bg-[#f9fafb] font-medium"><td colSpan={2} className="py-2 px-3">TOTAL</td><td className="py-2 px-3 text-right font-mono">{fmt(schedule.reduce((s, row) => s + (scheduleRow(row).payment ?? 0), 0))}</td><td colSpan={4} className="py-2 px-3"></td></tr>
+                              {schedule.map((row: any, i: number) => { const b = paymentScheduleBreakdown(row); const isOverdue = b.date && String(b.date) < todayStr; return (<tr key={i} className={`border-t border-[#e2e8f0] ${i % 2 === 1 ? 'bg-[#fafafa]' : 'bg-white'} ${isOverdue ? 'bg-amber-50' : ''} ${b.rentFree ? 'bg-amber-50/60' : ''}`}><td className="py-2 px-3 font-mono">{b.period ?? i + 1}</td><td className="py-2 px-3">{b.date ?? '—'}</td><td className="py-2 px-3 text-right font-mono">{fmt(b.leasePay)}</td><td className="py-2 px-3 text-right font-mono">{fmt(b.nonLeasePay)}</td><td className="py-2 px-3 text-right font-mono">{fmt(0)}</td><td className="py-2 px-3 text-right font-mono">{fmt(b.totalCash)}</td></tr>); })}
+                              <tr className="border-t-2 border-[#e2e8f0] bg-[#f9fafb] font-medium"><td colSpan={2} className="py-2 px-3">TOTAL</td><td className="py-2 px-3 text-right font-mono">{fmt(schedule.reduce((s, row) => s + paymentScheduleBreakdown(row).leasePay, 0))}</td><td className="py-2 px-3 text-right font-mono">{fmt(schedule.reduce((s, row) => s + paymentScheduleBreakdown(row).nonLeasePay, 0))}</td><td className="py-2 px-3"></td><td className="py-2 px-3 text-right font-mono">{fmt(schedule.reduce((s, row) => s + paymentScheduleBreakdown(row).totalCash, 0))}</td></tr>
                             </tbody>
                           </table>
                         </div>
@@ -3073,7 +3141,25 @@ The Company has not applied the short-term or low-value exemptions to this lease
                           <p><span className="text-[#64748b]">Commencement Date:</span> {form.startDate ? new Date(form.startDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }) : '—'}</p>
                           <p><span className="text-[#64748b]">Lease End Date:</span> {form.endDate ? new Date(form.endDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }) : '—'}</p>
                           <p><span className="text-[#64748b]">Lease Term:</span> {termMonths} months</p>
-                          <p><span className="text-[#64748b]">Monthly Payment:</span> {fmt(parseFloat(String(form.baseRentAmount)) || 0)}</p>
+                          <p><span className="text-[#64748b]">Contract rent (gross):</span> {fmt(parseFloat(String(form.baseRentAmount)) || 0)}</p>
+                          <p><span className="text-[#64748b]">Lease component (IFRS 16 PV):</span>{' '}
+                            {fmt(
+                              calcResults?.component_analysis?.lease_component ??
+                                Math.max(
+                                  0,
+                                  (parseFloat(String(form.baseRentAmount)) || 0) -
+                                    (form.practicalExpedientElected ? 0 : parseFloat(String(form.nonLeaseComponent || '0')) || 0)
+                                )
+                            )}
+                          </p>
+                          {(monthlyNonLeaseComponent > 0 || form.rentFreeMonths > 0) && (
+                            <p className="text-xs text-[#64748b] col-span-2">
+                              {form.rentFreeMonths > 0 ? `Rent-free: ${form.rentFreeMonths} month(s) (lease payments £0; interest accrues). ` : ''}
+                              {monthlyNonLeaseComponent > 0
+                                ? `Non-lease ${fmt(monthlyNonLeaseComponent)}/mo excluded from liability schedule.`
+                                : ''}
+                            </p>
+                          )}
                           <p><span className="text-[#64748b]">IBR:</span> {ibrPct}% per annum</p>
                           <p><span className="text-[#64748b]">IBR (monthly):</span> {(ibrPct / 12).toFixed(4)}% per month</p>
                           <p><span className="text-[#64748b]">Payment Timing:</span> {form.paymentTiming || 'End of month'}</p>

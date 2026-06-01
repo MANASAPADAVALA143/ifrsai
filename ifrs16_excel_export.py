@@ -164,6 +164,36 @@ class IFRS16ExcelExporter:
             ws[f'B{row}'].number_format = money_fmt
             ws[f'A{row}'].border = self.border
             ws[f'B{row}'].border = self.border
+
+        comp = results.get("component_analysis") or {}
+        if comp.get("non_lease_component", 0) or comp.get("lease_component"):
+            row += 2
+            ws[f'A{row}'] = "LEASE vs NON-LEASE COMPONENTS"
+            ws[f'A{row}'].font = self.subtitle_font
+            ws.merge_cells(f'A{row}:D{row}')
+            row += 1
+            component_rows = [
+                ("Total monthly contract payment", comp.get("total_monthly_payment", 0)),
+                ("Lease component (in liability schedule)", comp.get("lease_component", 0)),
+                ("Non-lease component (P&L straight-line)", comp.get("non_lease_component", 0)),
+            ]
+            for label, value in component_rows:
+                ws[f'A{row}'] = label
+                ws[f'B{row}'] = value
+                ws[f'B{row}'].number_format = money_fmt
+                row += 1
+            if comp.get("non_lease_description"):
+                ws[f'A{row}'] = "Non-lease description"
+                ws[f'B{row}'] = comp.get("non_lease_description")
+                row += 1
+
+        if results.get("incentive_disclosure_note"):
+            row += 1
+            ws[f'A{row}'] = "Rent-free / incentives"
+            ws[f'B{row}'] = results["incentive_disclosure_note"]
+            ws.merge_cells(f'B{row}:D{row}')
+            ws[f'B{row}'].alignment = Alignment(wrap_text=True)
+            row += 1
         
         # Lease liability breakdown (if RVG present)
         if results.get('liability_breakdown') and results['liability_breakdown'].get('pv_residual_value_guarantee', 0) != 0:

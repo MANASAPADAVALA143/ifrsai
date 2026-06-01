@@ -248,6 +248,15 @@ export function buildLeaseEntry(params: {
   status?: LeaseRepositoryEntry['status'];
   version?: string;
   cost_centers?: { name: string; percent: number }[];
+  rent_free_months?: number;
+  non_lease_component?: number;
+  non_lease_description?: string;
+  practical_expedient_elected?: boolean;
+  legal_fees?: number;
+  brokerage_fees?: number;
+  other_initial_direct_costs?: number;
+  cash_incentive?: number;
+  payment_type?: string;
 }): LeaseRepositoryEntry {
   const start = new Date(params.commencement_date || params.start_date || '');
   const endDateStr = params.end_date || (() => {
@@ -288,7 +297,47 @@ export function buildLeaseEntry(params: {
     status: params.status || 'Active',
     version: params.version || 'V1',
     cost_centers: params.cost_centers,
+    rent_free_months: params.rent_free_months ?? 0,
+    non_lease_component: params.non_lease_component ?? 0,
+    non_lease_description: params.non_lease_description ?? '',
+    practical_expedient_elected: Boolean(params.practical_expedient_elected ?? false),
+    legal_fees: params.legal_fees,
+    brokerage_fees: params.brokerage_fees,
+    other_initial_direct_costs: params.other_initial_direct_costs,
+    cash_incentive: params.cash_incentive,
+    payment_type: params.payment_type,
   };
+}
+
+/** True when stored amortisation does not match rent-free / non-lease form inputs. */
+export function scheduleMismatchStoredInputs(
+  schedule: unknown,
+  inputs: {
+    rentFreeMonths?: number;
+    nonLeaseComponent?: number;
+    baseRentAmount?: number;
+    practicalExpedientElected?: boolean;
+  }
+): boolean {
+  if (!Array.isArray(schedule) || schedule.length === 0) return false;
+  const row0 = schedule[0] as Record<string, unknown>;
+  const pay0 = Number(row0.Payment ?? row0.payment ?? NaN);
+  if (!Number.isFinite(pay0)) return false;
+
+  const rentFree = Math.max(0, Number(inputs.rentFreeMonths) || 0);
+  const gross = Math.max(0, Number(inputs.baseRentAmount) || 0);
+  const nonLease = inputs.practicalExpedientElected
+    ? 0
+    : Math.max(0, Number(inputs.nonLeaseComponent) || 0);
+  const expectedLeasePay = rentFree > 0 ? 0 : Math.max(0, gross - nonLease);
+
+  if (Math.abs(pay0 - expectedLeasePay) > 0.01) return true;
+
+  if (rentFree > 1 && schedule.length > 1) {
+    const pay1 = Number((schedule[1] as Record<string, unknown>).Payment ?? (schedule[1] as Record<string, unknown>).payment ?? NaN);
+    if (Number.isFinite(pay1) && rentFree >= 2 && Math.abs(pay1) > 0.01) return true;
+  }
+  return false;
 }
 
 /**
