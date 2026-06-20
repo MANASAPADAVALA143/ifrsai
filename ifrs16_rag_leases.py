@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from rag_engine import IFRSRagEngine
+from claude_model_config import CLAUDE_MODEL
 
 
 LEASE_COLLECTION = "ifrs16_leases"
@@ -126,7 +127,7 @@ Question: {query}
 Answer:"""
 
     response = engine.anthropic_client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=CLAUDE_MODEL,
         max_tokens=2000,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}],

@@ -43,9 +43,20 @@ export function scheduleRow(row: any): {
   };
 }
 
+export function trimScheduleAtPayoff(schedule: any[]): any[] {
+  if (!Array.isArray(schedule) || !schedule.length) return [];
+  const out: any[] = [];
+  for (const row of schedule) {
+    out.push(row);
+    const closing = Number(row?.Closing_Balance ?? row?.closing_balance ?? 0);
+    if (closing <= 0) break;
+  }
+  return out;
+}
+
 export function getSchedule(lease: LeaseRepositoryEntry): any[] {
   const schedule = (lease?.results as any)?.amortization_schedule;
-  return Array.isArray(schedule) ? schedule : [];
+  return Array.isArray(schedule) ? trimScheduleAtPayoff(schedule) : [];
 }
 
 export function getLiability(lease: LeaseRepositoryEntry): number {

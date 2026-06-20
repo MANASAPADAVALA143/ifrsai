@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
+from claude_model_config import CLAUDE_MODEL
 from backend.app.services.arabic_pdf_handler import (
     detect_pdf_language,
     extract_arabic_numerals,
@@ -165,7 +166,7 @@ def extract_rera_certificate(
     claude_client: Any,
     form_completion_pct: Optional[float] = None,
     *,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = CLAUDE_MODEL,
 ) -> RERACertificateResult:
     warnings: List[str] = []
 

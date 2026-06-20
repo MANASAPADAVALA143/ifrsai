@@ -6,7 +6,22 @@ import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { Upload, FileText, Calculator, Download, Loader2, CheckCircle2, Clock, ArrowRight, Copy, Plus, Trash2, HelpCircle, X, ChevronDown, ChevronUp, AlertTriangle, Building2 } from 'lucide-react';
 import { ifrs15Api } from '@/lib/api';
-import { consumeRealEstateSyncPending } from '@/lib/realestate-ifrs15-mapper';
+import {
+  consumeRealEstateSyncPending,
+  mapRealEstateExcelImportToCalculatePayload,
+  realEstateExcelToExtractedData,
+} from '@/lib/realestate-ifrs15-mapper';
+import {
+  isUaeSpaExtraction,
+  mapUaeSpaToCalculatePayload,
+  sanitizeIfrs15CalculatePayload,
+  toFiniteNumber,
+} from '@/lib/ifrs15-contract-extraction';
+import {
+  parseRealEstatePortfolioExcel,
+  saveRealEstateFormImport,
+  isRealEstateDemoFilename,
+} from '@/lib/ifrs15-realestate-parse';
 import toast from 'react-hot-toast';
 import {
   ResponsiveContainer,
@@ -21,6 +36,32 @@ import {
   Legend,
 } from 'recharts';
 import { formatCurrency, sanitizeCurrencyCode } from '@/lib/utils';
+import { ModuleWorkspaceLayout } from '@/components/module/ModuleWorkspaceLayout';
+import { CalculateStepper } from '@/components/module/CalculateStepper';
+import {
+  IFRS15_NAV_GROUPS,
+  IFRS15_CALCULATE_STEPS,
+  navIdToDashTab,
+  navIdToCalculateStep,
+  dashTabToNavId,
+  applyNavSideEffects,
+  type Ifrs15NavId,
+} from '@/lib/ifrs15-nav';
+import {
+  buildIfrs15ContractFromCalculate,
+  buildIfrs15ContractFromPortfolio,
+  getActiveIfrs15Contract,
+  getActiveIfrs15ContractId,
+  getIfrs15Contract,
+  listIfrs15Contracts,
+  patchIfrs15Assessments,
+  registerIfrs15Contract,
+  type Ifrs15ContractContext,
+} from '@/lib/ifrs15-contract-context';
+import {
+  ContractContextBar,
+  type ContractContextBarVariant,
+} from '@/components/ifrs15/ContractContextBar';
 
 const IFRS15_REVERSAL_FACTOR_ROWS: { key: string; label: string }[] = [
   { key: 'constraint_level', label: 'VC Constraint Level' },
@@ -198,6 +239,10 @@ function cpPayablePreview(amount: number, distinctBenefit: boolean, fvBenefit: n
 
 // Map extraction to calculate request
 function mapExtractionToContract(extracted: any): any {
+  if (isUaeSpaExtraction(extracted)) {
+    return mapUaeSpaToCalculatePayload(extracted as Record<string, unknown>);
+  }
+
   const step1 = extracted?.step1_identify_contract?.contract_details || {};
   const rawObligations = extracted?.step2_performance_obligations?.identified_obligations;
   const obligations = Array.isArray(rawObligations) ? rawObligations : [];
@@ -210,19 +255,32 @@ function mapExtractionToContract(extracted: any): any {
 
   const perfObs = obligations.map((ob: any) => {
     const rec = recognitionMap[ob.obligation_id] || {};
+    const desc = ob.description || 'Unnamed obligation';
+    const durationFromDesc = (() => {
+      const t = desc.toLowerCase();
+      const m = t.match(/(?:delivered\s+)?(?:over|for|within)\s+(\d+)\s+months?/) ||
+        t.match(/(\d+)\s+months?\s+from\s+go[- ]?live/);
+      return m ? parseInt(m[1], 10) : null;
+    })();
     return {
       obligation_id: ob.obligation_id || `PO-${obligations.indexOf(ob) + 1}`,
-      description: ob.description || 'Unnamed obligation',
+      description: desc,
       standalone_selling_price: ob.standalone_selling_price_estimate ?? 0,
       recognition_method: rec.recognition_pattern === 'point_in_time' ? 'point_in_time' : 'over_time',
-      duration_months: rec.duration_months ?? 12,
+      duration_months: rec.duration_months ?? durationFromDesc ?? 12,
       transfer_date: rec.transfer_date || null,
+      obligation_start_date: rec.obligation_start_date || rec.go_live_date || null,
     };
   });
 
   const varCons = step3.variable_consideration || {};
   const fixed = step3.fixed_consideration ?? step3.total_transaction_price ?? step1.total_contract_value ?? 0;
-  const variable = (varCons.performance_bonuses ?? 0) + (varCons.volume_discounts ?? 0) - (varCons.discounts ?? 0) - (varCons.rebates ?? 0) - (varCons.penalties ?? 0);
+  const variable =
+    toFiniteNumber(varCons.performance_bonuses) +
+    toFiniteNumber(varCons.volume_discounts) -
+    toFiniteNumber(varCons.discounts) -
+    toFiniteNumber(varCons.rebates) -
+    toFiniteNumber(varCons.penalties);
   const totalPrice = step3.total_transaction_price ?? step1.total_contract_value ?? fixed;
 
   return {
@@ -231,14 +289,14 @@ function mapExtractionToContract(extracted: any): any {
     vendor_name: step1.vendor_name || '',
     effective_date: step1.effective_date || new Date().toISOString().split('T')[0],
     contract_term_months: step1.contract_term_months ?? 12,
-    fixed_consideration: typeof fixed === 'number' ? fixed : parseFloat(String(fixed)) || 0,
-    variable_consideration: typeof variable === 'number' ? variable : parseFloat(String(variable)) || 0,
-    variable_consideration_constrained: varCons.variable_consideration_constrained ?? 0,
-    constraint_percentage: varCons.constraint_percentage ?? 100,
+    fixed_consideration: toFiniteNumber(fixed, 0),
+    variable_consideration: toFiniteNumber(variable, 0),
+    variable_consideration_constrained: toFiniteNumber(varCons.variable_consideration_constrained, 0),
+    constraint_percentage: toFiniteNumber(varCons.constraint_percentage, 100),
     constraint_method: varCons.constraint_method ?? 'percentage',
-    discounts: varCons.discounts ?? 0,
-    rebates: varCons.rebates ?? 0,
-    financing_adjustment: step3.significant_financing_component?.adjustment_amount ?? 0,
+    discounts: toFiniteNumber(varCons.discounts, 0),
+    rebates: toFiniteNumber(varCons.rebates, 0),
+    financing_adjustment: toFiniteNumber(step3.significant_financing_component?.adjustment_amount, 0),
     currency: sanitizeCurrencyCode(step1.currency, 'USD'),
     contract_type: 'fixed_price',
     hourly_rate: 0,
@@ -408,13 +466,14 @@ type PaExtHistoryRow = {
 export default function IFRS15Page() {
   const [activeTab, setActiveTab] = useState<'upload' | 'manual'>('upload');
   const [file, setFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadElapsedSec, setUploadElapsedSec] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
   const [isCalculating, setIsCalculating] = useState(false);
   const [isGeneratingExcel, setIsGeneratingExcel] = useState(false);
   const [extractedData, setExtractedData] = useState<any>(null);
   const [results, setResults] = useState<any>(null);
   const [fileId, setFileId] = useState<string | null>(null);
-  const [activeModule, setActiveModule] = useState<string | null>(null);
   const [contractText, setContractText] = useState('');
   const [vcConstraint, setVcConstraint] = useState({
     constraint_method: 'percentage',
@@ -431,12 +490,14 @@ export default function IFRS15Page() {
     | 'contract-costs'
     | 'licenses-ip'
     | 'audit-trail'
-    | 'material-rights'
-    | 'warranties'
+    | 'warranties-material-rights'
     | 'bill-and-hold'
     | 'financing-component'
     | 'tp-adjustments'
   >('calculate');
+  const [activeNavId, setActiveNavId] = useState<Ifrs15NavId>('revenue-calculate');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [calculateStep, setCalculateStep] = useState(1);
   const [drForm, setDrForm] = useState({
     period: '',
     currency: 'USD',
@@ -713,6 +774,9 @@ export default function IFRS15Page() {
     status: 'active',
     currency: 'USD',
   });
+  const [activeContractContext, setActiveContractContext] = useState<Ifrs15ContractContext | null>(null);
+  const [sessionContractList, setSessionContractList] = useState<Ifrs15ContractContext[]>([]);
+  const [selectedContextContractId, setSelectedContextContractId] = useState('');
   const [auditFilterContract, setAuditFilterContract] = useState('');
   const [auditFilterAction, setAuditFilterAction] = useState('');
   const [auditExpanded, setAuditExpanded] = useState<Record<string, boolean>>({});
@@ -804,51 +868,17 @@ export default function IFRS15Page() {
     return () => window.clearTimeout(t);
   }, [clauseDetection, clauseCleanKeepVisible]);
 
-  const stepStatus = {
-    step1: !!extractedData?.step1_identify_contract,
-    step2: !!(extractedData?.step2_performance_obligations?.identified_obligations?.length),
-    step3: !!extractedData?.step3_transaction_price?.total_transaction_price,
-    step4: !!(extractedData?.step4_allocation_hints || extractedData?.step2_performance_obligations?.identified_obligations?.length),
-    step5: !!results,
-  };
-
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0];
-    if (!selectedFile) {
-      setFile(null);
+  useEffect(() => {
+    if (!isUploading) {
+      setUploadElapsedSec(0);
       return;
     }
-    if (!selectedFile.name.match(/\.(pdf|docx|txt|xlsx|xls)$/i)) {
-      toast.error('Please upload a PDF, DOCX, TXT, or Excel file (.xlsx, .xls)');
-      setFile(null);
-      return;
-    }
-    setFile(selectedFile);
-    setIsUploading(true);
-    setExtractedData(null);
-    applyClauseDetectionFromResponse(null);
-    try {
-      const response = await ifrs15Api.uploadContract(selectedFile) as any;
-      const { data, error } = response;
-      if (error) throw new Error(error);
-      setExtractedData(data?.extracted_data);
-      if (data?.clause_detection) {
-        applyClauseDetectionFromResponse(data.clause_detection as Record<string, unknown>);
-      }
-      const vc = data?.extracted_data?.step3_transaction_price?.variable_consideration || {};
-      setVcConstraint({
-        constraint_method: vc.constraint_method ?? 'percentage',
-        constraint_percentage: Number(vc.constraint_percentage ?? 100),
-        variable_consideration_constrained: Number(vc.variable_consideration_constrained ?? 0),
-      });
-      toast.success('Contract extracted successfully!');
-    } catch (error: any) {
-      toast.error(error?.message || 'Failed to extract contract');
-      setFile(null);
-    } finally {
-      setIsUploading(false);
-    }
-  };
+    const started = Date.now();
+    const tick = window.setInterval(() => {
+      setUploadElapsedSec(Math.floor((Date.now() - started) / 1000));
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [isUploading]);
 
   const handleCalculate = async (contractData?: any) => {
     const basePayload = contractData || (extractedData ? mapExtractionToContract(extractedData) : null);
@@ -859,14 +889,16 @@ export default function IFRS15Page() {
           constraint_percentage: vcConstraint.constraint_percentage,
           variable_consideration_constrained: vcConstraint.variable_consideration_constrained,
           vc_constraint_factors: { ...vc1556Factors },
-          contract_type: step3.contract_type || 'fixed_price',
-          hourly_rate: Number(step3.hourly_rate || 0),
-          hours_worked: Number(step3.hours_worked || 0),
-          tm_cap: Number(step3.tm_cap || 0),
-          cumulative_billed: Number(step3.cumulative_billed || 0),
-          total_estimated_cost: Number(step3.total_estimated_cost || 0),
-          actual_cost_to_date: Number(step3.actual_cost_to_date || 0),
-          prior_revenue_recognised: Number(step3.prior_revenue_recognised || 0),
+          contract_type: step3.contract_type || basePayload.contract_type || 'fixed_price',
+          hourly_rate: Number(step3.hourly_rate || basePayload.hourly_rate || 0),
+          hours_worked: Number(step3.hours_worked || basePayload.hours_worked || 0),
+          tm_cap: Number(step3.tm_cap || basePayload.tm_cap || 0),
+          cumulative_billed: Number(step3.cumulative_billed || basePayload.cumulative_billed || 0),
+          total_estimated_cost: Number(step3.total_estimated_cost || basePayload.total_estimated_cost || 0),
+          actual_cost_to_date: Number(step3.actual_cost_to_date || basePayload.actual_cost_to_date || 0),
+          prior_revenue_recognised: Number(
+            step3.prior_revenue_recognised || basePayload.prior_revenue_recognised || 0
+          ),
           maintenance_term_months: Number(step3.maintenance_term_months || 0),
           volume_slabs: volumeSlabs.map((s) => ({
             min_volume: Number(s.min_volume || 0),
@@ -894,13 +926,19 @@ export default function IFRS15Page() {
       toast.error('No contract data. Upload a contract or enter manually.');
       return;
     }
+    const safePayload = sanitizeIfrs15CalculatePayload({ ...payload });
     setIsCalculating(true);
     try {
-      const response = await ifrs15Api.calculate(payload) as any;
+      const response = await ifrs15Api.calculate(safePayload) as any;
       console.log('IFRS 15 calculate full API response:', response);
       const { data, error } = response;
       if (error) throw new Error(error);
+      if (!data?.results) {
+        throw new Error('Calculate returned no results — check backend logs or retry.');
+      }
       setResults(data?.results);
+      setCalculateStep(3);
+      setActiveNavId('revenue-calculate');
       setVcResult(null);
       setVcAssessment(null);
       setRpoResult(null);
@@ -927,11 +965,122 @@ export default function IFRS15Page() {
         contract_term_months: payload.contract_term_months,
         currency: sanitizeCurrencyCode(payload.currency, 'USD'),
       });
+      const registeredCtx = registerIfrs15Contract(
+        buildIfrs15ContractFromCalculate({
+          payload: safePayload,
+          results: data.results,
+          extractedData,
+        }),
+      );
+      setActiveContractContext(registeredCtx);
+      setSelectedContextContractId(registeredCtx.contract_id);
+      setSessionContractList(listIfrs15Contracts());
+      prefillComplianceFromContext(registeredCtx);
       toast.success('Calculation completed!');
     } catch (error: any) {
       toast.error(error?.message || 'Calculation failed');
+      console.error('IFRS 15 calculate error:', error);
     } finally {
       setIsCalculating(false);
+    }
+  };
+
+  const applyExtractionResult = (extracted: Record<string, unknown> | null | undefined) => {
+    setExtractedData(extracted);
+    setCalculateStep(2);
+    const vc =
+      (extracted as any)?.step3_transaction_price?.variable_consideration || {};
+    setVcConstraint({
+      constraint_method: vc.constraint_method ?? 'percentage',
+      constraint_percentage: Number(vc.constraint_percentage ?? 100),
+      variable_consideration_constrained: Number(vc.variable_consideration_constrained ?? 0),
+    });
+    return mapExtractionToContract(extracted);
+  };
+
+  const autoCalculateFromExtraction = async (
+    extracted: Record<string, unknown> | null | undefined,
+    options?: { successMessage?: string }
+  ) => {
+    if (!extracted) return;
+    const payload = applyExtractionResult(extracted);
+    if (!payload?.performance_obligations?.length) {
+      toast.success('Contract extracted — add performance obligations to calculate.');
+      return;
+    }
+    toast.success(options?.successMessage || 'Contract extracted — running calculations…');
+    await handleCalculate(payload);
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (!selectedFile) {
+      setFile(null);
+      return;
+    }
+    if (!selectedFile.name.match(/\.(pdf|docx|txt|xlsx|xls)$/i)) {
+      toast.error('Please upload a PDF, DOCX, TXT, or Excel file (.xlsx, .xls)');
+      setFile(null);
+      return;
+    }
+    setFile(selectedFile);
+    setIsUploading(true);
+    setExtractedData(null);
+    setResults(null);
+    applyClauseDetectionFromResponse(null);
+    try {
+      const ext = selectedFile.name.toLowerCase();
+      if (ext.endsWith('.xlsx') || ext.endsWith('.xls')) {
+        const portfolio = await parseRealEstatePortfolioExcel(selectedFile);
+        if (portfolio && portfolio.portfolioCount >= 1) {
+          saveRealEstateFormImport(portfolio);
+          const extracted = realEstateExcelToExtractedData(portfolio);
+          const payload = mapRealEstateExcelImportToCalculatePayload(portfolio);
+          setExtractedData(extracted);
+          setCalculateStep(2);
+          toast.success(
+            `Loaded ${portfolio.portfolioCount} contract(s) — running calculations…`
+          );
+          await handleCalculate(payload);
+          return;
+        }
+        if (isRealEstateDemoFilename(selectedFile.name)) {
+          throw new Error(
+            'Could not read portfolio sheet. Use the Emaar IFRS 15 Real Estate demo template, or open Real Estate UAE from the sidebar.'
+          );
+        }
+      }
+
+      if (ext.endsWith('.pdf')) {
+        const spaResponse = (await ifrs15Api.extractContract(selectedFile, 'uae_spa')) as any;
+        const spaData = spaResponse?.data;
+        const spaError = spaResponse?.error;
+        if (!spaError && spaData?.extracted_data) {
+          if (spaData?.clause_detection) {
+            applyClauseDetectionFromResponse(spaData.clause_detection as Record<string, unknown>);
+          }
+          await autoCalculateFromExtraction(spaData.extracted_data, {
+            successMessage: 'SPA extracted — running IFRS 15 calculations…',
+          });
+          return;
+        }
+      }
+
+      const response = (await ifrs15Api.uploadContract(selectedFile)) as any;
+      const { data, error } = response;
+      if (error) throw new Error(error);
+      if (data?.clause_detection) {
+        applyClauseDetectionFromResponse(data.clause_detection as Record<string, unknown>);
+      }
+      await autoCalculateFromExtraction(data?.extracted_data);
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to extract contract');
+      setFile(null);
+    } finally {
+      setIsUploading(false);
+      if (e.target && 'value' in e.target) {
+        (e.target as HTMLInputElement).value = '';
+      }
     }
   };
 
@@ -1025,7 +1174,29 @@ export default function IFRS15Page() {
   const def = results?.total_deferred;
   const displayTp = typeof tp === 'number' ? Number(tp) : null;
   const effectiveRevenueRate = displayTp && typeof rec === 'number' && displayTp > 0 ? ((rec / displayTp) * 100).toFixed(1) : '—';
-  const numPOBs = Object.keys(allocations).length || perfObs.length;
+  const extractedPOBCount =
+    extractedData?.step2_performance_obligations?.identified_obligations?.length ??
+    extractedData?.step2_performance_obligations?.total_obligations_count ??
+    0;
+  const calculatedPOBCount =
+    Number((results as { validation?: { obligations_count?: number } } | null)?.validation?.obligations_count) ||
+    perfObs.length ||
+    Object.keys(allocations).length ||
+    0;
+  const numPOBs = results ? calculatedPOBCount || extractedPOBCount : extractedPOBCount || calculatedPOBCount;
+  const stepStatus = {
+    step1: !!extractedData?.step1_identify_contract || !!results,
+    step2: numPOBs > 0,
+    step3:
+      !!extractedData?.step3_transaction_price?.total_transaction_price ||
+      results?.total_contract_value != null,
+    step4:
+      numPOBs > 0 &&
+      (!!results ||
+        !!extractedData?.step4_allocation_hints ||
+        extractedPOBCount > 0),
+    step5: !!results,
+  };
   const totalContractAssets = results?.total_contract_assets;
   const paymentTermsMode = String((results as Record<string, unknown> | null)?.payment_terms_mode ?? '');
   const contractAssetNoteStr = String((results as Record<string, unknown> | null)?.contract_asset_note ?? '');
@@ -1095,6 +1266,327 @@ export default function IFRS15Page() {
       currency,
     }));
   };
+
+  const refreshContractContextState = () => {
+    setSessionContractList(listIfrs15Contracts());
+    const active = getActiveIfrs15Contract();
+    setActiveContractContext(active);
+    if (active) {
+      setSelectedContextContractId((prev) => prev || active.contract_id);
+    }
+  };
+
+  const restoreAssessmentsFromContext = (ctx: Ifrs15ContractContext) => {
+    const a = ctx.assessments || {};
+    if (a.variable_consideration) {
+      setVcAssessment(a.variable_consideration);
+      setVcResult(a.variable_consideration);
+    }
+    if (a.principal_agent) setPaExtLatest(a.principal_agent);
+    if (a.financing_component) setFcResult(a.financing_component);
+    if (a.contract_costs) setCcBatchResult(a.contract_costs);
+    if (a.bill_and_hold) setBahResult(a.bill_and_hold);
+    if (a.warranties) setWarResult(a.warranties);
+    if (a.licenses) setLicIpResult(a.licenses);
+    if (a.modifications) setModAssessment(a.modifications);
+    if (a.tp_adjustments) setTpChangeResult(a.tp_adjustments);
+    if (a.rpo) setRpo120Result(a.rpo);
+  };
+
+  const resolveSelectedContractContext = (): Ifrs15ContractContext | null => {
+    const id =
+      selectedContextContractId ||
+      activeContractContext?.contract_id ||
+      getActiveIfrs15ContractId() ||
+      '';
+    if (!id) return activeContractContext;
+    const fromSession = getIfrs15Contract(id);
+    if (fromSession) return fromSession;
+    const portRow = portfolioContracts.find((c) => String(c.contract_id) === id);
+    if (portRow) return buildIfrs15ContractFromPortfolio(portRow);
+    return activeContractContext;
+  };
+
+  const activateContractContext = (ctx: Ifrs15ContractContext) => {
+    const registered = registerIfrs15Contract(ctx);
+    setActiveContractContext(registered);
+    setSelectedContextContractId(registered.contract_id);
+    setSessionContractList(listIfrs15Contracts());
+    setLastContractInfo({
+      contract_id: registered.contract_id,
+      customer_name: registered.customer_name,
+      effective_date: registered.effective_date,
+      contract_term_months: registered.contract_term_months,
+      currency: registered.currency,
+    });
+    if (registered.core_results) setResults(registered.core_results);
+    if (registered.extraction_raw) setExtractedData(registered.extraction_raw);
+    restoreAssessmentsFromContext(registered);
+    return registered;
+  };
+
+  const prefillComplianceFromContext = (
+    ctx: Ifrs15ContractContext,
+    mode: 'all' | 'modification' = 'all',
+  ) => {
+    const cur = ctx.currency || 'USD';
+    const start = ctx.effective_date || new Date().toISOString().slice(0, 10);
+    const end = ctx.contract_end_date || addMonthsIso(start, ctx.contract_term_months || 12);
+    const val = ctx.contract_value || 0;
+
+    if (mode === 'modification') {
+      setModForm((prev) => ({
+        ...prev,
+        remaining_transaction_price: ctx.deferred_balance ?? prev.remaining_transaction_price,
+      }));
+      return;
+    }
+
+    setPaExtForm((f) => ({
+      ...f,
+      arrangement_id: ctx.contract_id,
+      description: f.description || ctx.customer_name || '',
+      gross_contract_value: val,
+    }));
+    setPaTp(String(val));
+
+    setLicPrice(String(val));
+    setLicStart(start);
+
+    setFcRows((rows) => {
+      const base = {
+        id: newUid(),
+        contract_id: ctx.contract_id,
+        description: ctx.customer_name || '',
+        contract_value: val,
+        transfer_date: start,
+        payment_date: end,
+        payment_timing: 'deferred' as const,
+        discount_rate: 5,
+        currency: cur,
+      };
+      if (rows.length === 0) return [base];
+      return rows.map((r, i) =>
+        i === 0
+          ? {
+              ...r,
+              contract_id: ctx.contract_id,
+              contract_value: val || r.contract_value,
+              transfer_date: start,
+              payment_date: end,
+              currency: cur,
+              description: r.description || ctx.customer_name || '',
+            }
+          : r,
+      );
+    });
+
+    setCcRows((rows) => {
+      const base = {
+        id: newUid(),
+        cost_id: 'COST-001',
+        contract_id: ctx.contract_id,
+        description: '',
+        cost_type: 'incremental_obtaining',
+        cost_amount: 0,
+        incurred_date: start,
+        contract_start: start,
+        contract_end: end,
+        expected_renewal: false,
+        expected_renewal_months: 0,
+        currency: cur,
+      };
+      if (rows.length === 0) return [base];
+      return rows.map((r, i) =>
+        i === 0
+          ? { ...r, contract_id: ctx.contract_id, contract_start: start, contract_end: end, currency: cur }
+          : r,
+      );
+    });
+
+    setWarRows((rows) => {
+      const base = {
+        id: newUid(),
+        warranty_id: 'WAR-001',
+        contract_id: ctx.contract_id,
+        product_description: '',
+        warranty_description: '',
+        warranty_period_months: 12,
+        warranty_value: 0,
+        allocated_fee: 0,
+        required_by_law: false,
+        covers_specs_only: true,
+        customer_can_purchase_separately: false,
+        provides_additional_service: false,
+        currency: cur,
+      };
+      if (rows.length === 0) return [base];
+      return rows.map((r, i) => (i === 0 ? { ...r, contract_id: ctx.contract_id, currency: cur } : r));
+    });
+
+    setBahRows((rows) => {
+      const base = {
+        id: newUid(),
+        arrangement_id: 'BAH-001',
+        contract_id: ctx.contract_id,
+        customer_name: ctx.customer_name || '',
+        product_description: '',
+        contract_value: val,
+        billing_date: start,
+        expected_delivery_date: end,
+        reason_is_substantive: false,
+        product_separately_identified: false,
+        product_ready_for_transfer: false,
+        entity_cannot_redirect: false,
+        currency: cur,
+      };
+      if (rows.length === 0) return [base];
+      return rows.map((r, i) =>
+        i === 0
+          ? {
+              ...r,
+              contract_id: ctx.contract_id,
+              customer_name: ctx.customer_name || r.customer_name,
+              contract_value: val || r.contract_value,
+              currency: cur,
+            }
+          : r,
+      );
+    });
+
+    setLicRows((rows) => {
+      const base = {
+        id: newUid(),
+        license_id: 'LIC-001',
+        product_name: '',
+        license_description: '',
+        license_fee: val,
+        license_start: start,
+        license_end: end,
+        is_perpetual: false,
+        entity_activities_affect_ip: false,
+        customer_exposed_to_effect: false,
+        no_separate_functional_utility: false,
+        currency: cur,
+      };
+      if (rows.length === 0) return [base];
+      return rows.map((r, i) =>
+        i === 0
+          ? { ...r, license_fee: val || r.license_fee, license_start: start, license_end: end, currency: cur }
+          : r,
+      );
+    });
+
+    setTpChangeForm((f) => ({
+      ...f,
+      contract_id: ctx.contract_id,
+      original_transaction_price: String(val),
+      revenue_recognised_to_date: String(ctx.revenue_recognised_to_date ?? 0),
+    }));
+
+    setNcRows((rows) =>
+      rows.length === 0
+        ? rows
+        : rows.map((r, i) => (i === 0 ? { ...r, contract_id: ctx.contract_id, currency: cur } : r)),
+    );
+    setCpRows((rows) =>
+      rows.length === 0
+        ? rows
+        : rows.map((r, i) => (i === 0 ? { ...r, contract_id: ctx.contract_id, currency: cur } : r)),
+    );
+
+    setRpo120Contracts((contracts) => {
+      const base = {
+        ...newRpo120Contract(),
+        contract_id: ctx.contract_id,
+        customer_name: ctx.customer_name,
+        contract_start: start,
+        contract_end: end,
+        total_transaction_price: val,
+        revenue_recognised_to_date: ctx.revenue_recognised_to_date ?? 0,
+      };
+      if (contracts.length === 0) return [base];
+      return contracts.map((c, i) =>
+        i === 0
+          ? {
+              ...c,
+              contract_id: ctx.contract_id,
+              customer_name: ctx.customer_name,
+              contract_start: start,
+              contract_end: end,
+              total_transaction_price: val,
+            }
+          : c,
+      );
+    });
+  };
+
+  const handleApplyContractContext = (mode: 'all' | 'modification' = 'all') => {
+    const ctx = resolveSelectedContractContext();
+    if (!ctx) {
+      toast.error('No contract to load — run Revenue Calculate first');
+      return;
+    }
+    activateContractContext(ctx);
+    prefillComplianceFromContext(ctx, mode);
+    toast.success(
+      mode === 'modification' ? `Linked to ${ctx.contract_id}` : `Pre-filled from ${ctx.contract_id}`,
+    );
+  };
+
+  const contractContextBar = (variant: ContractContextBarVariant = 'default') => (
+    <ContractContextBar
+      activeContract={activeContractContext}
+      sessionContracts={sessionContractList}
+      portfolioContracts={portfolioContracts}
+      selectedContractId={selectedContextContractId}
+      onSelectedContractIdChange={setSelectedContextContractId}
+      onApply={() => handleApplyContractContext(variant === 'modification' ? 'modification' : 'all')}
+      variant={variant}
+    />
+  );
+
+  useEffect(() => {
+    refreshContractContextState();
+    void loadPortfolioSummary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const cid =
+      contractId !== '—'
+        ? String(contractId)
+        : activeContractContext?.contract_id || getActiveIfrs15ContractId() || '';
+    if (!cid) return;
+    const updated = patchIfrs15Assessments(cid, {
+      variable_consideration: vcAssessment,
+      principal_agent: paExtLatest || paAssessment,
+      financing_component: fcResult,
+      contract_costs: ccBatchResult,
+      bill_and_hold: bahResult,
+      warranties: warResult,
+      licenses: licIpResult,
+      modifications: modAssessment,
+      tp_adjustments: tpChangeResult || tpAdjResult,
+      rpo: rpo120Result,
+    });
+    if (updated) setActiveContractContext(updated);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    vcAssessment,
+    paAssessment,
+    paExtLatest,
+    fcResult,
+    ccBatchResult,
+    bahResult,
+    warResult,
+    licIpResult,
+    modAssessment,
+    tpChangeResult,
+    tpAdjResult,
+    rpo120Result,
+    contractId,
+  ]);
 
   const runRpo120Cal = async () => {
     if (rpo120Contracts.length === 0) {
@@ -1958,7 +2450,8 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
       document.body.removeChild(a);
       URL.revokeObjectURL(downloadUrl);
       setIsClientReportModalOpen(false);
-      toast.success(`Client report ready (${data?.pages ?? 10} pages)`);
+      const fmt = data?.format === 'html' ? 'HTML' : 'PDF';
+      toast.success(`Client report ready (${fmt}, ${data?.pages ?? 10} pages)`);
     } catch (error: any) {
       toast.error(error?.message || 'Failed to generate client report');
     } finally {
@@ -2338,459 +2831,63 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
       ? `5-step model for revenue recognition from customer contracts · Clause risk: ${String(clauseDetection.overall_risk)}`
       : '5-step model for revenue recognition from customer contracts';
 
+  const handleIfrs15NavSelect = (navId: string) => {
+    const id = navId as Ifrs15NavId;
+    setActiveNavId(id);
+    setIfrs15DashTab(navIdToDashTab(id));
+    const step = navIdToCalculateStep(id);
+    if (step != null) setCalculateStep(step);
+    applyNavSideEffects(id, {
+      setShowVcSection,
+      setShowModificationSection,
+      setIsClientReportModalOpen,
+      generateMasterReport: results ? () => void generateMasterReport() : undefined,
+    });
+  };
+
+  const kpiItems = [
+    {
+      label: 'Total Contract Value',
+      value: displayTp == null ? '—' : formatCurrency(displayTp, currency, 0),
+      accent: 'orange' as const,
+    },
+    {
+      label: 'Revenue Recognised',
+      value: results ? formatCurrency(rec, currency, 0) : '—',
+      accent: 'orange' as const,
+    },
+    {
+      label: 'Deferred Revenue (Contract Liability)',
+      value: results ? deferredKpiText : '—',
+      accent: 'orange' as const,
+    },
+    {
+      label: 'Contract Assets',
+      value:
+        typeof totalContractAssets === 'number'
+          ? formatCurrency(totalContractAssets, currency, 0)
+          : '—',
+      accent: 'pink' as const,
+      helpText: contractAssetNoteStr || undefined,
+    },
+  ];
+
+  const calculateMaxStep = results ? 5 : extractedData ? 2 : 1;
+  const showCalcStep = (step: number) =>
+    ifrs15DashTab === 'calculate' && calculateStep === step;
+
   return (
     <SidebarLayout pageTitle="IFRS 15 — Revenue Recognition" pageSubtitle={pageSubtitleText}>
-      {/* Module Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
-        {moduleCards.map((m) => (
-          <div
-            key={m.id}
-            onClick={() => setActiveModule(activeModule === m.id ? null : m.id)}
-            className={`bg-gradient-to-br ${m.gradient} rounded-card p-4 text-white cursor-pointer hover:shadow-lg transition-shadow ${activeModule === m.id ? 'ring-2 ring-white ring-offset-2' : ''}`}
-          >
-            <p className="text-sm font-semibold">{m.name}</p>
-          </div>
-        ))}
-      </div>
 
-      {/* Module content – expand when a card is clicked (same pattern as IFRS 16) */}
-      {activeModule && (
-        <div className="bg-white rounded-card p-6 border border-border-default shadow-card mb-8">
-          {activeModule === 'contract-identification' && (
-            <>
-              <div className="border-b border-border-default pb-4 mb-6">
-                <h3 className="text-base font-bold text-text-primary">Contract Identification</h3>
-                <p className="text-xs text-text-muted mt-1">Contract details from results</p>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div><span className="text-xs text-text-muted">Contract ID</span><p className="text-sm font-medium text-text-primary mt-1">{contractId}</p></div>
-                <div><span className="text-xs text-text-muted">Customer Name</span><p className="text-sm font-medium text-text-primary mt-1">{customerName}</p></div>
-                <div><span className="text-xs text-text-muted">Contract Date</span><p className="text-sm font-medium text-text-primary mt-1">{contractDate}</p></div>
-                <div><span className="text-xs text-text-muted">Contract Term / Duration</span><p className="text-sm font-medium text-text-primary mt-1">{contractTerm === '—' ? '—' : `${contractTerm} months`}</p></div>
-                <div><span className="text-xs text-text-muted">Transaction Price / Contract Value</span><p className="text-sm font-medium text-text-primary mt-1">{results ? (displayTp == null ? '—' : formatCurrency(displayTp, currency, 0)) : (step1.total_contract_value ? formatCurrency(Number(step1.total_contract_value), sanitizeCurrencyCode(step1.currency, 'USD'), 0) : '—')}</p></div>
-              </div>
-            </>
-          )}
-          {activeModule === 'performance-obligations' && (
-            <>
-              <div className="border-b border-border-default pb-4 mb-6">
-                <h3 className="text-base font-bold text-text-primary">Performance Obligations</h3>
-                <p className="text-xs text-text-muted mt-1">Identified obligations and allocation</p>
-              </div>
-              {(perfObs.length > 0 || Object.keys(allocations).length > 0) ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b border-border-default">
-                        <th className="text-left py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Obligation</th>
-                        <th className="text-right py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Allocation Value</th>
-                        <th className="text-left py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Recognition Type</th>
-                        <th className="text-left py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {perfObs.length > 0 ? perfObs.map((p: any) => {
-                        const rec = p.recognition_method === 'point_in_time' ? 'Point in Time' : 'Over Time';
-                        const status = ifrs15PoRecognitionStatus(p as Record<string, unknown>);
-                        return (
-                          <tr key={p.obligation_id || p.obligation} className="border-b border-border-default hover:bg-orange-light">
-                            <td className="py-2 px-3 text-sm text-text-primary">{p.obligation || p.obligation_id}</td>
-                            <td className="py-2 px-3 text-sm text-right font-semibold amount">{formatCurrency(Number(p.allocated_amount ?? 0), currency, 0)}</td>
-                            <td className="py-2 px-3 text-sm text-text-primary">{rec}</td>
-                            <td className="py-2 px-3">
-                              <span className={`px-2 py-1 text-xs font-medium rounded-full ${ifrs15PoStatusBadgeClass(status)}`}>{status}</span>
-                            </td>
-                          </tr>
-                        );
-                      }) : Object.entries(allocations).map(([id, amt]) => (
-                        <tr key={id} className="border-b border-border-default hover:bg-orange-light">
-                          <td className="py-2 px-3 text-sm text-text-primary">{id}</td>
-                          <td className="py-2 px-3 text-sm text-right font-semibold amount">{formatCurrency(Number(amt), currency, 0)}</td>
-                          <td className="py-2 px-3 text-sm text-text-muted">—</td>
-                          <td className="py-2 px-3 text-sm text-text-muted">—</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="text-sm text-text-muted">Upload and calculate a contract to see performance obligations.</p>
-              )}
-            </>
-          )}
-          {activeModule === 'transaction-price' && (
-            <>
-              <div className="border-b border-border-default pb-4 mb-6">
-                <h3 className="text-base font-bold text-text-primary">Transaction Price</h3>
-                <p className="text-xs text-text-muted mt-1">Step 3 – Determine transaction price</p>
-              </div>
-              <div className="p-4 bg-orange-light rounded-lg border border-orange-border space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm font-medium text-text-primary">Total transaction price</span>
-                  <span className="text-lg font-bold text-orange-primary amount">{results ? (displayTp == null ? '—' : formatCurrency(displayTp, currency, 0)) : '—'}</span>
-                </div>
-                <div className="flex justify-between items-center text-sm text-text-secondary">
-                  <span>Variable consideration</span>
-                  <span className="amount">{results ? formatCurrency(disclosureData?.transaction_price_components?.variable_consideration ?? 0, currency, 0) : '—'}</span>
-                </div>
-                <div className="flex justify-between items-center text-sm text-text-secondary">
-                  <span>Currency</span>
-                  <span className="font-medium">{currency}</span>
-                </div>
-                <div className="flex justify-between items-center text-sm text-text-secondary">
-                  <span>Payment terms</span>
-                  <span>{extractedData?.step3_transaction_price?.significant_financing_component?.payment_terms_exceed_one_year ? 'Exceeds 1 year' : (results ? 'Per contract' : '—')}</span>
-                </div>
-                {disclosureData?.transaction_price_components && (
-                  <div className="pt-2 mt-2 border-t border-orange-border space-y-1 text-sm text-text-secondary">
-                    <div className="flex justify-between"><span>Fixed consideration</span><span className="amount">{formatCurrency(disclosureData.transaction_price_components.fixed_consideration ?? 0, currency, 0)}</span></div>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-          {activeModule === 'price-allocation' && (
-            <>
-              <div className="border-b border-border-default pb-4 mb-6">
-                <h3 className="text-base font-bold text-text-primary">Price Allocation</h3>
-                <p className="text-xs text-text-muted mt-1">Step 4 – Allocate transaction price to obligations (SSP method)</p>
-              </div>
-              {(perfObs.length > 0 || Object.keys(allocations).length > 0) ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b border-border-default">
-                        <th className="text-left py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Obligation</th>
-                        <th className="text-right py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Allocated amount</th>
-                        <th className="text-right py-2 px-3 text-xs font-semibold text-text-secondary uppercase">% of total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {perfObs.length > 0 ? perfObs.map((p: any) => {
-                        const amt = Number(p.allocated_amount ?? 0);
-                        const pct = tp > 0 ? ((amt / tp) * 100).toFixed(1) : '0';
-                        return (
-                          <tr key={p.obligation_id || p.obligation} className="border-b border-border-default hover:bg-orange-light">
-                            <td className="py-2 px-3 text-sm text-text-primary">{p.obligation || p.obligation_id}</td>
-                            <td className="py-2 px-3 text-sm text-right font-semibold amount">{formatCurrency(amt, currency, 0)}</td>
-                            <td className="py-2 px-3 text-sm text-right text-text-secondary">{pct}%</td>
-                          </tr>
-                        );
-                      }) : Object.entries(allocations).map(([id, amt]) => {
-                        const pct = tp > 0 ? ((Number(amt) / tp) * 100).toFixed(1) : '0';
-                        return (
-                          <tr key={id} className="border-b border-border-default hover:bg-orange-light">
-                            <td className="py-2 px-3 text-sm text-text-primary">{id}</td>
-                            <td className="py-2 px-3 text-sm text-right font-semibold amount">{formatCurrency(Number(amt), currency, 0)}</td>
-                            <td className="py-2 px-3 text-sm text-right text-text-secondary">{pct}%</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="text-sm text-text-muted">Calculate a contract to see allocation.</p>
-              )}
-            </>
-          )}
-          {activeModule === 'revenue-recognition' && (
-            <>
-              <div className="border-b border-border-default pb-4 mb-6">
-                <h3 className="text-base font-bold text-text-primary">Revenue Recognition</h3>
-                <p className="text-xs text-text-muted mt-1">Step 5 – Recognise revenue when/as obligations are satisfied</p>
-              </div>
-              {results ? (
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="flex justify-between p-3 hover:bg-green-50 rounded-lg border-l-4 border-green-500">
-                      <span className="text-sm text-text-secondary">Revenue Recognised</span>
-                      <span className="font-bold text-green-600 amount">{formatCurrency(rec, currency, 0)}</span>
-                    </div>
-                    <div className="flex justify-between p-3 hover:bg-amber-50 rounded-lg border-l-4 border-amber-500">
-                      <span className="text-sm text-text-secondary">Deferred Revenue</span>
-                      <span className={`font-bold amount ${typeof def === 'number' && def > 0 ? 'text-amber-600' : 'text-text-muted'}`}>
-                        {deferredKpiText}
-                      </span>
-                    </div>
-                    <div className="flex justify-between p-3">
-                      <span className="text-sm text-text-secondary">Effective Revenue Rate</span>
-                      <span className="font-bold text-text-primary">{effectiveRevenueRate}%</span>
-                    </div>
-                  </div>
-                  {schedule?.length > 0 && (
-                    <>
-                      <h4 className="text-sm font-semibold text-text-primary mt-4">Revenue Schedule</h4>
-                      <div className="overflow-x-auto">
-                        <table className="w-full">
-                          <thead>
-                            <tr className="border-b border-border-default">
-                              <th className="text-left py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Period</th>
-                              <th className="text-left py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Obligation</th>
-                              <th className="text-right py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Amount</th>
-                              <th className="text-left py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Date</th>
-                              <th className="text-left py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Status</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {schedule.map((row: any, idx: number) => {
-                              const displayAmt = ifrs15ScheduleDisplayAmount(row);
-                              const status = ifrs15ScheduleRowStatus(row);
-                              return (
-                                <tr key={idx} className="border-b border-border-default hover:bg-orange-light">
-                                  <td className="py-2 px-3 text-sm text-text-primary">{row.Period ?? row.Month ?? row.period ?? idx + 1}</td>
-                                  <td className="py-2 px-3 text-sm text-text-primary">{row.Obligation ?? row.obligation ?? row.Obligation_ID ?? row.obligation_id ?? '—'}</td>
-                                  <td className="py-2 px-3 text-sm text-right font-semibold amount">{formatCurrency(displayAmt, currency, 0)}</td>
-                                  <td className="py-2 px-3 text-sm text-text-secondary">{row.Date ?? row.date ?? '—'}</td>
-                                  <td className="py-2 px-3">
-                                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${status === 'Recognised' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>{status}</span>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    </>
-                  )}
-                </div>
-              ) : (
-                <p className="text-sm text-text-muted">Calculate a contract to see recognition.</p>
-              )}
-            </>
-          )}
-          {activeModule === 'contract-modifications' && (
-            <>
-              <div className="border-b border-border-default pb-4 mb-6">
-                <h3 className="text-base font-bold text-text-primary">Contract Modifications</h3>
-                <p className="text-xs text-text-muted mt-1">Contract modification history</p>
-              </div>
-              {(results?.modifications ?? results?.disclosure_data?.contract_modifications ?? []).length > 0 ? (
-                <ul className="space-y-2 list-disc list-inside text-sm text-text-primary">
-                  {(results.modifications || results.disclosure_data?.contract_modifications || []).map((m: any, i: number) => (
-                    <li key={i}>{typeof m === 'string' ? m : (m.description || m.date || JSON.stringify(m))}</li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="p-4 bg-bg-light rounded-lg border border-border-default text-center">
-                  <p className="text-sm text-text-muted">No modifications detected.</p>
-                </div>
-              )}
-            </>
-          )}
-          {activeModule === 'disclosures' && (
-            <>
-              <div className="flex items-center justify-between border-b border-border-default pb-4 mb-6">
-                <h3 className="text-lg font-bold text-text-primary">IFRS 15 DISCLOSURE NOTES</h3>
-                <div className="flex gap-2">
-                  <Button variant="secondary" size="sm" onClick={handleCopyDisclosure} className="bg-white border border-border-default">
-                    <Copy className="w-4 h-4 mr-2" /> Copy
-                  </Button>
-                  <Button variant="secondary" size="sm" onClick={handleDownloadPDF} className="bg-white border border-border-default">
-                    <Download className="w-4 h-4 mr-2" /> Download PDF
-                  </Button>
-                </div>
-              </div>
-              {results ? (
-                <pre className="whitespace-pre-wrap text-sm text-text-primary font-sans">{generateDisclosureText()}</pre>
-              ) : (
-                <p className="text-text-muted text-center py-8">Calculate a contract to generate disclosures.</p>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {/* KPI Cards - same style as IFRS 16 */}
-      {results && (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <div className="bg-white rounded-card p-5 border border-border-default shadow-card">
-          <div className="h-1 bg-gradient-orange rounded-t-full -mt-5 -mx-5 mb-4"></div>
-          <h4 className="text-sm font-medium text-text-secondary mb-2">Total Contract Value</h4>
-            <p className="text-2xl font-bold text-text-primary amount">{displayTp == null ? '—' : formatCurrency(displayTp, currency, 0)}</p>
-        </div>
-        <div className="bg-white rounded-card p-5 border border-border-default shadow-card">
-          <div className="h-1 bg-gradient-orange rounded-t-full -mt-5 -mx-5 mb-4"></div>
-          <h4 className="text-sm font-medium text-text-secondary mb-2">Revenue Recognised</h4>
-            <p className="text-2xl font-bold text-text-primary amount">{formatCurrency(rec, currency, 0)}</p>
-        </div>
-        <div className="bg-white rounded-card p-5 border border-border-default shadow-card">
-          <div className="h-1 bg-gradient-orange rounded-t-full -mt-5 -mx-5 mb-4"></div>
-            <h4 className="text-sm font-medium text-text-secondary mb-2">Deferred Revenue (Contract Liability)</h4>
-            <p className={deferredKpiClass}>{deferredKpiText}</p>
-        </div>
-        <div className="bg-white rounded-card p-5 border border-border-default shadow-card">
-          <div className="h-1 bg-gradient-pink rounded-t-full -mt-5 -mx-5 mb-4"></div>
-          <div className="flex items-center gap-2 mb-2">
-            <h4 className="text-sm font-medium text-text-secondary">Contract Assets</h4>
-            {contractAssetNoteStr ? (
-              <span title={contractAssetNoteStr} className="inline-flex cursor-help">
-                <HelpCircle className="w-4 h-4 text-text-muted" aria-label={contractAssetNoteStr} />
-              </span>
-            ) : null}
-          </div>
-            <p className="text-2xl font-bold text-text-primary amount">{typeof totalContractAssets === 'number' ? formatCurrency(totalContractAssets, currency, 0) : '—'}</p>
-        </div>
-      </div>
-      )}
-
-      <div className="space-y-4">
-        <div className="flex flex-wrap gap-2 border-b border-border-default pb-2">
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('portfolio')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'portfolio'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Portfolio
-          </button>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('calculate')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'calculate'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Revenue Calculate
-          </button>
-          <Link
-            href="/dashboard/ifrs15/realestate"
-            className="px-4 py-2 rounded-lg text-sm font-semibold transition-colors bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40 inline-flex items-center gap-1.5"
-          >
-            <Building2 className="w-4 h-4" />
-            Real Estate UAE
-          </Link>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('deferred-rev')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'deferred-rev'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Deferred Revenue Rec
-          </button>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('rpo')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'rpo'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            RPO Disclosure
-          </button>
-        </div>
-        <div className="flex flex-wrap gap-2 border-b border-border-default pb-2">
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('principal-agent')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'principal-agent'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Principal vs Agent
-          </button>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('contract-costs')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'contract-costs'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Contract Costs
-          </button>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('licenses-ip')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'licenses-ip'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Licenses of IP
-          </button>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('audit-trail')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'audit-trail'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Audit Trail
-          </button>
-        </div>
-        <div className="flex flex-wrap gap-2 border-b border-border-default pb-3">
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('material-rights')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'material-rights'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Material Rights
-          </button>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('warranties')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'warranties'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Warranties
-          </button>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('bill-and-hold')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'bill-and-hold'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Bill-and-Hold
-          </button>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('financing-component')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'financing-component'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            Financing Component
-          </button>
-          <button
-            type="button"
-            onClick={() => setIfrs15DashTab('tp-adjustments')}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-              ifrs15DashTab === 'tp-adjustments'
-                ? 'bg-gradient-orange text-white shadow'
-                : 'bg-bg-light text-text-secondary border border-border-default hover:bg-orange-light/40'
-            }`}
-          >
-            TP Adjustments
-          </button>
-        </div>
+      <ModuleWorkspaceLayout
+        navGroups={IFRS15_NAV_GROUPS}
+        activeNavId={activeNavId}
+        onNavSelect={handleIfrs15NavSelect}
+        mobileNavOpen={mobileNavOpen}
+        onMobileNavOpenChange={setMobileNavOpen}
+        kpiItems={kpiItems}
+        navTitle="IFRS 15 Menu"
+      >
 
         {ifrs15DashTab === 'portfolio' && (
           <div className="bg-white rounded-card p-6 border border-border-default shadow-card space-y-6">
@@ -3437,6 +3534,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <h3 className="text-lg font-bold text-text-primary">REMAINING PERFORMANCE OBLIGATIONS</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.120-122 — Mandatory Disclosure</p>
             </div>
+            {contractContextBar()}
             <div className="rounded-lg border border-border-default bg-bg-light p-4 text-sm text-text-secondary">
               IFRS 15.120 requires disclosure of the aggregate transaction price allocated to unsatisfied performance obligations at period end, and when the entity expects to recognise that revenue. This note is required in the annual report of any listed company.
             </div>
@@ -3898,6 +3996,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <h3 className="text-lg font-bold text-text-primary">PRINCIPAL vs AGENT ASSESSMENT</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.B34-B38</p>
             </div>
+            {contractContextBar()}
             <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-4 text-sm text-text-secondary">
               Determines whether revenue is recognised GROSS (full contract value) or NET (margin only) when a third party is involved. The key question: does the entity CONTROL the good or service before transferring it to the customer? (IFRS 15.B35)
             </div>
@@ -4136,6 +4235,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <h3 className="text-lg font-bold text-text-primary">CONTRACT COSTS — IFRS 15.91-94</h3>
               <p className="text-xs text-text-muted mt-1">Costs to obtain and fulfil contracts</p>
             </div>
+            {contractContextBar()}
             <div className="rounded-lg border border-border-default bg-bg-light p-4 text-sm text-text-secondary">
               Sales commissions and other incremental costs of obtaining a contract must be capitalised and amortised if the expected amortisation period exceeds one year (IFRS 15.91). Practical expedient: expense immediately if amortisation period ≤ 1 year (IFRS 15.94).
             </div>
@@ -4316,6 +4416,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <h3 className="text-lg font-bold text-text-primary">LICENSES OF INTELLECTUAL PROPERTY</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.B52-B63</p>
             </div>
+            {contractContextBar()}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
               <div className="rounded-lg border border-green-200 p-3 bg-green-50/40">
                 <p className="font-semibold text-green-900 mb-1">Right to Use</p>
@@ -4615,8 +4716,10 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
             )}
           </div>
         )}
-        {ifrs15DashTab === 'material-rights' && (
-          <div className="bg-white rounded-card p-6 border border-border-default shadow-card space-y-6">
+        {ifrs15DashTab === 'warranties-material-rights' && (
+          <div className="bg-white rounded-lg p-6 border border-[#E5E7EB] shadow-sm space-y-8">
+            {contractContextBar()}
+            <div className="space-y-6">
             <div className="border-b border-border-default pb-4">
               <h3 className="text-lg font-bold text-text-primary">CUSTOMER OPTIONS &amp; MATERIAL RIGHTS</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.B40-B43</p>
@@ -4857,10 +4960,9 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                 })}
               </div>
             )}
-          </div>
-        )}
-        {ifrs15DashTab === 'warranties' && (
-          <div className="bg-white rounded-card p-6 border border-border-default shadow-card space-y-6">
+            </div>
+
+            <div className="border-t border-border-default pt-8 space-y-6">
             <div className="border-b border-border-default pb-4">
               <h3 className="text-lg font-bold text-text-primary">WARRANTIES</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.B28-B33 | IAS 37</p>
@@ -5183,6 +5285,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                 })}
               </div>
             )}
+            </div>
           </div>
         )}
         {ifrs15DashTab === 'bill-and-hold' && (
@@ -5191,6 +5294,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <h3 className="text-lg font-bold text-text-primary">BILL-AND-HOLD ARRANGEMENTS</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.B79-B82</p>
             </div>
+            {contractContextBar()}
             <div className="rounded-lg border border-red-300 bg-red-50/90 p-4 text-sm text-red-950 space-y-2">
               <p className="font-bold flex items-center gap-2">
                 <AlertTriangle className="w-5 h-5 shrink-0" />
@@ -5475,6 +5579,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <h3 className="text-lg font-bold text-text-primary">SIGNIFICANT FINANCING COMPONENT</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.60-65</p>
             </div>
+            {contractContextBar()}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-4 text-sm text-text-secondary">
                 <p className="font-semibold text-blue-900 mb-2">Advance payment</p>
@@ -5789,6 +5894,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <h3 className="text-lg font-bold text-text-primary">TRANSACTION PRICE ADJUSTMENTS</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.66-72 — Non-cash consideration & consideration payable to the customer</p>
             </div>
+            {contractContextBar()}
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
@@ -6291,8 +6397,17 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
           </div>
         )}
         {ifrs15DashTab === 'calculate' && (
+        <>
+        <CalculateStepper
+          steps={IFRS15_CALCULATE_STEPS}
+          currentStep={calculateStep}
+          onStepChange={setCalculateStep}
+          maxReachableStep={calculateMaxStep}
+        />
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6">
         <div className="space-y-6">
+          {showCalcStep(1) && (
+          <>
           {(extractedData as { _realestate_overlay?: Record<string, unknown> })?._realestate_overlay ? (
             <div className="bg-orange-50 border border-orange-200 rounded-lg px-4 py-3 flex flex-wrap items-center justify-between gap-2">
               <p className="text-sm text-text-primary">
@@ -6329,20 +6444,42 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
             {activeTab === 'upload' && (
               <div
                 className="border-2 border-dashed border-orange-primary rounded-lg p-12 text-center hover:bg-orange-light/30 cursor-pointer"
-                onClick={() => document.getElementById('ifrs15-file')?.click()}
+                onClick={() => fileInputRef.current?.click()}
                 onDrop={(e) => {
                   e.preventDefault();
                   const f = e.dataTransfer.files[0];
-                  if (f) handleFileSelect({ target: { files: [f] } } as any);
+                  if (f) handleFileSelect({ target: { files: [f] } } as React.ChangeEvent<HTMLInputElement>);
                 }}
                 onDragOver={(e) => e.preventDefault()}
             >
               <Upload className="w-16 h-16 text-orange-primary mx-auto mb-4" />
                 <h3 className="text-lg font-semibold mb-2 text-text-primary">Drop revenue contract here</h3>
                 <p className="text-sm text-text-muted mb-6">Supports PDF, DOCX, TXT, Excel (.xlsx, .xls)</p>
-                <input type="file" id="ifrs15-file" accept=".pdf,.docx,.txt,.xlsx,.xls" className="hidden" onChange={handleFileSelect} />
-                {file && !isUploading && <p className="text-sm text-text-primary font-medium">{file.name}</p>}
-                {isUploading && <div className="flex items-center justify-center gap-2 text-orange-primary"><Loader2 className="w-4 h-4 animate-spin" /> Extracting...</div>}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,.docx,.txt,.xlsx,.xls"
+                  className="hidden"
+                  onChange={handleFileSelect}
+                />
+                {file && !isUploading && !isCalculating && (
+                  <p className="text-sm text-text-primary font-medium">{file.name}</p>
+                )}
+                {(isUploading || isCalculating) && (
+                  <div className="flex flex-col items-center justify-center gap-1 text-orange-primary">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      {isCalculating
+                        ? 'Running IFRS 15 calculations…'
+                        : `Extracting… ${uploadElapsedSec > 0 ? `(${uploadElapsedSec}s)` : ''}`}
+                    </div>
+                    {uploadElapsedSec >= 15 && (
+                      <p className="text-xs text-text-muted max-w-sm">
+                        AI extraction can take 1–2 minutes for PDF/DOCX contracts. Excel templates may be faster via Real Estate UAE.
+                      </p>
+                    )}
+                  </div>
+                )}
             </div>
             )}
 
@@ -6367,22 +6504,16 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     }
                     setIsUploading(true);
                     setExtractedData(null);
+                    setResults(null);
                     applyClauseDetectionFromResponse(null);
                     try {
                       const response = await ifrs15Api.extract(contractText) as any;
                       const { data, error } = response;
                       if (error) throw new Error(error);
-                      setExtractedData(data?.extracted_data);
                       if (data?.clause_detection) {
                         applyClauseDetectionFromResponse(data.clause_detection as Record<string, unknown>);
                       }
-                      const vc = data?.extracted_data?.step3_transaction_price?.variable_consideration || {};
-                      setVcConstraint({
-                        constraint_method: vc.constraint_method ?? 'percentage',
-                        constraint_percentage: Number(vc.constraint_percentage ?? 100),
-                        variable_consideration_constrained: Number(vc.variable_consideration_constrained ?? 0),
-                      });
-                      toast.success('Contract extracted successfully!');
+                      await autoCalculateFromExtraction(data?.extracted_data);
                     } catch (e: any) {
                       toast.error(e?.message || 'Extraction failed');
                     } finally {
@@ -6782,7 +6913,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       0
                     )}
                   </div>
-                  <div><span className="text-text-muted"># POBs:</span> {extractedData?.step2_performance_obligations?.total_obligations_count ?? 0}</div>
+                  <div><span className="text-text-muted"># POBs:</span> {extractedData?.step2_performance_obligations?.identified_obligations?.length ?? extractedData?.step2_performance_obligations?.total_obligations_count ?? 0}</div>
                   <div><span className="text-text-muted">Payment Terms:</span> {extractedData?.step3_transaction_price?.significant_financing_component?.payment_terms_exceed_one_year ? 'Exceeds 1 year' : (extractedData?.step3_transaction_price ? 'Per contract' : '—')}</div>
                   <div><span className="text-text-muted">Duration:</span> {step1.contract_term_months ?? '—'} months</div>
                 </div>
@@ -6955,11 +7086,13 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               )}
             </div>
           )}
+          </>
+          )}
 
           {/* Results - same level of detail as IFRS 16 */}
-          {results && (
+          {results && (showCalcStep(2) || showCalcStep(3) || showCalcStep(4) || showCalcStep(5)) && (
             <>
-              {results?.revenue_engine_result && (
+              {showCalcStep(3) && results?.revenue_engine_result && (
                 <div className="p-5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl mb-4">
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="font-bold text-blue-900">Revenue Engine Result</h3>
@@ -6968,11 +7101,23 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     </span>
                   </div>
 
+                  {results?.revenue_engine_result?.schedule_based ||
+                  (results?.revenue_engine_result?.poc_percentage == null &&
+                    results?.revenue_engine_result?.revenue_this_period == null) ? (
+                    <p className="text-sm text-blue-800">
+                      Not applicable — time-based recognition per performance obligation schedule (IFRS 15 Step 5).
+                      {typeof results?.total_recognised === 'number' && results.total_recognised > 0 && (
+                        <span className="block mt-2 font-semibold">
+                          Total recognised to date: {formatCurrency(results.total_recognised, currency, 0)}
+                        </span>
+                      )}
+                    </p>
+                  ) : (
                   <div className="grid grid-cols-3 gap-4">
                     <div>
                       <div className="text-xs text-gray-500">Revenue This Period</div>
-                      <div className="text-2xl font-bold text-blue-700">
-                        ${results?.revenue_engine_result?.revenue_this_period?.toLocaleString?.()}
+                      <div className="text-2xl font-bold text-blue-700 amount">
+                        {formatCurrency(Number(results?.revenue_engine_result?.revenue_this_period ?? 0), currency, 0)}
                       </div>
                     </div>
 
@@ -6994,14 +7139,15 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     {results?.revenue_engine_result?.remaining_revenue != null && (
                       <div>
                         <div className="text-xs text-gray-500">Remaining Revenue</div>
-                        <div className="text-2xl font-bold text-orange-600">
-                          ${results?.revenue_engine_result?.remaining_revenue?.toLocaleString?.()}
+                        <div className="text-2xl font-bold text-orange-600 amount">
+                          {formatCurrency(Number(results?.revenue_engine_result?.remaining_revenue ?? 0), currency, 0)}
                         </div>
                       </div>
                     )}
                   </div>
+                  )}
 
-                  {results?.revenue_engine_result?.formula && (
+                  {results?.revenue_engine_result?.formula && !results?.revenue_engine_result?.schedule_based && (
                     <div className="mt-3 p-2 bg-blue-900 rounded text-xs text-white font-mono text-center">
                       📐 {results?.revenue_engine_result?.formula}
                     </div>
@@ -7011,38 +7157,38 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     <div className="mt-3 p-3 bg-red-50 border border-red-300 rounded-lg">
                       <div className="font-bold text-red-700">⚠ ONEROUS CONTRACT DETECTED</div>
                       <div className="text-sm text-red-600 mt-1">
-                        Expected loss: ${results?.onerous_check?.expected_loss?.toLocaleString?.()} — Provision required immediately (IAS 37)
+                        Expected loss: {formatCurrency(Number(results?.onerous_check?.expected_loss ?? 0), currency, 0)} — Provision required immediately (IAS 37)
                       </div>
                     </div>
                   )}
 
                   {results?.revenue_engine_result?.switched_to_poc && (
                     <div className="mt-3 p-2 bg-amber-50 border border-amber-300 rounded text-sm text-amber-700">
-                      🔒 Cap exceeded by ${results?.revenue_engine_result?.cap_exceeded_by?.toLocaleString?.()} — Switched from T&M to POC method
+                      🔒 Cap exceeded by {formatCurrency(Number(results?.revenue_engine_result?.cap_exceeded_by ?? 0), currency, 0)} — Switched from T&M to POC method
                     </div>
                   )}
                 </div>
               )}
 
-              {results?.sla_result?.total_penalty > 0 && (
+              {showCalcStep(3) && results?.sla_result?.total_penalty > 0 && (
                 <div className="p-4 bg-red-50 border border-red-200 rounded-xl mb-4">
                   <h3 className="font-bold text-red-800 mb-2">SLA Penalties — Negative Revenue</h3>
-                  <div className="text-2xl font-bold text-red-700 mb-2">
-                    −${results?.sla_result?.total_penalty?.toLocaleString?.()}
+                  <div className="text-2xl font-bold text-red-700 mb-2 amount">
+                    −{formatCurrency(Number(results?.sla_result?.total_penalty ?? 0), currency, 0)}
                   </div>
                   <div className="space-y-1">
                     {results?.sla_result?.sla_details
                       ?.filter((s: any) => s?.breach)
                       ?.map((s: any, i: number) => (
                         <div key={i} className="text-sm text-red-600">
-                          • {s?.sla_name}: target {s?.target}%, actual {s?.actual}% → penalty ${s?.penalty?.toFixed?.(0)}
+                          • {s?.sla_name}: target {s?.target}%, actual {s?.actual}% → penalty {formatCurrency(Number(s?.penalty ?? 0), currency, 0)}
                         </div>
                       ))}
                   </div>
                 </div>
               )}
 
-              {results?.vc_constraint_result && (
+              {showCalcStep(3) && results?.vc_constraint_result && (
                 <div className="p-5 bg-white border border-border-default rounded-xl mb-4 shadow-sm">
                   <h3 className="font-bold text-text-primary mb-1">IFRS 15.56–58 — Variable consideration constraint</h3>
                   <p className="text-xs text-text-muted mb-3">Applied in transaction price calculation</p>
@@ -7058,6 +7204,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                             ? 'bg-orange-100 text-orange-900'
                             : 'bg-red-100 text-red-800';
                     const raw = Number(cr.estimated_vc_before_constraint ?? 0);
+                    const constrained = Number(cr.constrained_amount ?? 0);
                     const excl = Number(cr.excluded_amount ?? 0);
                     const factorLabels: Record<string, string> = {
                       susceptible_to_external: 'Highly susceptible to external factors',
@@ -7082,6 +7229,20 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                           </ul>
                         )}
                         <p className="text-sm text-text-primary leading-relaxed">{String(cr.explanation || '')}</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                          <div>
+                            <p className="text-xs text-text-muted">VC before constraint</p>
+                            <p className="text-sm font-semibold amount">{formatCurrency(raw, currency, 2)}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-text-muted">Constrained amount included</p>
+                            <p className="text-sm font-semibold text-green-700 amount">{formatCurrency(constrained, currency, 2)}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-text-muted">Excluded from transaction price</p>
+                            <p className="text-sm font-semibold text-red-600 amount">{formatCurrency(excl, currency, 2)}</p>
+                          </div>
+                        </div>
                         {excl > 0 && (
                           <p className="text-sm font-semibold text-orange-700">
                             Transaction price reduced by {formatCurrency(excl, currency, 0)} due to constraint application (vs unconstrained VC{' '}
@@ -7095,6 +7256,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                 </div>
               )}
 
+              {showCalcStep(3) && (
               <div className="bg-white rounded-card p-6 border border-border-default shadow-card">
                 <div className="border-b border-border-default pb-4 mb-6">
                   <h3 className="text-base font-bold text-text-primary">Calculation Results</h3>
@@ -7134,10 +7296,48 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     <span className="text-sm text-text-secondary">Number of Performance Obligations</span>
                     <span className="text-base font-bold text-text-primary">{numPOBs}</span>
               </div>
+                  {results?.revenue_recognition_audit_trail && (
+                    <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs text-text-secondary leading-relaxed">
+                      <span className="font-semibold text-text-primary block mb-1">Recognition audit trail</span>
+                      {String(results.revenue_recognition_audit_trail)}
+                    </div>
+                  )}
             </div>
           </div>
+              )}
 
-              {perfObs.length > 0 && (
+              {showCalcStep(2) && Array.isArray(results?.ssp_allocation_table) && results.ssp_allocation_table.length > 0 && (
+                <div className="bg-white rounded-card p-6 border border-border-default shadow-card mb-4">
+                  <h3 className="text-base font-bold text-text-primary mb-1">Step 4 — SSP Allocation</h3>
+                  <p className="text-xs text-text-muted mb-4">Standalone selling price allocation to transaction price</p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-border-default">
+                          <th className="text-left py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Obligation</th>
+                          <th className="text-right py-2 px-3 text-xs font-semibold text-text-secondary uppercase">List SSP</th>
+                          <th className="text-right py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Adjusted SSP</th>
+                          <th className="text-right py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Allocated %</th>
+                          <th className="text-right py-2 px-3 text-xs font-semibold text-text-secondary uppercase">Allocated</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {results.ssp_allocation_table.map((row: any, idx: number) => (
+                          <tr key={row.obligation_id || idx} className="border-b border-border-default hover:bg-orange-light">
+                            <td className="py-2 px-3 text-sm text-text-primary">{row.obligation || row.obligation_id}</td>
+                            <td className="py-2 px-3 text-sm text-right amount">{formatCurrency(Number(row.list_ssp ?? 0), currency, 0)}</td>
+                            <td className="py-2 px-3 text-sm text-right amount">{formatCurrency(Number(row.adjusted_ssp ?? row.list_ssp ?? 0), currency, 0)}</td>
+                            <td className="py-2 px-3 text-sm text-right">{Number(row.allocated_pct ?? 0).toFixed(1)}%</td>
+                            <td className="py-2 px-3 text-sm text-right font-semibold amount">{formatCurrency(Number(row.allocated_amount ?? 0), currency, 0)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {showCalcStep(2) && perfObs.length > 0 && (
                 <div className="bg-white rounded-card p-6 border border-border-default shadow-card">
                   <h3 className="text-base font-bold text-text-primary mb-4">Revenue per Obligation</h3>
                   <div className="overflow-x-auto">
@@ -7162,6 +7362,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               )}
 
               {/* Revenue Recognition Schedule Table - same style as IFRS 16 amortization */}
+              {showCalcStep(3) && (
               <div className="bg-white rounded-card p-6 border border-border-default shadow-card">
             <div className="border-b border-border-default pb-4 mb-6">
               <h3 className="text-base font-bold text-text-primary">Revenue Recognition Schedule</h3>
@@ -7228,13 +7429,17 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <p className="text-sm text-text-muted">No revenue schedule — run calculation first</p>
             )}
           </div>
+              )}
 
               {/* Contract Modifications — IFRS 15.18-21 */}
+              {showCalcStep(4) && (
+              <>
               <div className="bg-white rounded-card p-6 border border-border-default shadow-card">
                 <div className="border-b border-border-default pb-4 mb-4">
                   <h3 className="text-base font-bold text-text-primary">Contract Modifications</h3>
                   <p className="text-xs text-text-muted mt-1">IFRS 15.18–21</p>
                 </div>
+                {contractContextBar('modification')}
 
                 {modificationHistory.length > 0 && (
                   <div className="space-y-2 mb-4">
@@ -7469,6 +7674,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     {showVcSection ? 'Collapse' : 'Add Variable Consideration'}
                   </Button>
                 </div>
+                {contractContextBar()}
 
                 {showVcSection && (
                   <div className="space-y-6">
@@ -8950,7 +9156,11 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                 )}
               </div>
 
+              </>
+              )}
+
               {/* Download row - same as IFRS 16 */}
+              {showCalcStep(5) && (
           <div className="flex gap-4">
                 <Button variant="primary" size="lg" className="flex-1 bg-gradient-orange hover:opacity-90" onClick={handleGenerateExcelReport} isLoading={isGeneratingExcel}>
                   <Download className="w-5 h-5" /> Download Excel Report
@@ -8962,6 +9172,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                   <Download className="w-5 h-5" /> Download PDF Disclosure
             </Button>
           </div>
+              )}
             </>
           )}
         </div>
@@ -8969,7 +9180,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
         {/* Right column - same structure as IFRS 16 */}
         <div className="space-y-6">
           {/* Performance Obligations Breakdown */}
-          {results && (
+          {showCalcStep(2) && results && (
           <div className="bg-white rounded-card p-6 border border-border-default shadow-card">
             <div className="border-b border-border-default pb-4 mb-6">
                 <h3 className="text-base font-bold text-text-primary">Performance Obligations Breakdown</h3>
@@ -9001,7 +9212,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
           )}
 
           {/* Journal Entries - At inception + On recognition, same Dr/Cr styling as IFRS 16 */}
-          {results && (
+          {showCalcStep(3) && results && (
           <div className="bg-white rounded-card p-6 border border-border-default shadow-card">
             <div className="border-b border-border-default pb-4 mb-6">
               <h3 className="text-base font-bold text-text-primary">Journal Entries</h3>
@@ -9026,6 +9237,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
           )}
 
           {/* AI Insight - dynamic based on results */}
+          {(showCalcStep(1) || showCalcStep(2) || showCalcStep(3)) && (
           <div className="bg-gradient-to-br from-orange-light to-orange-light/50 rounded-card p-6 border border-orange-border shadow-card">
             <h3 className="text-base font-bold text-text-primary mb-2">AI Insight</h3>
             <p className="text-sm text-text-secondary">
@@ -9036,8 +9248,10 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                 : 'Revenue contracts are analysed using the 5-step IFRS 15 model. Performance obligations are identified and transaction price is allocated using the standalone selling price method.'}
             </p>
           </div>
+          )}
 
           {/* Disclosure Notes - 6 collapsible cards */}
+          {showCalcStep(5) && (
           <div className="bg-white rounded-card p-6 border border-border-default shadow-card">
             <div className="border-b border-border-default pb-4 mb-6 flex items-center justify-between">
               <div>
@@ -9330,10 +9544,13 @@ The more complete your disclosure text, the more accurate the quality score.`}
               )}
             </div>
           </div>
+          )}
         </div>
       </div>
+        </>
         )}
-      </div>
+
+      </ModuleWorkspaceLayout>
 
       {results && (
         <button

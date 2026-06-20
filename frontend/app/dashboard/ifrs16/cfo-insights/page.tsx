@@ -14,7 +14,14 @@ import {
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { getLeaseRepository, type LeaseRepositoryEntry } from '@/lib/lease-repository';
-import { formatCurrency, formatIndianCurrency, formatIndianNumber, formatDate } from '@/lib/utils';
+import { formatIndianNumber, formatDate } from '@/lib/utils';
+import { parseAiJsonObject } from '@/lib/parse-ai-json';
+import { formatLeaseMoney, resolveLeaseCurrency } from '@/lib/ifrs16-currency';
+import {
+  getCalculatedIbrPct,
+  getPortfolioMoneyDisplay,
+  isPortfolioAggregateLease,
+} from '@/lib/ifrs16-portfolio';
 
 const cardClass =
   'bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]';
@@ -36,6 +43,7 @@ export type PortfolioLease = {
   asset_description: string;
   monthly_payment: number;
   discount_rate: number;
+  calculated_discount_rate: number;
   lease_term_months: number;
   start_date: string;
   end_date: string;
@@ -120,21 +128,25 @@ export type AiAnalysis = {
 };
 
 function normalizeLeases(raw: LeaseRepositoryEntry[]): PortfolioLease[] {
-  return raw.map((l) => {
+  return raw
+    .filter((l) => !isPortfolioAggregateLease(l))
+    .map((l) => {
     const res = (l.results || {}) as Record<string, unknown>;
     const y1 = (res.year_1_impact || {}) as Record<string, unknown>;
     const end = String(l.end_date || l.dates?.end || '');
     const start = String(l.start_date || l.dates?.commencement || '');
     const ll = Number(l.liability ?? res.lease_liability ?? 0);
+    const calculatedIbr = getCalculatedIbrPct(l);
     return {
       id: String(l.id || l.lease_id || ''),
       asset_description: String(l.title || l.asset || (l as { asset_description?: string }).asset_description || ''),
       monthly_payment: Number(l.monthly_payment ?? l.payments?.monthly ?? 0),
-      discount_rate: Number(l.discount_rate ?? 0),
+      discount_rate: calculatedIbr,
+      calculated_discount_rate: calculatedIbr,
       lease_term_months: Number(l.dates?.term_months ?? 0),
       start_date: start,
       end_date: end,
-      currency: String(l.currency || l.payments?.currency || 'INR'),
+      currency: resolveLeaseCurrency(l),
       lease_type: String(l.lease_type || ''),
       city: String(l.city || ''),
       country: String(l.country || ''),
@@ -164,12 +176,61 @@ function numOpt(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-function parseClaudeJson(text: string): AiAnalysis {
-  let s = text.trim();
-  if (s.startsWith('```')) {
-    s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+function normalizeMoneyText(text: string | undefined, currency: string): string | undefined {
+  if (!text) return text;
+  if (currency === 'AED') {
+    return text
+      .replace(/\bUSD\s+/gi, 'AED ')
+      .replace(/\$\s*([\d,]+(?:\.\d+)?)\s*M\b/gi, 'AED $1M')
+      .replace(/\$\s*([\d,]+(?:\.\d+)?)/g, 'AED $1');
   }
-  const raw = JSON.parse(s) as Record<string, unknown>;
+  return text;
+}
+
+function normalizeAiAnalysisForCurrency(analysis: AiAnalysis, currency: string): AiAnalysis {
+  const norm = (s?: string) => normalizeMoneyText(s, currency);
+  return {
+    ...analysis,
+    summary: norm(analysis.summary) ?? analysis.summary,
+    top_recommendation: norm(analysis.top_recommendation) ?? analysis.top_recommendation,
+    insights: analysis.insights.map((ins) => ({
+      ...ins,
+      title: norm(ins.title) ?? ins.title,
+      description: norm(ins.description) ?? ins.description,
+      action: norm(ins.action) ?? ins.action,
+      calculation: norm(ins.calculation),
+      financial_impact: norm(ins.financial_impact),
+      if_ignored: norm(ins.if_ignored),
+    })),
+    cfo_summary: analysis.cfo_summary
+      ? {
+          ...analysis.cfo_summary,
+          biggest_risk: norm(analysis.cfo_summary.biggest_risk),
+          most_urgent_decision: norm(analysis.cfo_summary.most_urgent_decision),
+        }
+      : undefined,
+    cash_flow_forecast: analysis.cash_flow_forecast
+      ? {
+          ...analysis.cash_flow_forecast,
+          note: norm(analysis.cash_flow_forecast.note),
+        }
+      : undefined,
+    actions: analysis.actions?.map((a) => ({
+      ...a,
+      title: norm(a.title) ?? a.title,
+      description: norm(a.description) ?? a.description,
+      financial_consequence_if_ignored: norm(a.financial_consequence_if_ignored),
+      potential_saving_or_cost: norm(a.potential_saving_or_cost),
+      options: a.options?.map((o) => ({
+        ...o,
+        financial_impact: norm(o.financial_impact) ?? o.financial_impact,
+      })),
+    })),
+  };
+}
+
+function parseClaudeJson(text: string): AiAnalysis {
+  const raw = parseAiJsonObject(text);
   const score = Math.min(100, Math.max(0, Math.round(Number(raw.health_score) || 0)));
   const insightsRaw = Array.isArray(raw.insights) ? raw.insights : [];
   const insights: AiInsight[] = insightsRaw.map((row) => {
@@ -285,8 +346,118 @@ function severityEmoji(sev: string): string {
 }
 
 function formatMoney(amount: number, currency: string): string {
-  if ((currency || 'INR').toUpperCase() === 'INR') return formatIndianCurrency(amount);
-  return formatCurrency(amount, currency || 'INR', 0);
+  return formatLeaseMoney(amount, currency);
+}
+
+function buildLocalPortfolioAnalysis(
+  leases: PortfolioLease[],
+  totalLiability: number,
+  formatPortfolioTotal: (amount: number) => string
+): AiAnalysis {
+  const totalMonthly = leases.reduce((s, l) => s + (l.monthly_payment || 0), 0);
+  const totalAnnual = totalMonthly * 12;
+  const expiring = leases.filter((l) => {
+    const d = daysUntilEnd(l.end_date);
+    return d != null && d >= 0 && d <= 90;
+  });
+  const sorted = [...leases].sort(
+    (a, b) => (b.results?.lease_liability || 0) - (a.results?.lease_liability || 0)
+  );
+  const top = sorted[0];
+  const topLl = top?.results?.lease_liability || 0;
+  const topPct = totalLiability > 0 ? (topLl / totalLiability) * 100 : 0;
+
+  let health = 82;
+  if (topPct > 35) health -= 22;
+  else if (topPct > 25) health -= 12;
+  if (expiring.length > 2) health -= 15;
+  else if (expiring.length > 0) health -= 8;
+  health = Math.max(28, Math.min(95, health));
+
+  const fmt = formatPortfolioTotal;
+  const today = new Date().toISOString().split('T')[0];
+  const insights: AiInsight[] = [];
+
+  if (top) {
+    insights.push({
+      type: 'Risk',
+      severity: topPct > 30 ? 'High' : 'Medium',
+      title: `${top.asset_description || top.id} — ${topPct.toFixed(1)}% of portfolio`,
+      description: `Largest lease liability is ${fmt(topLl)} (${topPct.toFixed(1)}% of total ${fmt(totalLiability)}).`,
+      action: 'Review concentration risk and backup space options before renewal.',
+      financial_impact: fmt(topLl),
+      calculation: `${fmt(topLl)} / ${fmt(totalLiability)} = ${topPct.toFixed(1)}%`,
+      lease_id: top.id,
+    });
+  }
+
+  if (expiring.length > 0) {
+    const expLiability = expiring.reduce((s, l) => s + (l.results?.lease_liability || 0), 0);
+    insights.push({
+      type: 'Renewal',
+      severity: 'High',
+      title: `${expiring.length} lease(s) expiring within 90 days`,
+      description: `Near-term renewals represent ${fmt(expLiability)} in lease liability.`,
+      action: 'Start renewal negotiations now to preserve negotiating leverage.',
+      financial_impact: fmt(expLiability),
+      lease_id: expiring[0]?.id || null,
+    });
+  }
+
+  insights.push({
+    type: 'Efficiency',
+    severity: 'Medium',
+    title: `Annual cash commitment ${fmt(totalAnnual)}`,
+    description: `Portfolio monthly outflow is ${fmt(totalMonthly)} across ${leases.length} active leases.`,
+    action: 'Benchmark IBR rates against market for leases above portfolio average.',
+    financial_impact: fmt(totalAnnual),
+    calculation: `${fmt(totalMonthly)} × 12 = ${fmt(totalAnnual)}`,
+    lease_id: null,
+  });
+
+  return {
+    health_score: health,
+    health_label: health >= 80 ? 'Good' : health >= 50 ? 'Fair' : 'At Risk',
+    summary: `Portfolio liability ${fmt(totalLiability)} across ${leases.length} leases as of ${today}. ${
+      top ? `Largest exposure: ${top.asset_description} (${topPct.toFixed(1)}%). ` : ''
+    }${
+      expiring.length
+        ? `${expiring.length} renewal(s) due within 90 days.`
+        : 'No leases expiring in the next 90 days.'
+    }`,
+    top_recommendation: expiring.length
+      ? `Prioritise renewal for ${expiring[0].asset_description} — deadline ${expiring[0].end_date}`
+      : `Review IBR on ${top?.asset_description || 'top leases'} for renegotiation savings.`,
+    insights,
+    cfo_summary: {
+      total_annual_commitment: totalAnnual,
+      total_liability: totalLiability,
+      monthly_outflow: totalMonthly,
+      biggest_risk: top ? `${top.asset_description} (${fmt(topLl)})` : undefined,
+      most_urgent_decision: expiring[0]
+        ? `Renew ${expiring[0].asset_description} by ${expiring[0].end_date}`
+        : 'Monitor portfolio concentration',
+      potential_annual_saving: Math.round(totalAnnual * 0.03),
+    },
+    actions: insights.slice(0, 3).map((ins, i) => ({
+      id: `ACT-LOC-${String(i + 1).padStart(3, '0')}`,
+      category: 'CASH_FLOW',
+      title: ins.title,
+      description: ins.description,
+      priority: ins.severity,
+      lease_id: ins.lease_id,
+      is_ai_generated: false,
+    })),
+    cash_flow_forecast: {
+      year_1: totalAnnual,
+      year_2: totalAnnual,
+      year_3: totalAnnual,
+      year_4: totalAnnual,
+      year_5: totalAnnual,
+      total_5_year: totalAnnual * 5,
+      note: 'Flat forecast based on current monthly payments.',
+    },
+  };
 }
 
 export default function CFOStrategicInsightsPage() {
@@ -294,6 +465,7 @@ export default function CFOStrategicInsightsPage() {
   const [aiResult, setAiResult] = useState<AiAnalysis | null>(null);
   const [lastAnalysedAt, setLastAnalysedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingSec, setLoadingSec] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const refreshLeases = useCallback(() => {
@@ -314,9 +486,26 @@ export default function CFOStrategicInsightsPage() {
     return () => window.removeEventListener('focus', onFocus);
   }, [refreshLeases]);
 
-  const totalLiability = useMemo(
-    () => leases.reduce((s, l) => s + (l.results?.lease_liability || 0), 0),
+  const portfolioMoney = useMemo(
+    () =>
+      getPortfolioMoneyDisplay(
+        leases.map((l) => ({
+          currency: l.currency,
+          lease_liability: l.results?.lease_liability || 0,
+        }))
+      ),
     [leases]
+  );
+
+  const totalLiability = useMemo(
+    () =>
+      portfolioMoney.sumLiabilities(
+        leases.map((l) => ({
+          currency: l.currency,
+          lease_liability: l.results?.lease_liability || 0,
+        }))
+      ),
+    [leases, portfolioMoney]
   );
 
   const activeCount = useMemo(
@@ -329,9 +518,17 @@ export default function CFOStrategicInsightsPage() {
   );
 
   const avgIbr = useMemo(() => {
-    if (leases.length === 0) return 0;
-    const sum = leases.reduce((s, l) => s + (Number(l.discount_rate) || 0), 0);
-    return sum / leases.length;
+    let weighted = 0;
+    let totalLl = 0;
+    for (const l of leases) {
+      const ll = l.results?.lease_liability || 0;
+      const rate = l.calculated_discount_rate || 0;
+      if (ll > 0 && rate > 0) {
+        weighted += ll * rate;
+        totalLl += ll;
+      }
+    }
+    return totalLl > 0 ? weighted / totalLl : 0;
   }, [leases]);
 
   const expiring90 = useMemo(() => {
@@ -347,15 +544,33 @@ export default function CFOStrategicInsightsPage() {
     );
     return sorted.map((l) => {
       const ll = l.results?.lease_liability || 0;
-      const pct = totalLiability > 0 ? (ll / totalLiability) * 100 : 0;
+      const llWeighted = portfolioMoney.sumLiabilities([
+        { currency: l.currency, lease_liability: ll },
+      ]);
+      const pct = totalLiability > 0 ? (llWeighted / totalLiability) * 100 : 0;
       return { lease: l, pct };
     });
-  }, [leases, totalLiability]);
+  }, [leases, totalLiability, portfolioMoney]);
+
+  useEffect(() => {
+    if (!loading) {
+      setLoadingSec(0);
+      return;
+    }
+    const t0 = Date.now();
+    const tick = window.setInterval(() => {
+      setLoadingSec(Math.floor((Date.now() - t0) / 1000));
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [loading]);
 
   const runAnalysis = async () => {
     if (leases.length === 0) return;
     setLoading(true);
     setError(null);
+    setAiResult(null);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 130_000);
     try {
       const todayIso = new Date().toISOString().split('T')[0];
       const leasePayload = leases.map((l) => ({
@@ -366,8 +581,9 @@ export default function CFOStrategicInsightsPage() {
         monthly_payment: l.monthly_payment ?? 0,
         lease_liability: l.results?.lease_liability ?? 0,
         rou_asset: l.results?.rou_asset ?? 0,
-        annual_discount_rate: l.discount_rate,
-        ibr: l.discount_rate,
+        annual_discount_rate: l.calculated_discount_rate / 100,
+        ibr: l.calculated_discount_rate,
+        discount_rate_pct: l.calculated_discount_rate,
         lease_term_months: l.lease_term_months,
         term_months: l.lease_term_months,
         end_date: l.end_date,
@@ -379,6 +595,7 @@ export default function CFOStrategicInsightsPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ leases: leasePayload, today: todayIso }),
+        signal: controller.signal,
       });
       const raw = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -386,22 +603,38 @@ export default function CFOStrategicInsightsPage() {
       }
       const text = (raw as { text?: string }).text;
       if (!text) throw new Error('Empty response from analysis service');
-      const parsed = parseClaudeJson(text);
+      const parsed = normalizeAiAnalysisForCurrency(
+        parseClaudeJson(text),
+        portfolioMoney.dominantCurrency
+      );
       setAiResult(parsed);
       setLastAnalysedAt(new Date().toISOString());
+      setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Analysis failed');
+      const msg =
+        e instanceof Error
+          ? e.name === 'AbortError'
+            ? 'Analysis timed out after 2 minutes'
+            : e.message
+          : 'Analysis failed';
+      const local = buildLocalPortfolioAnalysis(leases, totalLiability, (amount) =>
+        portfolioMoney.formatTotal(amount)
+      );
+      setAiResult(local);
+      setLastAnalysedAt(new Date().toISOString());
+      setError(`AI unavailable (${msg}). Showing portfolio-based insights.`);
     } finally {
+      window.clearTimeout(timeoutId);
       setLoading(false);
     }
   };
 
   const hasLeases = leases.length > 0;
-  const displayCurrency = leases[0]?.currency || 'INR';
   const formatAmount = (amount: number | undefined) => {
     if (amount == null || Number.isNaN(Number(amount))) return '—';
-    return formatMoney(Number(amount), displayCurrency);
+    return portfolioMoney.formatTotal(Number(amount));
   };
+  const formatPortfolioTotal = (amount: number) => portfolioMoney.formatTotal(amount);
 
   return (
     <SidebarLayout
@@ -457,7 +690,13 @@ export default function CFOStrategicInsightsPage() {
                 </div>
                 <div>
                   <p className="text-xs font-medium text-[#64748b] uppercase tracking-wide">Total Lease Liability</p>
-                  <p className="text-xl font-bold text-[#1e293b] mt-1">{formatIndianCurrency(totalLiability)}</p>
+                  <p className="text-xl font-bold text-[#1e293b] mt-1">{formatPortfolioTotal(totalLiability)}</p>
+                  {portfolioMoney.isMultiCurrency && portfolioMoney.subtitle && (
+                    <p className="text-xs text-[#94a3b8] mt-0.5">{portfolioMoney.subtitle}</p>
+                  )}
+                  {!portfolioMoney.isMultiCurrency && leases.length > 0 && (
+                    <p className="text-xs text-[#94a3b8] mt-0.5">{portfolioMoney.dominantCurrency}</p>
+                  )}
                 </div>
               </div>
               <div className={`${cardClass} p-5 flex gap-4 items-start`}>
@@ -507,10 +746,10 @@ export default function CFOStrategicInsightsPage() {
             )}
 
             {error && (
-              <div className={`${cardClass} border-red-200 bg-red-50/50 p-4 flex flex-wrap items-center justify-between gap-3`}>
-                <p className="text-sm text-red-800">{error}</p>
+              <div className={`${cardClass} border-amber-200 bg-amber-50/50 p-4 flex flex-wrap items-center justify-between gap-3`}>
+                <p className="text-sm text-amber-900">{error}</p>
                 <Button variant="secondary" size="sm" onClick={runAnalysis} disabled={loading}>
-                  Retry
+                  Retry AI
                 </Button>
               </div>
             )}
@@ -521,7 +760,16 @@ export default function CFOStrategicInsightsPage() {
                 {loading && (
                   <div className={`${cardClass} p-8 flex flex-col items-center justify-center gap-3`}>
                     <Loader2 className="w-10 h-10 text-[#f97316] animate-spin" />
-                    <p className="text-sm font-medium text-[#475569]">Analysing your lease portfolio…</p>
+                    <p className="text-sm font-medium text-[#475569]">
+                      Analysing your lease portfolio…
+                      {loadingSec > 0 ? ` (${loadingSec}s)` : ''}
+                    </p>
+                    {loadingSec >= 20 && (
+                      <p className="text-xs text-[#94a3b8] max-w-md text-center">
+                        AI analysis can take up to 2 minutes for large portfolios. Portfolio-based insights will
+                        appear if the AI service is unavailable.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -854,7 +1102,7 @@ export default function CFOStrategicInsightsPage() {
                             {formatMoney(l.results?.lease_liability || 0, l.currency)}
                           </td>
                           <td className="px-4 py-3 text-right font-mono">
-                            {Number(l.discount_rate || 0).toFixed(1)}%
+                            {Number(l.calculated_discount_rate || 0).toFixed(2)}%
                           </td>
                           <td className="px-4 py-3 text-[#475569]">
                             {l.end_date ? formatDate(l.end_date) : '—'}
@@ -871,7 +1119,7 @@ export default function CFOStrategicInsightsPage() {
                         Total
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-[#1e293b]">
-                        {formatIndianCurrency(totalLiability)}
+                        {formatPortfolioTotal(totalLiability)}
                       </td>
                       <td className="px-4 py-3" colSpan={4} />
                     </tr>

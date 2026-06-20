@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -21,7 +21,7 @@ export default function LoginPage() {
     try {
       await signIn(email, password);
       toast.success('Welcome back!');
-      router.push('/dashboard');
+      router.push('/dashboard/ifrs16');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to sign in');
     } finally {
@@ -76,7 +76,7 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent transition-all"
-                placeholder="••••••••"
+                placeholder="ΓÇóΓÇóΓÇóΓÇóΓÇóΓÇóΓÇóΓÇó"
               />
             </div>
 
@@ -94,10 +94,10 @@ export default function LoginPage() {
           {/* Footer */}
           <div className="mt-6 text-center">
             <p className="text-sm text-gray-600">
-              Don't have an account?{' '}
-              <a href="mailto:sales@ifrs.ai" className="text-accent hover:underline font-medium">
-                Request Demo Access
-              </a>
+              Don&apos;t have an account?{' '}
+              <Link href="/signup" className="text-accent hover:underline font-medium">
+                Sign up with company code
+              </Link>
             </p>
           </div>
 
@@ -112,7 +112,7 @@ export default function LoginPage() {
         {/* Back to home */}
         <div className="text-center mt-6">
           <Link href="/" className="text-white/80 hover:text-white text-sm">
-            ← Back to home
+            ΓåÉ Back to home
           </Link>
         </div>
       </div>

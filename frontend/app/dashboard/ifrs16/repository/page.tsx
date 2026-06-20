@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import {
@@ -17,7 +17,11 @@ import {
   FileDown,
   Plus,
 } from 'lucide-react';
-import { getLeaseRepository, deleteLeaseFromRepository } from '@/lib/lease-repository';
+import {
+  getLeaseRepository,
+  deleteLeaseFromRepository,
+} from '@/lib/lease-repository';
+import { findDuplicateLeaseGroups } from '@/lib/ifrs16-portfolio';
 import { formatLeaseMoney, resolveLeaseCurrency } from '@/lib/ifrs16-currency';
 import { ifrs16Api } from '@/lib/api';
 import Link from 'next/link';
@@ -37,6 +41,17 @@ function getStatus(endDate: string, entryStatus?: string): { label: string; clas
 }
 
 const PAGE_SIZE = 10;
+const STORAGE_KEY = 'lease_repository';
+
+function rowSelectionKey(l: any): string {
+  const id = String(l.id || l.lease_id || '');
+  const start = String(l.start_date || l.dates?.commencement || '');
+  const end = String(l.end_date || l.dates?.end || '');
+  const monthly = String(l.monthly_payment ?? l.payments?.monthly ?? '');
+  const lessor = String(l.lessor || l.lessor_name || '');
+  const title = String(l.title || l.asset || '');
+  return [id, start, end, monthly, lessor, title].join('||');
+}
 
 export default function LeaseRepositoryPage() {
   const router = useRouter();
@@ -52,6 +67,7 @@ export default function LeaseRepositoryPage() {
   const [filterEndTo, setFilterEndTo] = useState('');
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const load = useCallback(() => {
     setLeases(getLeaseRepository());
@@ -91,6 +107,52 @@ export default function LeaseRepositoryPage() {
   const uniqueLessors = Array.from(new Set(leases.map((l) => l.lessor || l.lessor_name).filter(Boolean))) as string[];
   const uniqueLessees = Array.from(new Set(leases.map((l) => l.lessee || l.lessee_name).filter(Boolean))) as string[];
 
+  const duplicateGroups = useMemo(() => findDuplicateLeaseGroups(leases), [leases]);
+
+  const duplicateIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const group of duplicateGroups.values()) {
+      for (const id of group) ids.add(id);
+    }
+    return ids;
+  }, [duplicateGroups]);
+
+  const toggleSelect = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllOnPage = (checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const l of paginated) {
+        const rowKey = rowSelectionKey(l);
+        if (checked) next.add(rowKey);
+        else next.delete(rowKey);
+      }
+      return next;
+    });
+  };
+
+  const deleteRowsBySelectionKeys = (keys: Set<string>) => {
+    const repo = getLeaseRepository();
+    const remaining = repo.filter((e) => !keys.has(rowSelectionKey(e)));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(remaining));
+  };
+
+  const handleBulkDelete = () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Delete ${selectedIds.size} selected lease(s)? This cannot be undone.`)) return;
+    deleteRowsBySelectionKeys(selectedIds);
+    setSelectedIds(new Set());
+    load();
+    toast.success('Deleted selected leases');
+  };
+
   const handleDownloadExcel = (entry: any) => {
     const fid = entry.excel_file_id;
     if (!fid) {
@@ -101,10 +163,16 @@ export default function LeaseRepositoryPage() {
     toast.success('Download started');
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = (entry: any) => {
+    const id = String(entry.id || entry.lease_id || '');
+    const key = rowSelectionKey(entry);
     setMenuOpen(null);
     if (!confirm('Delete this lease?')) return;
-    deleteLeaseFromRepository(id);
+    deleteRowsBySelectionKeys(new Set([key]));
+    const stillHasSameId = getLeaseRepository().some((e) => String(e.id || e.lease_id || '') === id);
+    if (!stillHasSameId && id) {
+      deleteLeaseFromRepository(id);
+    }
     load();
     toast.success('Deleted');
   };
@@ -220,6 +288,43 @@ export default function LeaseRepositoryPage() {
           </div>
         </div>
 
+        {duplicateGroups.size > 0 && (
+          <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-sm">
+            <p className="font-medium">Possible duplicate detected</p>
+            <p className="mt-1">
+              {duplicateGroups.size} group(s) share the same asset description, commencement date, and lessee. Review
+              before calculating — same asset and commencement date exists in another record.
+            </p>
+            <ul className="mt-2 list-disc list-inside text-amber-800">
+              {[...duplicateGroups.entries()].slice(0, 5).map(([key, ids]) => (
+                <li key={key}>
+                  {ids.join(', ')}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {selectedIds.size > 0 && (
+          <div className="flex flex-wrap items-center gap-3 p-3 rounded-lg bg-[#f8fafc] border border-[#e2e8f0]">
+            <span className="text-sm text-[#64748b]">{selectedIds.size} selected</span>
+            <Button
+              variant="secondary"
+              className="border border-red-200 text-red-700 hover:bg-red-50"
+              onClick={handleBulkDelete}
+            >
+              <Trash2 className="w-4 h-4 mr-2" /> Delete selected
+            </Button>
+            <button
+              type="button"
+              className="text-sm text-[#64748b] hover:text-[#1e293b]"
+              onClick={() => setSelectedIds(new Set())}
+            >
+              Clear selection
+            </button>
+          </div>
+        )}
+
         {/* Table */}
         <div className="bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] overflow-hidden">
           {filtered.length === 0 ? (
@@ -236,6 +341,15 @@ export default function LeaseRepositoryPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-[#f8fafc] border-b border-[#e2e8f0]">
+                      <th className="py-3 px-3 w-10">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all on page"
+                            checked={paginated.length > 0 && paginated.every((l) => selectedIds.has(rowSelectionKey(l)))}
+                          onChange={(e) => toggleSelectAllOnPage(e.target.checked)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </th>
                       <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Lease ID</th>
                       <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Title</th>
                       <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Lease Type</th>
@@ -251,18 +365,29 @@ export default function LeaseRepositoryPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {paginated.map((l) => {
+                    {paginated.map((l, idx) => {
                       const id = l.id || l.lease_id;
                       const endDate = l.end_date || l.dates?.end || '9999-12-31';
                       const status = getStatus(endDate, l.status);
                       const version = l.version || 'V1';
                       const menuId = `menu-${id}`;
+                      const isDupe = duplicateIds.has(String(id));
                       return (
                         <tr
-                          key={id}
-                          className="border-b border-[#e2e8f0] hover:bg-[#f8fafc] cursor-pointer"
+                          key={`${id}-${l.calculated_at || l.start_date || ''}-${idx}`}
+                          className={`border-b border-[#e2e8f0] hover:bg-[#f8fafc] cursor-pointer ${
+                            isDupe ? 'bg-amber-50/60' : ''
+                          }`}
                           onClick={() => router.push(`/dashboard/ifrs16/leases/${id}`)}
                         >
+                          <td className="py-3 px-3" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(rowSelectionKey(l))}
+                              onChange={(e) => toggleSelect(rowSelectionKey(l), e.target.checked)}
+                              aria-label={`Select ${id}`}
+                            />
+                          </td>
                           <td className="py-3 px-4">
                             <Link
                               href={`/dashboard/ifrs16/leases/${id}`}
@@ -328,7 +453,7 @@ export default function LeaseRepositoryPage() {
                                       <Download className="w-4 h-4" /> Download Excel
                                     </button>
                                     <button
-                                      onClick={() => handleDelete(id)}
+                                      onClick={() => handleDelete(l)}
                                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50"
                                     >
                                       <Trash2 className="w-4 h-4" /> Delete

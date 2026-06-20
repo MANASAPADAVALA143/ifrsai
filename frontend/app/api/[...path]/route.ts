@@ -4,6 +4,7 @@ import { getBackendBaseUrl } from "@/lib/backend-base";
 import { getBackendProxyFailureDetail } from "@/lib/service-messages";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 const HOP_BY_HOP = new Set([
   "host",

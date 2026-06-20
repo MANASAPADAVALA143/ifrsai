@@ -29,15 +29,57 @@ def completion_pct_from_costs(
     return round(min(100.0, max(0.0, (costs_td / total_costs) * 100.0)), 4)
 
 
+def _linear_completion_from_timeline(data: Dict[str, Any]) -> Optional[float]:
+    """
+    Construction progress from elapsed time between construction start and expected handover.
+    Used when cost data is unavailable but construction timeline exists (IFRS 15.41 input proxy).
+    """
+    start = _parse_date(data.get("construction_start"))
+    end = _parse_date(data.get("expected_handover"))
+    current = _parse_date(data.get("current_date")) or date.today()
+    if not start or not end or end <= start:
+        return None
+    as_of = min(max(current, start), end)
+    total_days = (end - start).days
+    if total_days <= 0:
+        return None
+    elapsed = max(0, (as_of - start).days)
+    return round(min(100.0, max(0.0, (elapsed / total_days) * 100.0)), 4)
+
+
 def effective_completion_pct(data: Dict[str, Any]) -> float:
-    """Authoritative completion % — RERA certificate overrides cost input method."""
+    """
+    Authoritative completion % for off-plan / input method recognition.
+    Priority: RERA certificate > cost-to-cost > construction timeline > extracted SPA %.
+    """
     cert = data.get("rera_certificate_verified_pct")
     if cert is not None:
         return round(min(100.0, max(0.0, float(cert))), 4)
-    return completion_pct_from_costs(
-        float(data.get("costs_incurred_to_date", 0) or 0),
-        float(data.get("total_estimated_costs", 0) or 0),
-    )
+    total_costs = float(data.get("total_estimated_costs", 0) or 0)
+    costs_td = float(data.get("costs_incurred_to_date", 0) or 0)
+    if total_costs > 0:
+        return completion_pct_from_costs(costs_td, total_costs)
+    linear = _linear_completion_from_timeline(data)
+    if linear is not None:
+        return linear
+    explicit = data.get("construction_completion_pct")
+    if explicit is not None and str(explicit).strip() != "":
+        return round(min(100.0, max(0.0, float(explicit))), 4)
+    return 0.0
+
+
+def should_use_offplan_input_method(data: Dict[str, Any]) -> bool:
+    """True when IFRS 15.35(c) input / completion % should drive recognition (not straight-line time)."""
+    pm = str(data.get("progress_measurement") or "").lower()
+    if pm in ("input_costs", "completion_pct", "percentage_of_completion", "cost_to_cost"):
+        return True
+    if data.get("construction_completion_pct") is not None:
+        return True
+    if float(data.get("total_estimated_costs", 0) or 0) > 0:
+        return True
+    if _parse_date(data.get("construction_start")) and _parse_date(data.get("expected_handover")):
+        return True
+    return False
 
 
 def validate_rera_registration_number(value: str) -> str:
@@ -579,10 +621,7 @@ class OffPlanSalesEngine:
         if cert_pct is not None:
             completion_pct = round(min(100.0, max(0.0, float(cert_pct))), 1)
         else:
-            total_costs = max(inp.total_estimated_costs, 1e-9)
-            completion_pct = round(
-                min(100.0, max(0.0, (inp.costs_incurred_to_date / total_costs) * 100.0)), 1
-            )
+            completion_pct = round(effective_completion_pct(data), 1)
         revenue_to_date = round(inp.contract_value * (completion_pct / 100.0), 2)
         revenue_current = round(revenue_to_date - inp.revenue_prior_period, 2)
         billings_to_date = _sum_billings(inp.billings, inp.escrow_receipts)
@@ -1187,6 +1226,90 @@ def merge_realestate_into_calculate_results(
         out["realestate_overlay"] = ov
     if period_schedule:
         out["realestate_period_schedule"] = list(period_schedule)
+    return out
+
+
+def apply_offplan_input_method_to_calculate(
+    results: Dict[str, Any],
+    *,
+    contract_value: float,
+    construction_start: str = "",
+    expected_handover: str = "",
+    spa_execution_date: str = "",
+    current_date: str = "",
+    costs_incurred: float = 0.0,
+    total_costs: float = 0.0,
+    revenue_prior: float = 0.0,
+    construction_completion_pct: Optional[float] = None,
+    rera_certificate_verified_pct: Optional[float] = None,
+    escrow_receipts: Optional[List[Dict[str, Any]]] = None,
+    currency: str = "AED",
+    obligation_description: str = "",
+    project_name: str = "",
+    rera_registration_number: str = "",
+    progress_measurement: str = "",
+) -> Dict[str, Any]:
+    """
+    Replace straight-line time recognition with IFRS 15.35(c) input method
+    (completion % × contract value) for UAE off-plan / construction contracts.
+    """
+    data: Dict[str, Any] = {
+        "contract_value": contract_value,
+        "construction_start": construction_start,
+        "expected_handover": expected_handover,
+        "spa_execution_date": spa_execution_date,
+        "current_date": current_date or date.today().isoformat(),
+        "costs_incurred_to_date": costs_incurred,
+        "total_estimated_costs": total_costs,
+        "revenue_prior_period": revenue_prior,
+        "escrow_receipts": list(escrow_receipts or []),
+        "progress_measurement": progress_measurement,
+    }
+    if construction_completion_pct is not None:
+        data["construction_completion_pct"] = construction_completion_pct
+    if rera_certificate_verified_pct is not None:
+        data["rera_certificate_verified_pct"] = rera_certificate_verified_pct
+
+    off_plan = OffPlanSalesEngine().calculate(data)
+    schedule_input = {
+        **data,
+        "revenue_to_date": off_plan.get("revenue_recognised_to_date"),
+        "revenue_recognised_to_date": off_plan.get("revenue_recognised_to_date"),
+        "revenue_current_period": off_plan.get("revenue_current_period"),
+    }
+    period_schedule = generate_quarterly_revenue_schedule(schedule_input)
+    overlay = {
+        "completion_pct": off_plan.get("completion_pct"),
+        "revenue_recognised_to_date": off_plan.get("revenue_recognised_to_date"),
+        "revenue_current_period": off_plan.get("revenue_current_period"),
+        "contract_asset": off_plan.get("contract_asset"),
+        "contract_liability": off_plan.get("contract_liability"),
+        "escrow_balance": off_plan.get("escrow_balance"),
+        "remaining_revenue": off_plan.get("remaining_revenue"),
+        "project_name": project_name,
+        "rera_registration_number": rera_registration_number,
+        "currency": currency,
+        "spa_execution_date": spa_execution_date,
+        "recognition_basis": off_plan.get("recognition_basis"),
+        "progress_measurement": progress_measurement or "input_costs",
+    }
+    out = merge_realestate_into_calculate_results(
+        results,
+        period_schedule=period_schedule,
+        overlay=overlay,
+        obligation_description=obligation_description,
+        currency=currency,
+    )
+    rev_period = float(off_plan.get("revenue_current_period") or 0)
+    if rev_period > 0 and off_plan.get("journal_entries"):
+        out["journal_entries"] = list(off_plan.get("journal_entries") or [])
+    engine = dict(out.get("revenue_engine_result") or {})
+    engine["method"] = "Fixed Price (POC)"
+    engine["poc_percentage"] = off_plan.get("completion_pct")
+    engine["cumulative_revenue"] = off_plan.get("revenue_recognised_to_date")
+    engine["revenue_this_period"] = off_plan.get("revenue_current_period")
+    engine["schedule_based"] = False
+    out["revenue_engine_result"] = engine
     return out
 
 

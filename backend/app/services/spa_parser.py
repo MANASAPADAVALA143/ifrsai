@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from claude_model_config import CLAUDE_MODEL
+
 SPA_EXTRACTION_PROMPT = """Extract these fields from this UAE property Sale & Purchase Agreement:
 - property_unit_number
 - total_contract_price (AED, numeric only)
@@ -71,7 +73,7 @@ class SPAParser:
         import anthropic
 
         self._client = anthropic.Anthropic(api_key=key)
-        self._model = "claude-sonnet-4-20250514"
+        self._model = CLAUDE_MODEL
 
     def extract_from_text(self, contract_text: str) -> Dict[str, Any]:
         if not (contract_text or "").strip():

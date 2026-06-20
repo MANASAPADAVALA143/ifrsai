@@ -4,7 +4,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useRouter, usePathname } from 'next/navigation';
 import { useEffect } from 'react';
 import Link from 'next/link';
-import { LogOut, LayoutDashboard, FileText, DollarSign, TrendingUp, FileCheck } from 'lucide-react';
+import { LogOut, FileText, DollarSign, TrendingUp, FileCheck } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ChatWidget } from './ChatWidget';
 
@@ -42,11 +42,10 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
   }
 
   const navItems = [
-    { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { name: 'IFRS 16', href: '/dashboard/ifrs16', icon: FileText },
-    { name: 'IFRS 15', href: '/dashboard/ifrs15', icon: DollarSign },
-    { name: 'IFRS 9', href: '/dashboard/ifrs9', icon: TrendingUp },
-    { name: 'Reports', href: '/dashboard/reports', icon: FileCheck },
+    { name: 'IFRS 16', href: '/dashboard/ifrs16', icon: FileText, matchPrefix: true },
+    { name: 'IFRS 15', href: '/dashboard/ifrs15', icon: DollarSign, matchPrefix: true },
+    { name: 'IFRS 9', href: '/dashboard/ifrs9', icon: TrendingUp, matchPrefix: true },
+    { name: 'Reports', href: '/dashboard/reports', icon: FileCheck, matchPrefix: false },
   ];
 
   return (
@@ -56,7 +55,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16">
             <div className="flex items-center gap-8">
-              <Link href="/dashboard" className="flex items-center">
+              <Link href="/dashboard/ifrs16" className="flex items-center">
                 <span className="text-2xl font-bold text-primary">
                   IFRS<span className="text-accent">.ai</span>
                 </span>
@@ -65,7 +64,9 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
               <div className="hidden md:flex items-center gap-1">
                 {navItems.map((item) => {
                   const Icon = item.icon;
-                  const isActive = pathname === item.href;
+                  const isActive = item.matchPrefix
+                    ? pathname === item.href || pathname.startsWith(`${item.href}/`)
+                    : pathname === item.href;
                   return (
                     <Link
                       key={item.href}

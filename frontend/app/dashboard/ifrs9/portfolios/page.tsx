@@ -19,6 +19,7 @@ import {
 import {
   getEclPortfolioRepository,
   deleteEclPortfolioFromRepository,
+  refreshEclPortfolioFromServer,
   type ECLPortfolioEntry,
   type AssetClass,
 } from '@/lib/ecl-portfolio-repository';
@@ -54,13 +55,22 @@ export default function EclPortfoliosPage() {
   const [filterDateTo, setFilterDateTo] = useState('');
   const [filterCurrency, setFilterCurrency] = useState('');
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
+  const [listLoading, setListLoading] = useState(true);
 
-  const load = useCallback(() => {
-    setPortfolios(getEclPortfolioRepository());
+  const load = useCallback(async () => {
+    setListLoading(true);
+    try {
+      const rows = await refreshEclPortfolioFromServer();
+      setPortfolios(rows);
+    } catch {
+      setPortfolios(getEclPortfolioRepository());
+    } finally {
+      setListLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   const filtered = portfolios.filter((p) => {
@@ -101,7 +111,7 @@ export default function EclPortfoliosPage() {
     setMenuOpen(null);
     if (!confirm('Delete this portfolio?')) return;
     deleteEclPortfolioFromRepository(id);
-    load();
+    void load();
     toast.success('Deleted');
   };
 

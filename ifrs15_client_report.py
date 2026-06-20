@@ -1,23 +1,43 @@
 """
 IFRS 15 client-facing PDF report generator.
+Falls back to HTML when ReportLab is unavailable (common on some Windows installs).
 """
 
 from __future__ import annotations
 
+import html as html_module
 import json
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from reportlab.graphics.charts.barcharts import VerticalBarChart
-from reportlab.graphics.shapes import Drawing, String
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import cm
-from reportlab.pdfgen import canvas
-from reportlab.platypus import Paragraph
+REPORTLAB_AVAILABLE = False
+REPORTLAB_IMPORT_ERROR = ""
+
+try:
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from reportlab.graphics.shapes import Drawing, String
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.pdfgen import canvas
+    from reportlab.platypus import Paragraph
+
+    REPORTLAB_AVAILABLE = True
+except Exception as _rl_exc:  # pragma: no cover - platform-specific
+    REPORTLAB_IMPORT_ERROR = str(_rl_exc)
+    VerticalBarChart = None  # type: ignore
+    Drawing = None  # type: ignore
+    String = None  # type: ignore
+    colors = None  # type: ignore
+    A4 = None  # type: ignore
+    ParagraphStyle = None  # type: ignore
+    getSampleStyleSheet = None  # type: ignore
+    cm = None  # type: ignore
+    canvas = None  # type: ignore
+    Paragraph = None  # type: ignore
 
 
 OUTPUT_DIR = Path("outputs")
@@ -177,6 +197,85 @@ def _safe_text(val: Any, fallback: str = "") -> str:
     return s if s else fallback
 
 
+def _po_schedule_rows(schedule: List[Dict[str, Any]], po: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ob_id = str(po.get("obligation_id") or "")
+    desc = str(po.get("obligation") or "").lower()
+    rows: List[Dict[str, Any]] = []
+    for row in schedule or []:
+        if not isinstance(row, dict):
+            continue
+        if ob_id and str(row.get("Obligation_ID") or "") == ob_id:
+            rows.append(row)
+            continue
+        obl = str(row.get("Obligation") or "").lower()
+        if desc and desc[:48] in obl:
+            rows.append(row)
+    return rows
+
+
+def _po_page5_recognition_lines(
+    po: Dict[str, Any],
+    schedule: List[Dict[str, Any]],
+    contract_details: Dict[str, Any],
+    currency: str,
+) -> List[str]:
+    """Page 5 PO detail: use calculated schedule, not alloc/term guess."""
+    alloc = float(po.get("allocated_amount", 0) or 0)
+    rmethod = str(po.get("recognition_method", "")).lower().replace(" ", "_")
+    desc_lower = str(po.get("obligation") or "").lower()
+    rows = _po_schedule_rows(schedule, po)
+    positive = [
+        r
+        for r in rows
+        if float(r.get("Scheduled_Revenue", r.get("Revenue", 0)) or 0) > 0
+    ]
+    sched_total = sum(float(r.get("Scheduled_Revenue", 0) or 0) for r in positive)
+    is_pit = "point" in rmethod or any(
+        "point" in str(r.get("Method", "")).lower() for r in positive
+    )
+    if not is_pit and positive and len(positive) <= 4 and alloc > 0 and sched_total >= alloc * 0.95:
+        is_pit = True
+
+    if is_pit:
+        if "handover" in desc_lower or "f&f" in desc_lower or "ff&e" in desc_lower:
+            label = "Point In Time — on handover completion"
+        elif "session" in desc_lower or "training" in desc_lower:
+            label = "Point In Time — per session"
+        else:
+            label = "Point In Time"
+        lines = [f"Recognition Type: {label}"]
+        rec_on = _safe_text(po.get("recognition_date") or po.get("transfer_date"), "")
+        if rec_on:
+            lines.append(f"Recognition Date: {rec_on}")
+        if positive:
+            lines.append("Recognition dates:")
+            for r in sorted(positive, key=lambda x: str(x.get("Date") or x.get("Month") or "")):
+                period = _safe_text(r.get("Month") or r.get("month"), "Period")
+                rev = float(r.get("Scheduled_Revenue", r.get("Revenue", 0)) or 0)
+                lines.append(f"  {period}: {_fmt_money(rev, currency)}")
+        else:
+            lines.append(f"Amount: {_fmt_money(alloc, currency)} at transfer")
+        return lines
+
+    lines = ["Recognition Type: Over Time"]
+    if positive:
+        monthly_vals = [float(r.get("Scheduled_Revenue", 0) or 0) for r in positive]
+        avg = sum(monthly_vals) / max(len(monthly_vals), 1)
+        first_m = _safe_text(positive[0].get("Month"), "-")
+        last_m = _safe_text(positive[-1].get("Month"), "-")
+        lines.append(f"Recognition Period: {first_m} to {last_m}")
+        lines.append(f"Monthly Amount: {_fmt_money(avg, currency)} per month (from schedule)")
+    else:
+        term = max(1, int(contract_details.get("term_months", 12) or 12))
+        eff = _safe_text(contract_details.get("effective_date"), "-")
+        lines.append(f"Recognition Period: {eff} ({term} months)")
+        lines.append(f"Monthly Amount: {_fmt_money(alloc / term, currency)} per month")
+    return lines
+
+
+from claude_model_config import CLAUDE_MODEL
+
+
 def _call_claude(prompt: str, api_key: str) -> str:
     if not api_key:
         return ""
@@ -185,7 +284,7 @@ def _call_claude(prompt: str, api_key: str) -> str:
 
         client = anthropic.Anthropic(api_key=api_key)
         res = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=1200,
             temperature=0.2,
             messages=[{"role": "user", "content": prompt}],
@@ -302,7 +401,245 @@ def _draw_footer(c: canvas.Canvas, page_no: int, uae_meta: Optional[Dict[str, st
         c.drawString(1.5 * cm, 1.2 * cm, f"IFRS AI | Confidential | Page {page_no}")
 
 
+def _contract_specific_qa_pairs(results: Dict[str, Any], currency: str) -> List[Tuple[str, str]]:
+    """Contract-data-driven auditor Q&A when Claude is unavailable."""
+    perf_obs = list(results.get("performance_obligations") or [])
+    disc = (results.get("disclosure_data") or {})
+    cd = (disc.get("contract_details") or {})
+    audit_trail = str(results.get("revenue_recognition_audit_trail") or "").strip()
+    ssp_rows = list(results.get("ssp_allocation_table") or [])
+
+    pairs: List[Tuple[str, str]] = []
+    ob_summaries = [
+        f"{p.get('obligation', p.get('obligation_id', 'PO'))} ({currency} {float(p.get('allocated_amount', 0) or 0):,.0f})"
+        for p in perf_obs[:5]
+    ]
+    pairs.append(
+        (
+            "How was standalone selling price (SSP) estimated for each performance obligation?",
+            (
+                f"The transaction price was allocated across {len(perf_obs)} obligations using the relative SSP method. "
+                f"Obligations: {'; '.join(ob_summaries) or 'see allocation table'}. "
+                "SSP estimates should be supported by observable prices, adjusted market assessments, or expected cost plus margin."
+            ),
+        )
+    )
+    pairs.append(
+        (
+            "How was the go-live date determined for SaaS licence and support recognition?",
+            (
+                f"Contract effective date is {cd.get('effective_date', 'per contract')}. "
+                "Licence and support obligations described as commencing 'from go-live' use the documented go-live date "
+                "as obligation_start_date, not the contract signature date, per IFRS 15.B58–B63."
+            ),
+        )
+    )
+    training = [p for p in perf_obs if "training" in str(p.get("obligation", "")).lower()]
+    if training:
+        t = training[0]
+        pairs.append(
+            (
+                "How were training session delivery dates and revenue timing assessed?",
+                (
+                    f"Training ({currency} {float(t.get('allocated_amount', 0) or 0):,.0f} allocated) is recognised "
+                    f"point-in-time upon each session ({float(t.get('pct_complete', 0) or 0):.0f}% complete to date). "
+                    "Delivery evidence should include attendance logs or completion certificates for each session."
+                ),
+            )
+        )
+    impl = [p for p in perf_obs if any(k in str(p.get("obligation", "")).lower() for k in ("onboarding", "implementation"))]
+    if impl:
+        i = impl[0]
+        pairs.append(
+            (
+                "Over what period is implementation/onboarding revenue recognised?",
+                (
+                    f"Implementation ({currency} {float(i.get('allocated_amount', 0) or 0):,.0f}) is recognised over time "
+                    f"for the stated delivery period ({float(i.get('pct_complete', 0) or 0):.0f}% complete), "
+                    "not spread across the full contract term."
+                ),
+            )
+        )
+    licence = [p for p in perf_obs if any(k in str(p.get("obligation", "")).lower() for k in ("saas", "licence", "license", "subscription"))]
+    if licence:
+        lic = licence[0]
+        pairs.append(
+            (
+                "Is the SaaS licence a right-to-access or right-to-use licence?",
+                (
+                    f"SaaS/subscription licence ({currency} {float(lic.get('allocated_amount', 0) or 0):,.0f}) is treated as "
+                    "right-to-access and recognised over the licence term from go-live. "
+                    f"Recognised to date: {currency} {float(lic.get('revenue_recognized', 0) or 0):,.0f} ({float(lic.get('pct_complete', 0) or 0):.0f}%)."
+                ),
+            )
+        )
+    if audit_trail:
+        pairs.append(
+            (
+                "How does recognised revenue reconcile to the performance obligation schedule?",
+                f"Recognised revenue derives from the obligation-level schedule: {audit_trail[:280]}.",
+            )
+        )
+    if ssp_rows:
+        pairs.append(
+            (
+                "Does allocated transaction price equal total contract value?",
+                (
+                    f"SSP allocation table shows {len(ssp_rows)} obligations totalling "
+                    f"{currency} {sum(float(r.get('allocated_amount', 0) or 0) for r in ssp_rows):,.0f}, "
+                    "which should reconcile to the transaction price per IFRS 15.73–86."
+                ),
+            )
+        )
+    pairs.append(
+        (
+            "What variable consideration constraint was applied?",
+            (
+                f"Variable consideration in transaction price: {currency} "
+                f"{float((disc.get('transaction_price_components') or {}).get('variable_consideration', 0) or 0):,.2f}. "
+                "Constraint assessment under IFRS 15.56–58 should be documented where VC is included."
+            ),
+        )
+    )
+    pairs.append(
+        (
+            "What contract balances exist at the reporting date?",
+            (
+                f"Recognised: {currency} {float(results.get('total_recognised', 0) or 0):,.0f}; "
+                f"Deferred: {currency} {float(results.get('total_deferred', 0) or 0):,.0f}. "
+                "Contract asset/liability classification follows billing vs recognition timing."
+            ),
+        )
+    )
+    while len(pairs) < 10:
+        n = len(pairs) + 1
+        pairs.append(
+            (
+                f"What additional IFRS 15 judgement applies to obligation {min(n, len(perf_obs) or 1)}?",
+                "Document key judgements, assumptions, and supporting evidence; reassess at each reporting period.",
+            )
+        )
+    return pairs[:10]
+
+
 def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str, Any]:
+    """Generate client report as PDF when ReportLab works; otherwise HTML."""
+    if REPORTLAB_AVAILABLE:
+        try:
+            return _generate_client_report_pdf(data, api_key)
+        except Exception as exc:
+            print(f"[ifrs15_client_report] PDF failed ({exc}); using HTML fallback.")
+    else:
+        print(
+            f"[ifrs15_client_report] ReportLab unavailable ({REPORTLAB_IMPORT_ERROR}); "
+            "using HTML fallback."
+        )
+    return _generate_client_report_html(data, api_key)
+
+
+def _generate_client_report_html(data: Dict[str, Any], api_key: str = "") -> Dict[str, Any]:
+    """HTML fallback when ReportLab PDF generation is unavailable."""
+    results = (data.get("calculation_results") or {})
+    disc = (results.get("disclosure_data") or {})
+    contract_details = (disc.get("contract_details") or {})
+    perf_obs = list(results.get("performance_obligations") or [])
+    schedule = list(results.get("revenue_schedule") or [])
+
+    contract_id = _safe_text(data.get("contract_id") or contract_details.get("contract_id"), "CONTRACT")
+    customer_name = _safe_text(data.get("customer_name") or contract_details.get("customer"), "Client")
+    prepared_by = _safe_text(data.get("prepared_by"), "IFRS AI")
+    currency = _resolve_currency(results, data)
+    today_str = datetime.now().strftime("%d %b %Y")
+
+    total_contract_value = float(results.get("total_contract_value", 0) or 0)
+    total_recognised = float(results.get("total_recognised", 0) or 0)
+    total_deferred = float(results.get("total_deferred", 0) or 0)
+    pattern = _po_pattern(perf_obs)
+    audit_trail = _safe_text(results.get("revenue_recognition_audit_trail"), "")
+    qa_pairs = _contract_specific_qa_pairs(results, currency)
+
+    po_rows = ""
+    for po in perf_obs:
+        name = html_module.escape(_safe_text(po.get("obligation") or po.get("obligation_id"), "PO"))
+        alloc = float(po.get("allocated_amount", 0) or 0)
+        rec = float(po.get("revenue_recognized", 0) or 0)
+        pct = float(po.get("pct_complete", 0) or 0)
+        po_rows += (
+            f"<tr><td>{name}</td>"
+            f"<td>{_fmt_money(alloc, currency)}</td>"
+            f"<td>{_fmt_money(rec, currency)}</td>"
+            f"<td>{pct:.1f}%</td></tr>"
+        )
+
+    qa_html = ""
+    for i, (q, a) in enumerate(qa_pairs[:10], start=1):
+        qa_html += (
+            f"<div class='qa'><strong>Q{i}:</strong> {html_module.escape(q)}"
+            f"<p><strong>A:</strong> {html_module.escape(a)}</p></div>"
+        )
+
+    ssp_rows = list(results.get("ssp_allocation_table") or [])
+    ssp_html = ""
+    for row in ssp_rows:
+        ssp_html += (
+            f"<tr><td>{html_module.escape(_safe_text(row.get('obligation'), 'PO'))}</td>"
+            f"<td>{_fmt_money(row.get('list_ssp', 0), currency)}</td>"
+            f"<td>{float(row.get('allocated_pct', 0) or 0):.1f}%</td>"
+            f"<td>{_fmt_money(row.get('allocated_amount', 0), currency)}</td></tr>"
+        )
+
+    file_id = str(uuid.uuid4())
+    safe_customer = "".join(ch for ch in customer_name if ch.isalnum() or ch in ("_", "-"))[:30] or "Client"
+    filename = f"IFRS15_Report_{safe_customer}_{datetime.now().strftime('%Y%m%d')}.html"
+    out_path = OUTPUT_DIR / f"{file_id}_{filename}"
+
+    body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<title>IFRS 15 Report — {html_module.escape(customer_name)}</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 2rem; color: #111827; }}
+h1 {{ color: #0b1f3b; }}
+.metrics {{ display: flex; gap: 1rem; flex-wrap: wrap; margin: 1.5rem 0; }}
+.metric {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; min-width: 180px; }}
+table {{ width: 100%; border-collapse: collapse; margin: 1rem 0; }}
+th, td {{ border: 1px solid #e2e8f0; padding: 8px; text-align: left; }}
+th {{ background: #f1f5f9; }}
+.qa {{ margin: 1rem 0; padding: 0.75rem; background: #f9fafb; border-radius: 6px; }}
+.note {{ color: #64748b; font-size: 0.9rem; }}
+</style></head><body>
+<h1>IFRS 15 Revenue Recognition Analysis</h1>
+<p>Prepared for: <strong>{html_module.escape(customer_name)}</strong> · Contract: {html_module.escape(contract_id)}<br/>
+Prepared by: {html_module.escape(prepared_by)} · Date: {today_str}</p>
+<p class="note">HTML report (PDF engine unavailable on this machine). Open in a browser and use Print → Save as PDF if needed.</p>
+<div class="metrics">
+  <div class="metric"><div>Total Contract Value</div><strong>{_fmt_money(total_contract_value, currency)}</strong></div>
+  <div class="metric"><div>Revenue Recognised</div><strong>{_fmt_money(total_recognised, currency)}</strong></div>
+  <div class="metric"><div>Deferred Revenue</div><strong>{_fmt_money(total_deferred, currency)}</strong></div>
+</div>
+<p>Recognition pattern: {html_module.escape(pattern)} · Performance obligations: {len(perf_obs)}</p>
+{f'<p><strong>Audit trail:</strong> {html_module.escape(audit_trail)}</p>' if audit_trail else ''}
+<h2>Performance Obligations</h2>
+<table><thead><tr><th>Obligation</th><th>Allocated</th><th>Recognised</th><th>% Complete</th></tr></thead>
+<tbody>{po_rows or '<tr><td colspan="4">No obligations</td></tr>'}</tbody></table>
+<h2>Step 4 — SSP Allocation</h2>
+<table><thead><tr><th>Obligation</th><th>List SSP</th><th>Allocated %</th><th>Allocated</th></tr></thead>
+<tbody>{ssp_html or '<tr><td colspan="4">Not available</td></tr>'}</tbody></table>
+<h2>Auditor Q&amp;A</h2>
+{qa_html}
+<p class="note">Confidential. For client and advisor use only. © FinReportAI {datetime.now().year}</p>
+</body></html>"""
+
+    out_path.write_text(body, encoding="utf-8")
+    return {
+        "file_id": file_id,
+        "filename": filename,
+        "pages": 1,
+        "format": "html",
+        "path": str(out_path),
+    }
+
+
+def _generate_client_report_pdf(data: Dict[str, Any], api_key: str = "") -> Dict[str, Any]:
     results = (data.get("calculation_results") or {})
     disc = (results.get("disclosure_data") or {})
     contract_details = (disc.get("contract_details") or {})
@@ -378,13 +715,7 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
                     qa_accum[-1][1] = block[2:].strip()
             qa_pairs = [(q, a or "Answer not available.") for q, a in qa_accum[:10]]
     if not qa_pairs:
-        qa_pairs = [
-            (
-                f"What is key IFRS 15 judgement #{i}?",
-                "Judgement and supporting evidence should be documented and periodically reassessed.",
-            )
-            for i in range(1, 11)
-        ]
+        qa_pairs = _contract_specific_qa_pairs(results, currency)
 
     file_id = str(uuid.uuid4())
     safe_customer = "".join(ch for ch in customer_name if ch.isalnum() or ch in ("_", "-"))[:30] or "Client"
@@ -477,6 +808,31 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
         c.setFillColor(colors.black)
         y -= 0.75 * cm
     y -= 0.3 * cm
+    ssp_rows = list(results.get("ssp_allocation_table") or [])
+    if ssp_rows:
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(1.7 * cm, y, "Step 4 — SSP Allocation")
+        y -= 0.6 * cm
+        c.setFont("Helvetica", 8)
+        for row in ssp_rows[:6]:
+            ob = _safe_text(row.get("obligation"), "PO")[:40]
+            alloc = float(row.get("allocated_amount", 0) or 0)
+            pct = float(row.get("allocated_pct", 0) or 0)
+            c.drawString(
+                1.9 * cm,
+                y,
+                f"{ob}: SSP {_fmt_money(row.get('list_ssp', 0), currency)} → {pct:.1f}% → {_fmt_money(alloc, currency)}",
+            )
+            y -= 0.45 * cm
+        audit = str(results.get("revenue_recognition_audit_trail") or "")
+        if audit and y > 3.5 * cm:
+            y -= 0.2 * cm
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(1.7 * cm, y, "Recognition audit trail")
+            y -= 0.45 * cm
+            c.setFont("Helvetica", 8)
+            y = _draw_wrapped(c, audit, 1.9 * cm, y, width - 3.6 * cm, 8, 11)
+    y -= 0.3 * cm
     c.setFont("Helvetica-Bold", 11)
     c.drawString(1.7 * cm, y, "Non-standard clauses")
     y -= 0.7 * cm
@@ -564,7 +920,6 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
         alloc = float(po.get("allocated_amount", 0) or 0)
         recognised = float(po.get("revenue_recognized", 0) or 0)
         rem = max(0.0, alloc - recognised)
-        rtype = _safe_text(po.get("recognition_method"), "over_time").replace("_", " ").title()
         pct = 0 if alloc == 0 else (recognised / alloc) * 100
         c.setFont("Helvetica-Bold", 10)
         c.drawString(1.7 * cm, y, name)
@@ -572,21 +927,19 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
         c.setFont("Helvetica", 9)
         lines = [
             f"Allocated Amount: {_fmt_money(alloc, currency)}",
-            f"Recognition Type: {rtype}",
-            f"Recognition Period: {_safe_text(contract_details.get('effective_date'), '-')} to {_safe_text(schedule[-1].get('Date') if schedule else '-', '-')}",
+            *_po_page5_recognition_lines(po, schedule, contract_details, currency),
         ]
         if is_uae and schedule:
-            lines.append("Quarterly recognition schedule (IFRS 15 off-plan):")
-            for row in schedule[:8]:
-                period = _safe_text(row.get("Month") or row.get("month"), "Period")
-                rev = float(row.get("Scheduled_Revenue", row.get("Revenue", 0)) or 0)
-                cum = float(row.get("Cumulative", 0) or 0)
-                lines.append(
-                    f"  {period}: {_fmt_money(rev, currency)} (cumulative {_fmt_money(cum, currency)})"
-                )
-        else:
-            monthly = alloc / max(1, int(contract_details.get("term_months", 12) or 12))
-            lines.append(f"Monthly Amount: {_fmt_money(monthly, currency)} per month")
+            po_rows = _po_schedule_rows(schedule, po)
+            if po_rows:
+                lines.append("Quarterly recognition schedule (IFRS 15 off-plan):")
+                for row in po_rows[:8]:
+                    period = _safe_text(row.get("Month") or row.get("month"), "Period")
+                    rev = float(row.get("Scheduled_Revenue", row.get("Revenue", 0)) or 0)
+                    cum = float(row.get("Cumulative", 0) or 0)
+                    lines.append(
+                        f"  {period}: {_fmt_money(rev, currency)} (cumulative {_fmt_money(cum, currency)})"
+                    )
         lines.append(f"Status: {pct:.1f}% recognised | Remaining {_fmt_money(rem, currency)}")
         for ln in lines:
             c.drawString(2.0 * cm, y, ln)
@@ -726,4 +1079,10 @@ def generate_client_report(data: Dict[str, Any], api_key: str = "") -> Dict[str,
     _draw_footer(c, 10, uae_meta=uae_branded)
     c.save()
 
-    return {"file_id": file_id, "filename": filename, "pages": 10, "path": str(out_path)}
+    return {
+        "file_id": file_id,
+        "filename": filename,
+        "pages": 10,
+        "format": "pdf",
+        "path": str(out_path),
+    }

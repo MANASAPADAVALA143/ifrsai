@@ -28,7 +28,7 @@ set APIPORT=9000
 if exist "%~dp0api_dev_port.txt" set /p APIPORT=<"%~dp0api_dev_port.txt"
 
 echo [2/2] Starting Frontend ^(Next.js, port 3004^)...
-start "IFRS Frontend" cmd /k "cd /d %~dp0\frontend && npm run dev"
+start "IFRS Frontend" cmd /k "cd /d %~dp0\frontend && npm run dev:webpack"
 
 echo.
 echo Waiting until Next.js answers on 127.0.0.1:3004 ^(first run can take 1-2 minutes^)...

@@ -22,7 +22,7 @@ import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { ifrs16Api } from '@/lib/api';
 import { saveToLeaseRepository, buildLeaseEntry } from '@/lib/lease-repository';
-import { formatIndianCurrency, formatIndianNumber } from '@/lib/utils';
+import { formatIndianNumber } from '@/lib/utils';
 
 const cardClass =
   'bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]';
@@ -128,6 +128,27 @@ function parseBool(v: unknown): boolean {
 function num(v: unknown, fallback = 0): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function getCurrencySymbol(currency: string): string {
+  switch (currency?.toUpperCase()) {
+    case 'AED':
+      return 'AED ';
+    case 'GBP':
+      return '£';
+    case 'USD':
+      return '$';
+    case 'EUR':
+      return '€';
+    case 'INR':
+      return '₹';
+    default:
+      return currency ? `${currency} ` : '₹';
+  }
+}
+
+function formatCurrencyAmount(amount: number, currency: string): string {
+  return `${getCurrencySymbol(currency)}${Number(amount || 0).toLocaleString('en-IN')}`;
 }
 
 function findHeaderRow(rows: string[][]): number {
@@ -699,6 +720,11 @@ export default function BulkUploadPage() {
   };
 
   const rowByLeaseId = useMemo(() => new Map(parsedRows.map((r) => [r.lease_id, r])), [parsedRows]);
+  const summaryCurrency = useMemo(() => {
+    if (!bulkResult) return 'INR';
+    const keys = Object.keys(bulkResult.portfolio_summary.currency_breakdown || {}).filter(Boolean);
+    return keys.length === 1 ? keys[0] : 'INR';
+  }, [bulkResult]);
 
   const progressPct = calcTotal > 0 ? Math.round((calcDone / calcTotal) * 100) : 0;
 
@@ -857,7 +883,7 @@ export default function BulkUploadPage() {
                         <td className="px-3 py-2 font-mono text-xs">{r.lease_id || '—'}</td>
                         <td className="px-3 py-2 max-w-[200px] truncate">{r.asset_description}</td>
                         <td className="px-3 py-2 text-right font-mono">
-                          {formatIndianCurrency(r.monthly_payment)}
+                          {formatCurrencyAmount(r.monthly_payment, r.currency)}
                         </td>
                         <td className="px-3 py-2 text-right">{r.lease_term_months}</td>
                         <td className="px-3 py-2 text-right">{(r.annual_discount_rate * 100).toFixed(2)}%</td>
@@ -954,7 +980,7 @@ export default function BulkUploadPage() {
                 <div>
                   <p className="text-xs text-[#64748b] uppercase font-semibold">Total Liability</p>
                   <p className="text-lg font-bold text-[#1e293b]">
-                    {formatIndianCurrency(bulkResult.portfolio_summary.total_lease_liability)}
+                    {formatCurrencyAmount(bulkResult.portfolio_summary.total_lease_liability, summaryCurrency)}
                   </p>
                 </div>
               </div>
@@ -963,7 +989,7 @@ export default function BulkUploadPage() {
                 <div>
                   <p className="text-xs text-[#64748b] uppercase font-semibold">Total ROU Asset</p>
                   <p className="text-lg font-bold text-[#1e293b]">
-                    {formatIndianCurrency(bulkResult.portfolio_summary.total_rou_asset)}
+                    {formatCurrencyAmount(bulkResult.portfolio_summary.total_rou_asset, summaryCurrency)}
                   </p>
                 </div>
               </div>
@@ -974,11 +1000,11 @@ export default function BulkUploadPage() {
               <ul className="text-sm text-[#475569] space-y-1">
                 <li>
                   Total lease liability:{' '}
-                  <strong>{formatIndianCurrency(bulkResult.portfolio_summary.total_lease_liability)}</strong>
+                  <strong>{formatCurrencyAmount(bulkResult.portfolio_summary.total_lease_liability, summaryCurrency)}</strong>
                 </li>
                 <li>
                   Total ROU asset:{' '}
-                  <strong>{formatIndianCurrency(bulkResult.portfolio_summary.total_rou_asset)}</strong>
+                  <strong>{formatCurrencyAmount(bulkResult.portfolio_summary.total_rou_asset, summaryCurrency)}</strong>
                 </li>
                 <li>
                   Average IBR:{' '}
@@ -1028,13 +1054,13 @@ export default function BulkUploadPage() {
                           <td className="px-3 py-2 font-mono text-xs">{r.lease_id}</td>
                           <td className="px-3 py-2 max-w-[180px] truncate">{pr?.asset_description ?? '—'}</td>
                           <td className="px-3 py-2 text-right font-mono">
-                            {formatIndianCurrency(r.lease_liability || 0)}
+                            {formatCurrencyAmount(r.lease_liability || 0, pr?.currency || 'INR')}
                           </td>
                           <td className="px-3 py-2 text-right font-mono">
-                            {formatIndianCurrency(r.rou_asset || 0)}
+                            {formatCurrencyAmount(r.rou_asset || 0, pr?.currency || 'INR')}
                           </td>
                           <td className="px-3 py-2 text-right font-mono">
-                            {formatIndianCurrency(r.monthly_depreciation || 0)}
+                            {formatCurrencyAmount(r.monthly_depreciation || 0, pr?.currency || 'INR')}
                           </td>
                           <td className="px-3 py-2 text-right">
                             {pr ? `${(pr.annual_discount_rate * 100).toFixed(2)}%` : '—'}

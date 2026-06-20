@@ -1,0 +1,265 @@
+{
+  "contract_identification": {
+    "spa_reference": {
+      "value": "SPA-DV2-2024-1205",
+      "confidence": 99,
+      "source_text": "SPA Reference Number: SPA-DV2-2024-1205",
+      "assumptions": "Directly stated on cover page. No ambiguity."
+    },
+    "oqood_number": {
+      "value": "DLD-2024-OQ-48291",
+      "confidence": 99,
+      "source_text": "Oqood Registration Number: DLD-2024-OQ-48291",
+      "assumptions": "Directly stated. Follows standard DLD Oqood format. Required for Dubai off-plan registration under Law No. 13 of 2008."
+    },
+    "rera_registration": {
+      "value": "RERA-DT2-2024-001",
+      "confidence": 99,
+      "source_text": "RERA Project Registration: RERA-DT2-2024-001",
+      "assumptions": "Directly stated. Mandatory RERA project registration for Dubai off-plan sales per RERA regulations."
+    },
+    "contract_date": {
+      "value": "2024-03-15",
+      "confidence": 99,
+      "source_text": "Contract Date: 15 March 2024",
+      "assumptions": "Converted from DD Month YYYY to ISO 8601 YYYY-MM-DD format. No ambiguity."
+    }
+  },
+  "property": {
+    "project_name": {
+      "value": "Downtown Views II — Tower B",
+      "confidence": 99,
+      "source_text": "Project Name: Downtown Views II — Tower B",
+      "assumptions": "Directly stated. Tower B included as it distinguishes the specific building within the project."
+    },
+    "unit_number": {
+      "value": "1205",
+      "confidence": 99,
+      "source_text": "Unit Number: 1205",
+      "assumptions": "Directly stated. Consistent with floor number 12 (unit on 12th floor, stack 05)."
+    },
+    "unit_type": {
+      "value": "Apartment",
+      "confidence": 99,
+      "source_text": "Unit Type: Apartment",
+      "assumptions": "Directly stated. No bedroom count specified in the SPA text provided; if bedroom count is required, it should be sourced from a more detailed schedule."
+    },
+    "floor_area_sqft": {
+      "value": 1450,
+      "confidence": 99,
+      "source_text": "Built-up Area: 1,450 sq ft",
+      "assumptions": "Directly stated as built-up area (BUA). Note: BUA typically includes internal walls and may differ from net sellable area (NSA). No separate NSA figure provided. Value stored as integer without commas."
+    },
+    "floor_number": {
+      "value": 12,
+      "confidence": 99,
+      "source_text": "Floor: 12",
+      "assumptions": "Directly stated. Stored as integer. Consistent with unit number 1205 (floor 12)."
+    }
+  },
+  "parties": {
+    "developer_name": {
+      "value": "Emaar Development LLC",
+      "confidence": 99,
+      "source_text": "Developer / Seller: Emaar Development LLC",
+      "assumptions": "Directly stated. Emaar Development LLC is a registered Dubai developer. No assumption required."
+    },
+    "buyer_name": {
+      "value": "Mohammed Al Rashidi",
+      "confidence": 99,
+      "source_text": "Buyer / Purchaser: Mohammed Al Rashidi",
+      "assumptions": "Directly stated. UAE national as confirmed by nationality field."
+    },
+    "buyer_eid": {
+      "value": "784-1985-1234567-1",
+      "confidence": 99,
+      "source_text": "Emirates ID: 784-1985-1234567-1",
+      "assumptions": "Directly stated. Follows standard UAE Emirates ID format: 784 (UAE country code) - YYYY (birth year) - 7-digit number - check digit."
+    }
+  },
+  "financial": {
+    "contract_value_aed": {
+      "value": 2450000,
+      "confidence": 99,
+      "source_text": "Total Purchase Price: AED 2,450,000 (exclusive of VAT)",
+      "assumptions": "Explicitly stated as exclusive of VAT per UAE SPA Rule 4. VAT of AED 122,500 is stated separately. Transaction price for IFRS 15 purposes is AED 2,450,000 (ex-VAT). VAT is collected as agent for the Federal Tax Authority and excluded from revenue per IFRS 15.47. Stored as integer without commas or currency symbol."
+    },
+    "booking_amount_aed": {
+      "value": 245000,
+      "confidence": 99,
+      "source_text": "Booking Amount Paid: AED 245,000 (10% of purchase price)",
+      "assumptions": "Directly stated as booking amount paid on signing. Represents 10% of AED 2,450,000 = AED 245,000. Consistent with payment plan instalment 1. This constitutes a contract liability (deferred revenue) under IFRS 15 until revenue is recognised over time."
+    },
+    "handover_payment_aed": {
+      "value": 1225000,
+      "confidence": 99,
+      "source_text": "Handover Payment: AED 1,225,000 (50% due on handover)",
+      "assumptions": "Directly stated. Represents 50% of AED 2,450,000 = AED 1,225,000. Consistent with payment plan instalment 7. Under IFRS 15 over-time recognition, this amount will be recognised as revenue progressively; the large handover tranche creates a contract asset (unbilled receivable) as revenue is recognised ahead of billing."
+    },
+    "vat_amount_aed": {
+      "value": 122500,
+      "confidence": 99,
+      "source_text": "VAT Amount: AED 122,500 (5%)",
+      "assumptions": "Directly stated. 5% UAE VAT on AED 2,450,000 = AED 122,500. Excluded from IFRS 15 transaction price per IFRS 15.47 (amounts collected on behalf of third parties). Stored as integer."
+    },
+    "payment_plan": {
+      "value": [
+        {
+          "label": "Booking on signing",
+          "amount_aed": 245000,
+          "pct": 10,
+          "due_date": "2024-03-15",
+          "trigger": "booking"
+        },
+        {
+          "label": "6 months from SPA date",
+          "amount_aed": 122500,
+          "pct": 5,
+          "due_date": "2024-09-15",
+          "trigger": "months"
+        },
+        {
+          "label": "12 months from SPA date",
+          "amount_aed": 122500,
+          "pct": 5,
+          "due_date": "2025-03-15",
+          "trigger": "months"
+        },
+        {
+          "label": "On 30% construction completion",
+          "amount_aed": 245000,
+          "pct": 10,
+          "due_date": null,
+          "trigger": "completion_pct"
+        },
+        {
+          "label": "On 50% construction completion",
+          "amount_aed": 245000,
+          "pct": 10,
+          "due_date": null,
+          "trigger": "completion_pct"
+        },
+        {
+          "label": "On 70% construction completion",
+          "amount_aed": 245000,
+          "pct": 10,
+          "due_date": null,
+          "trigger": "completion_pct"
+        },
+        {
+          "label": "On handover / completion",
+          "amount_aed": 1225000,
+          "pct": 50,
+          "due_date": "2026-12-31",
+          "trigger": "handover"
+        }
+      ],
+      "confidence": 97,
+      "source_text": "PAYMENT PLAN 1. Booking on signing: AED 245,000 (10%) 2. 6 months from SPA date: AED 122,500 (5%) 3. 12 months from SPA date: AED 122,500 (5%) 4. On 30% construction completion: AED 245,000 (10%) 5. On 50% construction completion: AED 245,000 (10%) 6. On 70% construction completion: AED 245,000 (10%) 7. On handover / completion: AED 1,225,000 (50%)",
+      "assumptions": "All 7 instalments extracted. Total: 245,000 + 122,500 + 122,500 + 245,000 + 245,000 + 245,000 + 1,225,000 = AED 2,450,000 — reconciles to contract value. Due dates for time-based instalments calculated from contract date 2024-03-15: +6 months = 2024-09-15; +12 months = 2025-03-15. Handover due date set to expected handover date 2026-12-31. Construction completion milestone due dates are null as they depend on actual construction progress, not calendar dates. Confidence reduced by 2 points as exact calendar dates for completion_pct milestones cannot be determined without a construction programme. IFRS 15 note: payment plan does not reflect the pattern of revenue recognition; contract assets/liabilities will arise where revenue recognised differs from amounts billed."
+    }
+  },
+  "construction_timeline": {
+    "construction_start_date": {
+      "value": "2024-01-01",
+      "confidence": 99,
+      "source_text": "Construction Start Date: 1 January 2024",
+      "assumptions": "Directly stated. Converted to ISO 8601 format. Relevant for IFRS 15 over-time revenue recognition — the performance obligation measurement period runs from this date to expected handover."
+    },
+    "expected_completion_date": {
+      "value": "2026-12-31",
+      "confidence": 99,
+      "source_text": "Expected Completion Date: 31 December 2026",
+      "assumptions": "Directly stated. Converted to ISO 8601 format. Total construction duration: approximately 36 months (Jan 2024 – Dec 2026). Used as denominator reference for percentage-of-completion calculations under IFRS 15.35(c)."
+    },
+    "expected_handover_date": {
+      "value": "2026-12-31",
+      "confidence": 99,
+      "source_text": "Expected Handover Date: 31 December 2026",
+      "assumptions": "Directly stated. Identical to expected completion date, which is typical for Dubai off-plan SPAs where handover occurs upon practical completion. Converted to ISO 8601 format."
+    },
+    "current_completion_pct": {
+      "value": 35,
+      "confidence": 99,
+      "source_text": "Current Completion: 35%",
+      "assumptions": "Directly stated. As at the reporting/extraction date. Stored as integer percentage. IFRS 15 implication: at 35% completion, cumulative revenue to be recognised = 35% × AED 2,450,000 = AED 857,500. Note: the 30% construction completion payment milestone (instalment 4) has been triggered; the 50% milestone has not yet been reached. This creates a contract asset position as revenue recognised (35%) exceeds cash received from completion-linked milestones."
+    }
+  },
+  "ifrs15_specific": {
+    "performance_obligation": {
+      "value": "Delivery of completed apartment unit at handover",
+      "confidence": 99,
+      "source_text": "Performance Obligation: Delivery of completed apartment unit at handover",
+      "assumptions": "Directly stated. Single performance obligation identified — construction and delivery of Unit 1205, Downtown Views II Tower B. Under IFRS 15.22, this is assessed as a single distinct performance obligation as the developer provides a significant integration service combining land, construction and finishing into a completed apartment. No evidence of multiple performance obligations (e.g. separate parking, storage, or post-handover services) in the text provided."
+    },
+    "revenue_recognition_method": {
+      "value": "over_time",
+      "confidence": 99,
+      "source_text": "Revenue Recognition Method: Over time during construction (IFRS 15.35(c))",
+      "assumptions": "Directly stated and consistent with IFRS 15.35(c) criteria for Dubai off-plan real estate: (a) the developer's performance creates an asset (the unit) that the buyer controls as it is created — supported by Oqood registration which transfers equitable interest to buyer; (b) the developer has an enforceable right to payment for performance completed to date under UAE Law No. 8 of 2007. Input method (cost-to-cost or physical completion percentage) is the typical measure of progress. Stored as 'over_time' per schema convention."
+    },
+    "variable_consideration": {
+      "value": "None stated beyond standard payment plan",
+      "confidence": 85,
+      "source_text": "Variable Consideration: None stated beyond standard payment plan",
+      "assumptions": "Directly stated in the SPA IFRS 15 section. However, confidence reduced to 85 as the SPA references RERA developer delay penalties and UAE Law No. 8 of 2007 cancellation refund terms, which could give rise to variable consideration under IFRS 15.50-55. Specifically: (1) developer delay penalties could reduce net revenue; (2) cancellation refund provisions could affect the transaction price if cancellation probability is non-negligible. These should be assessed at each reporting date using the expected value or most likely amount method, constrained to the extent it is highly probable a significant revenue reversal will not occur. No explicit bonus/rebate/discount mechanisms stated."
+    },
+    "cancellation_terms": {
+      "value": "UAE Law No. 8 of 2007 refund terms apply to buyer cancellation",
+      "confidence": 95,
+      "source_text": "Cancellation Terms: UAE Law No. 8 of 2007 refund terms apply to buyer cancellation",
+      "assumptions": "Directly stated. UAE Law No. 8 of 2007 (Interim Real Property Register Law) governs off-plan cancellations in Dubai. Key refund provisions under Article 11: if developer cancels — full refund; if buyer cancels after >80% completion — developer may retain up to 40% of contract value; if buyer cancels after >60% completion — developer may retain up to 25%; if buyer cancels before 60% — developer may retain up to 30% of paid amounts. These provisions create variable consideration and potential contract modification scenarios under IFRS 15. The existence of cancellation rights does not preclude over-time recognition provided the contract has commercial substance and the right to payment for performance to date is enforceable. RERA must be notified of any cancellation."
+    },
+    "penalty_clauses": {
+      "value": "Developer delay penalties as per RERA regulations",
+      "confidence": 90,
+      "source_text": "Penalty Clauses: Developer delay penalties as per RERA regulations",
+      "assumptions": "Directly stated but not quantified in the SPA text provided. RERA regulations typically provide for penalties on developers for delays beyond the agreed handover date. Under IFRS 15.51, these penalties represent variable consideration that could reduce the transaction price. The constraint principle (IFRS 15.56-58) requires that variable consideration be included in the transaction price only to the extent it is highly probable that a significant revenue reversal will not occur. As the project is currently at 35% completion with a December 2026 handover, no delay has occurred yet. Specific penalty rates (e.g. per diem or percentage-based) are not stated in the extracted text and should be sourced from the full SPA schedule or RERA regulations for quantification."
+    },
+    "modification_clauses": {
+      "value": "Price adjustments only by mutual written agreement",
+      "confidence": 95,
+      "source_text": "Modification Clauses: Price adjustments only by mutual written agreement",
+      "assumptions": "Directly stated. Under IFRS 15.18-21, contract modifications must be assessed to determine whether they create a new contract or are part of the existing contract. Since price adjustments require mutual written agreement, any modification will be documented and should be assessed at the time of modification to determine: (a) if the modification adds distinct goods/services at standalone selling price — treated as a separate contract; (b) if not — treated as a modification of the existing contract with cumulative catch-up or prospective adjustment to revenue. The requirement for written agreement reduces the risk of implied modifications."
+    }
+  },
+  "validation": {
+    "missing_fields": {
+      "value": [
+        "bedroom_count — unit type stated as 'Apartment' but number of bedrooms not specified in SPA text",
+        "net_sellable_area_sqft — only built-up area (BUA) provided; NSA not stated",
+        "buyer_passport_number — not provided in extracted text",
+        "developer_escrow_account_number — RERA-mandated escrow account not referenced in extracted text",
+        "completion_milestone_due_dates — calendar dates for 30%, 50%, 70% construction completion milestones cannot be determined from SPA text alone",
+        "penalty_rate_quantification — RERA delay penalty rate/amount not specified in extracted text",
+        "plot_number_or_title_deed — land/plot reference not stated in extracted text",
+        "service_charge_rate — annual service charge (if applicable) not stated"
+      ],
+      "confidence": 100,
+      "source_text": "N/A",
+      "assumptions": "Missing fields identified by comparing extracted data against standard Dubai off-plan SPA requirements and IFRS 15 disclosure needs. These fields may exist in schedules or annexures not included in the provided SPA text."
+    },
+    "low_confidence_fields": {
+      "value": [],
+      "confidence": 100,
+      "source_text": "N/A",
+      "assumptions": "Auto-computed from field confidence scores"
+    },
+    "overall_confidence": {
+      "value": 99,
+      "confidence": 100,
+      "source_text": "N/A",
+      "assumptions": "Average of 12 extracted fields"
+    }
+  },
+  "extraction_metadata": {
+    "timestamp": "2026-06-19T09:42:24.267693",
+    "model": "claude-sonnet-4-6",
+    "tokens_used": 7394,
+    "extractor_version": "uae_spa_v1",
+    "language": "english",
+    "overall_confidence": 99,
+    "low_confidence_fields": [],
+    "fields_scored": 12
+  }
+}

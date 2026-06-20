@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
 
+from claude_model_config import CLAUDE_MODEL
 from ifrs9_staging import IFRS9StagingEngine, LoanStage
 from macro_sensitivity_config import get_sensitivity
 
@@ -454,12 +455,19 @@ class IFRS9ECLCalculator:
         
         # Disclosure data
         disclosure = self.generate_disclosure_data(portfolio_with_ecl, summary, reporting_date)
-        
+
+        stage_bridge = self.generate_stage_ecl_bridge(
+            portfolio_with_ecl,
+            previous_bridge=None,
+            period_events={'opening_total_ecl': previous_ecl},
+        )
+
         return {
             'portfolio_detail': portfolio_with_ecl,
             'summary': summary,
             'journal_entries': journal_entries,
             'disclosure_data': disclosure,
+            'ecl_movement': stage_bridge,
             'movement_analysis': {
                 'opening_ecl': previous_ecl,
                 'closing_ecl': summary['total_ecl_provision'],
@@ -472,6 +480,178 @@ class IFRS9ECLCalculator:
                 'standard': 'IFRS 9',
                 'discount_rate': discount_rate
             }
+        }
+
+    def generate_stage_ecl_bridge(
+        self,
+        portfolio_with_ecl: pd.DataFrame,
+        previous_bridge: Optional[Dict[str, Dict[str, float]]] = None,
+        period_events: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Stage-level ECL movement bridge (IFRS 7 / audit reconciliation).
+
+        Per stage (stage1, stage2, stage3):
+        opening_ecl, new_additions, transfers_in, transfers_out,
+        write_offs, remeasurement, closing_ecl
+        """
+        events = period_events or {}
+        stage_keys = ('stage1', 'stage2', 'stage3')
+        stage_labels = ('Stage 1', 'Stage 2', 'Stage 3')
+
+        closing_by_stage: Dict[str, float] = {k: 0.0 for k in stage_keys}
+        if 'ecl_provision' in portfolio_with_ecl.columns and 'stage' in portfolio_with_ecl.columns:
+            for label, key in zip(stage_labels, stage_keys):
+                mask = portfolio_with_ecl['stage'] == label
+                closing_by_stage[key] = float(portfolio_with_ecl.loc[mask, 'ecl_provision'].sum())
+
+        transfers_in: Dict[str, float] = {k: float((events.get('transfers_in') or {}).get(k, 0.0)) for k in stage_keys}
+        transfers_out: Dict[str, float] = {k: float((events.get('transfers_out') or {}).get(k, 0.0)) for k in stage_keys}
+
+        if (
+            not events.get('transfers_in')
+            and not events.get('transfers_out')
+            and 'previous_stage' in portfolio_with_ecl.columns
+            and 'ecl_provision' in portfolio_with_ecl.columns
+        ):
+            for _, row in portfolio_with_ecl.iterrows():
+                prev_st = str(row.get('previous_stage', '') or '')
+                curr_st = str(row.get('stage', '') or '')
+                ecl_amt = float(row.get('ecl_provision', 0) or 0)
+                if prev_st not in stage_labels or curr_st not in stage_labels or prev_st == curr_st:
+                    continue
+                pk = f"stage{stage_labels.index(prev_st) + 1}"
+                ck = f"stage{stage_labels.index(curr_st) + 1}"
+                transfers_out[pk] += ecl_amt
+                transfers_in[ck] += ecl_amt
+
+        total_opening_input = events.get('opening_total_ecl')
+        total_closing = sum(closing_by_stage.values())
+
+        bridge: Dict[str, Dict[str, float]] = {}
+        for i, key in enumerate(stage_keys):
+            prev_row = (previous_bridge or {}).get(key) or {}
+            opening_ecl_map = events.get('opening_ecl')
+            if isinstance(opening_ecl_map, dict) and key in opening_ecl_map:
+                opening = float(opening_ecl_map[key])
+            elif prev_row.get('closing_ecl') is not None:
+                opening = float(prev_row['closing_ecl'])
+            elif total_opening_input is not None and total_closing > 0:
+                opening = float(total_opening_input) * (closing_by_stage[key] / total_closing)
+            else:
+                opening = float(prev_row.get('opening_ecl', 0.0))
+
+            new_additions = float((events.get('new_additions') or {}).get(key, 0.0))
+            write_offs = float((events.get('write_offs') or {}).get(key, 0.0))
+            ti = transfers_in[key]
+            to = transfers_out[key]
+            closing = closing_by_stage[key]
+            remeasurement = closing - opening - new_additions - ti + to + write_offs
+            bridge[key] = {
+                'opening_ecl': round(opening, 2),
+                'new_additions': round(new_additions, 2),
+                'transfers_in': round(ti, 2),
+                'transfers_out': round(to, 2),
+                'write_offs': round(write_offs, 2),
+                'remeasurement': round(remeasurement, 2),
+                'closing_ecl': round(closing, 2),
+            }
+
+        totals = {
+            'opening_ecl': round(sum(bridge[k]['opening_ecl'] for k in stage_keys), 2),
+            'new_additions': round(sum(bridge[k]['new_additions'] for k in stage_keys), 2),
+            'transfers_in': round(sum(bridge[k]['transfers_in'] for k in stage_keys), 2),
+            'transfers_out': round(sum(bridge[k]['transfers_out'] for k in stage_keys), 2),
+            'write_offs': round(sum(bridge[k]['write_offs'] for k in stage_keys), 2),
+            'remeasurement': round(sum(bridge[k]['remeasurement'] for k in stage_keys), 2),
+            'closing_ecl': round(sum(bridge[k]['closing_ecl'] for k in stage_keys), 2),
+        }
+        bridge['totals'] = totals
+        bridge['_reconciliation'] = self.validate_bridge_reconciliation(bridge)
+        return bridge
+
+    @staticmethod
+    def validate_bridge_reconciliation(bridge: Dict[str, Any]) -> Dict[str, Any]:
+        """Per-stage and total bridge arithmetic check."""
+        stage_keys = ('stage1', 'stage2', 'stage3')
+        issues: List[str] = []
+        for key in stage_keys:
+            row = bridge.get(key) or {}
+            expected_close = (
+                float(row.get('opening_ecl', 0))
+                + float(row.get('new_additions', 0))
+                + float(row.get('transfers_in', 0))
+                - float(row.get('transfers_out', 0))
+                - float(row.get('write_offs', 0))
+                + float(row.get('remeasurement', 0))
+            )
+            closing = float(row.get('closing_ecl', 0))
+            if abs(expected_close - closing) > 0.02:
+                issues.append(f"{key}: closing {closing} != components {expected_close:.2f}")
+        totals = bridge.get('totals') or {}
+        net_movement = float(totals.get('closing_ecl', 0)) - float(totals.get('opening_ecl', 0))
+        return {
+            'valid': len(issues) == 0,
+            'issues': issues,
+            'net_movement': round(net_movement, 2),
+        }
+
+    @staticmethod
+    def extract_journal_movement_amount(journal_entries: Any) -> float:
+        """Net P&L movement from nested or flat journal format."""
+        if not journal_entries:
+            return 0.0
+        if isinstance(journal_entries, dict) and journal_entries.get("entries"):
+            items = [journal_entries]
+        elif isinstance(journal_entries, list):
+            items = journal_entries
+        else:
+            items = [journal_entries] if isinstance(journal_entries, dict) else []
+        total = 0.0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("entries"):
+                for ent in item["entries"]:
+                    acct = str(ent.get("account", "")).lower()
+                    acct_type = str(ent.get("account_type", "")).lower()
+                    dr = float(ent.get("debit") if ent.get("debit") is not None else ent.get("dr", 0) or 0)
+                    cr = float(ent.get("credit") if ent.get("credit") is not None else ent.get("cr", 0) or 0)
+                    is_pl_expense = acct_type == "expense" or (
+                        ("impairment" in acct or "credit loss" in acct)
+                        and "allowance" not in acct
+                        and "contra" not in acct_type
+                    )
+                    if is_pl_expense:
+                        total += dr - cr
+            else:
+                total += float(item.get("amount", 0) or 0)
+        return round(total, 2)
+
+    def journal_tie_out_check(
+        self,
+        bridge: Dict[str, Any],
+        journal_entries: Any,
+        prior_total_ecl: float,
+        current_total_ecl: float,
+        tolerance: float = 0.02,
+    ) -> Dict[str, Any]:
+        """Schedule-to-journal tie-out: bridge net movement vs ECL delta vs journal."""
+        recon = bridge.get('_reconciliation') or self.validate_bridge_reconciliation(bridge)
+        bridge_net = float(recon.get('net_movement', 0))
+        ecl_delta = round(float(current_total_ecl) - float(prior_total_ecl), 2)
+        journal_amount = self.extract_journal_movement_amount(journal_entries)
+        return {
+            'bridge_net_movement': bridge_net,
+            'ecl_delta': ecl_delta,
+            'journal_amount': journal_amount,
+            'bridge_matches_ecl_delta': abs(bridge_net - ecl_delta) <= tolerance,
+            'journal_matches_ecl_delta': abs(journal_amount - ecl_delta) <= tolerance,
+            'tied': (
+                abs(bridge_net - ecl_delta) <= tolerance
+                and abs(journal_amount - ecl_delta) <= tolerance
+            ),
+            'tolerance': tolerance,
         }
     
     def export_to_json(self, results: Dict, filename: str):
@@ -700,7 +880,7 @@ class IFRS9ClassificationEngine:
 
             client = anthropic.Anthropic(api_key=key)
             res = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=CLAUDE_MODEL,
                 max_tokens=600,
                 temperature=0.2,
                 messages=[{"role": "user", "content": prompt}],
@@ -977,7 +1157,7 @@ class IFRS9MacroOverlayEngine:
 
             client = anthropic.Anthropic(api_key=key)
             res = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=CLAUDE_MODEL,
                 max_tokens=900,
                 temperature=0.2,
                 messages=[{"role": "user", "content": prompt}],
@@ -1325,7 +1505,7 @@ class IFRS9ProvisionMatrixEngine:
 
             client = anthropic.Anthropic(api_key=key)
             res = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=CLAUDE_MODEL,
                 max_tokens=500,
                 temperature=0.2,
                 system=system,
@@ -1761,7 +1941,7 @@ class IFRS9MasterSummaryEngine:
 
             client = anthropic.Anthropic(api_key=key)
             res = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=CLAUDE_MODEL,
                 max_tokens=900,
                 temperature=0.2,
                 messages=[{"role": "user", "content": prompt}],

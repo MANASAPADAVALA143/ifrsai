@@ -1,15 +1,23 @@
 'use client';
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { SidebarLayout } from '@/components/SidebarLayout';
+import { Ifrs15WorkspaceShell } from '@/components/ifrs15/Ifrs15WorkspaceShell';
 import { Button } from '@/components/Button';
 import { ifrs15Api } from '@/lib/api';
 import {
   mapRealEstateToCalculatePayload,
   saveRealEstateSyncPayload,
 } from '@/lib/realestate-ifrs15-mapper';
+import {
+  IFRS15_RE_FORM_IMPORT,
+  parseRealEstatePortfolioExcel,
+  saveRealEstateFormImport,
+  isFullRealEstateImport,
+  type RealEstateExcelImport,
+} from '@/lib/ifrs15-realestate-parse';
 import {
   applyQuarterlyScheduleTotals,
   filterPeriodScheduleFromSpa,
@@ -31,6 +39,15 @@ import {
   RERACertificateCard,
   type RERACertificateUploadResult,
 } from '@/components/realestate/RERACertificateCard';
+import { ContractPdfUploadBar } from '@/components/ifrs15/ContractPdfUploadBar';
+import { FieldLabelWithExtraction } from '@/components/ifrs15/FieldLabelWithExtraction';
+import {
+  applyRealEstateExtractionResult,
+  buildIfrs15ContractExtractionResult,
+  mapLowConfidenceToLegacy,
+  toLegacySpaExtracted,
+  type ExtractionConfidenceMap,
+} from '@/lib/ifrs15-contract-extraction';
 import { mapReportToPDFInput } from '@/lib/realestate-pdf-mapper';
 import { RERADeadlineTracker } from '@/components/realestate/RERADeadlineTracker';
 import { FTAVATReconciliation } from '@/components/realestate/FTAVATReconciliation';
@@ -90,9 +107,17 @@ const DEFAULT_MILESTONES: Milestone[] = [
 export default function RealEstateIFRS15Page() {
   const router = useRouter();
   const [spaLoading, setSpaLoading] = useState(false);
+  const [spaUploadError, setSpaUploadError] = useState<string | null>(null);
+  const [spaUploadSeconds, setSpaUploadSeconds] = useState(0);
+  const [extractedConfidences, setExtractedConfidences] = useState<ExtractionConfidenceMap>({});
+  const [extractionSummary, setExtractionSummary] = useState<{ fieldCount: number; avgConfidence: number } | null>(
+    null
+  );
   const [calcLoading, setCalcLoading] = useState(false);
   const [syncLoading, setSyncLoading] = useState(false);
   const [spaExtracted, setSpaExtracted] = useState<Record<string, unknown> | null>(null);
+  /** Full extractor JSON + confidence map — persisted on portfolio save (ifrs16 contract_data pattern). */
+  const [spaExtractionRaw, setSpaExtractionRaw] = useState<Record<string, unknown> | null>(null);
   const [spaInputs, setSpaInputs] = useState<Record<string, unknown> | null>(null);
   const [extractionMeta, setExtractionMeta] = useState<ExtractionMeta | null>(null);
   const [spaFilename, setSpaFilename] = useState<string | null>(null);
@@ -130,6 +155,8 @@ export default function RealEstateIFRS15Page() {
   const [vatResult, setVatResult] = useState<Record<string, unknown> | null>(null);
   const [periodSchedule, setPeriodSchedule] = useState<Record<string, unknown>[]>([]);
   const [excelLoading, setExcelLoading] = useState(false);
+  const [excelImportLoading, setExcelImportLoading] = useState(false);
+  const excelImportRef = useRef<HTMLInputElement>(null);
   const [portfolioLoading, setPortfolioLoading] = useState(false);
   const [reraEscrowViolation, setReraEscrowViolation] = useState<Record<string, unknown> | null>(null);
   const [blockedModal, setBlockedModal] = useState<{ title: string; body: string } | null>(null);
@@ -219,6 +246,94 @@ export default function RealEstateIFRS15Page() {
   }, [expectedHandover]);
 
   useEffect(() => {
+    if (!spaLoading) {
+      setSpaUploadSeconds(0);
+      return;
+    }
+    const t0 = Date.now();
+    const tick = window.setInterval(() => {
+      setSpaUploadSeconds(Math.floor((Date.now() - t0) / 1000));
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [spaLoading]);
+
+  const applyRealEstateExcelImport = useCallback((parsed: RealEstateExcelImport) => {
+    const f = parsed.form;
+    setProjectName(f.projectName);
+    setReraNumber(f.reraNumber);
+    setReraError('');
+    setSpaExecutionDate(f.spaExecutionDate);
+    setConstructionStart(f.constructionStart);
+    setExpectedHandover(f.expectedHandover);
+    setContractValue(f.contractValue);
+    setCostsIncurred(f.costsIncurred);
+    setTotalCosts(f.totalCosts);
+    setRevenuePrior(f.revenuePrior);
+    if (parsed.unitRows.length > 0) setUnitRows(parsed.unitRows);
+    if (parsed.milestones.length > 0) setMilestones(parsed.milestones);
+    if (f.depositReceived && f.spaExecutionDate) {
+      setEscrowReceipts([
+        {
+          date: f.spaExecutionDate,
+          amount: f.depositReceived,
+          buyer_name: parsed.unitRows[0]?.buyer_name || '',
+        },
+      ]);
+    }
+    toast.success(
+      `Loaded ${parsed.portfolioCount} contract(s) from Excel — primary: ${parsed.primaryContractId}`
+    );
+  }, []);
+
+  const handleExcelImport = useCallback(
+    async (file: File) => {
+      if (!file.name.match(/\.(xlsx|xls)$/i)) {
+        toast.error('Upload an Excel file (.xlsx or .xls)');
+        return;
+      }
+      setExcelImportLoading(true);
+      try {
+        const parsed = await parseRealEstatePortfolioExcel(file);
+        if (!parsed) {
+          toast.error('Could not read portfolio sheet. Use the Emaar IFRS 15 Real Estate demo template.');
+          return;
+        }
+        applyRealEstateExcelImport(parsed);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : 'Excel import failed');
+      } finally {
+        setExcelImportLoading(false);
+      }
+    },
+    [applyRealEstateExcelImport]
+  );
+
+  useEffect(() => {
+    try {
+      const imported = sessionStorage.getItem(IFRS15_RE_FORM_IMPORT);
+      if (imported) {
+        sessionStorage.removeItem(IFRS15_RE_FORM_IMPORT);
+        const data = JSON.parse(imported) as RealEstateExcelImport | Record<string, string>;
+        if (isFullRealEstateImport(data)) {
+          applyRealEstateExcelImport(data);
+          return;
+        }
+        const f = data as Record<string, string>;
+        if (f.contractValue) setContractValue(String(f.contractValue));
+        if (f.constructionStart) setConstructionStart(String(f.constructionStart).slice(0, 10));
+        if (f.spaExecutionDate) setSpaExecutionDate(String(f.spaExecutionDate).slice(0, 10));
+        if (f.expectedHandover) setExpectedHandover(String(f.expectedHandover).slice(0, 10));
+        if (f.costsIncurred) setCostsIncurred(String(f.costsIncurred));
+        if (f.totalCosts) setTotalCosts(String(f.totalCosts));
+        if (f.revenuePrior) setRevenuePrior(String(f.revenuePrior));
+        if (f.projectName) setProjectName(String(f.projectName));
+        if (f.reraNumber) setReraNumber(String(f.reraNumber));
+        toast.success('Loaded fields from Excel template');
+        return;
+      }
+    } catch {
+      sessionStorage.removeItem(IFRS15_RE_FORM_IMPORT);
+    }
     try {
       const raw = localStorage.getItem(FORM_STORAGE_KEY);
       if (!raw) return;
@@ -519,58 +634,144 @@ export default function RealEstateIFRS15Page() {
 
   const handleSpaUpload = async (file: File) => {
     setSpaLoading(true);
+    setSpaUploadError(null);
     setExtractionMeta(null);
     setSpaExtracted(null);
+    setSpaExtractionRaw(null);
     setSpaInputs(null);
+    setExtractedConfidences({});
+    setExtractionSummary(null);
     setClearedVerifyFields(new Set());
     setSpaFilename(file.name);
-    const { data, error } = await ifrs15Api.realestateUploadSpa(file);
-    setSpaLoading(false);
-    if (error) {
-      toast.error(error);
-      return;
-    }
-    const meta = (data?.extraction_meta as ExtractionMeta) || {};
-    setExtractionMeta(meta);
 
-    if (meta.success === false) {
-      setSpaExtracted(null);
-      setSpaInputs(null);
-      toast.error(meta.fallback_reason || 'PDF could not be read');
-      return;
-    }
+    const applyLegacySpaUpload = async () => {
+      const { data, error } = await ifrs15Api.realestateUploadSpa(file);
+      if (error) {
+        setSpaUploadError(error);
+        toast.error(error);
+        return;
+      }
+      const meta = (data?.extraction_meta as ExtractionMeta) || {};
+      setExtractionMeta(meta);
 
-    const extracted = (data?.extracted as Record<string, unknown>) || {};
-    const inputs = (data?.ifrs15_inputs as Record<string, unknown>) || {};
-    setSpaExtracted(Object.keys(extracted).length ? extracted : null);
-    setSpaInputs(inputs);
+      if (meta.success === false) {
+        setSpaExtracted(null);
+        setSpaInputs(null);
+        setSpaUploadError(meta.fallback_reason || 'PDF could not be read');
+        toast.error(meta.fallback_reason || 'PDF could not be read');
+        return;
+      }
 
-    if (meta.fallback_triggered) {
-      toast('Arabic PDF — please enter fields manually', { icon: '⚠️' });
-      return;
-    }
+      const extracted = (data?.extracted as Record<string, unknown>) || {};
+      const inputs = (data?.ifrs15_inputs as Record<string, unknown>) || {};
+      setSpaExtracted(Object.keys(extracted).length ? extracted : null);
+      setSpaInputs(inputs);
 
-    if (Object.keys(inputs).length) {
-      applySpaInputs(inputs);
-    }
-    if (extracted.rera_registration_number) {
-      setReraNumber(String(extracted.rera_registration_number));
-    }
-    if (extracted.project_name) {
-      setProjectName(String(extracted.project_name));
-    }
-    if (extracted.handover_date) {
-      setSpaHandoverDate(String(extracted.handover_date).slice(0, 10));
-    }
-    const spaExec = extracted.agreement_date || extracted.contract_date;
-    if (spaExec) {
-      setSpaExecutionDate(String(spaExec).slice(0, 10));
-    }
+      if (meta.fallback_triggered) {
+        toast('Arabic PDF — please enter fields manually', { icon: '⚠️' });
+        return;
+      }
 
-    if (meta.warnings?.length) {
-      toast(meta.warnings[0], { icon: '⚠️' });
-    } else {
-      toast.success('SPA extracted — calculator pre-filled');
+      if (Object.keys(inputs).length) {
+        applySpaInputs(inputs);
+      }
+      if (extracted.rera_registration_number) {
+        setReraNumber(String(extracted.rera_registration_number));
+      }
+      if (extracted.project_name) {
+        setProjectName(String(extracted.project_name));
+      }
+      if (extracted.handover_date) {
+        setSpaHandoverDate(String(extracted.handover_date).slice(0, 10));
+      }
+      const spaExec = extracted.agreement_date || extracted.contract_date;
+      if (spaExec) {
+        setSpaExecutionDate(String(spaExec).slice(0, 10));
+      }
+
+      if (meta.warnings?.length) {
+        toast(meta.warnings[0], { icon: '⚠️' });
+      } else {
+        toast.success('SPA extracted — calculator pre-filled');
+      }
+    };
+
+    try {
+      const { data, error } = await ifrs15Api.extractContract(file, 'uae_spa');
+      if (error || !data) {
+        await applyLegacySpaUpload();
+        return;
+      }
+
+      const result = buildIfrs15ContractExtractionResult(data);
+      const extractedData = (data.extracted_data as Record<string, unknown>) || {};
+      const meta = (extractedData.extraction_metadata as Record<string, unknown>) || {};
+
+      setExtractedConfidences(result.confidences);
+      setExtractionSummary(
+        result.fieldCount > 0 ? { fieldCount: result.fieldCount, avgConfidence: result.avgConfidence } : null
+      );
+
+      applyRealEstateExtractionResult(result, {
+        setContractValue,
+        setConstructionStart,
+        setSpaExecutionDate,
+        setExpectedHandover,
+        setSpaHandoverDate,
+        setProjectName,
+        setReraNumber,
+        setEscrowReceipts,
+        setMilestones,
+      });
+
+      const legacyExtracted = toLegacySpaExtracted(extractedData);
+      setSpaExtracted(Object.keys(legacyExtracted).length ? legacyExtracted : null);
+      setSpaInputs(result.mainFormPatch);
+
+      const lowRaw = Array.isArray(data.low_confidence_fields)
+        ? (data.low_confidence_fields as string[])
+        : Array.isArray(meta.low_confidence_fields)
+          ? (meta.low_confidence_fields as string[])
+          : [];
+      const lowMapped = mapLowConfidenceToLegacy(lowRaw);
+      const lang = String(meta.language || 'english');
+      const overall =
+        typeof data.overall_confidence === 'number'
+          ? data.overall_confidence
+          : typeof meta.overall_confidence === 'number'
+            ? meta.overall_confidence
+            : result.overallConfidence;
+
+      setSpaExtractionRaw({
+        extractor_version: 'uae_spa_v1',
+        source_filename: file.name,
+        extracted_at: new Date().toISOString(),
+        extracted_data: extractedData,
+        validation: data.validation ?? null,
+        overall_confidence: overall,
+        low_confidence_fields: lowRaw,
+        field_confidences: result.confidences,
+      });
+
+      setExtractionMeta({
+        language_detected: lang,
+        confidence_score: overall / 100,
+        low_confidence_fields: lowMapped,
+        success: true,
+        warnings: lowMapped.length ? ['Partial extraction — please verify highlighted fields'] : undefined,
+      });
+
+      if (lowMapped.length) {
+        toast('SPA extracted — verify highlighted fields', { icon: '⚠️' });
+      } else {
+        toast.success(`SPA extracted — ${result.fieldCount} fields populated`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'SPA extraction failed';
+      setSpaUploadError(msg);
+      await applyLegacySpaUpload();
+    } finally {
+      setSpaLoading(false);
     }
   };
 
@@ -781,6 +982,7 @@ export default function RealEstateIFRS15Page() {
       escrow_receipts: buildReportPayload().escrow_receipts,
       escrow_releases: buildReportPayload().escrow_releases,
       construction_completion_pct: completionPctLive,
+      extraction_raw: spaExtractionRaw ?? undefined,
       realestate_snapshot: {
         project_name: projectName.trim(),
         developer_name: String(spaExtracted?.developer_name || ''),
@@ -1152,7 +1354,10 @@ export default function RealEstateIFRS15Page() {
   };
 
   return (
-    <SidebarLayout>
+    <SidebarLayout
+      pageTitle="IFRS 15 — Real Estate UAE"
+      pageSubtitle="RERA off-plan revenue recognition under IFRS 15"
+    >
       {pdfModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 border border-border-default">
@@ -1221,6 +1426,7 @@ export default function RealEstateIFRS15Page() {
         </div>
       )}
 
+      <Ifrs15WorkspaceShell activeNavId="realestate-uae">
       <div className="max-w-6xl mx-auto space-y-8 pb-16">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -1319,10 +1525,43 @@ export default function RealEstateIFRS15Page() {
         ) : null}
 
         <section className="bg-white border border-border-default rounded-lg p-6">
-          <h2 className="text-lg font-semibold mb-4">Contract details</h2>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <h2 className="text-lg font-semibold">Contract details</h2>
+            <div className="flex items-center gap-2">
+              <input
+                ref={excelImportRef}
+                type="file"
+                accept=".xlsx,.xls"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleExcelImport(f);
+                  e.target.value = '';
+                }}
+              />
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={excelImportLoading}
+                onClick={() => excelImportRef.current?.click()}
+              >
+                {excelImportLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                ) : (
+                  <Upload className="w-4 h-4 mr-2" />
+                )}
+                Import Excel
+              </Button>
+            </div>
+          </div>
+          <p className="text-xs text-text-muted mb-4">
+            Upload <strong>Off-Plan Sales Portfolio</strong> sheet (Emaar IFRS 15 demo) — auto-fills project, RERA, dates, units, and milestones.
+          </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <label className="text-sm">
-              <span className="text-text-muted block mb-1">Project name</span>
+            <label className="text-sm block">
+              <FieldLabelWithExtraction field="projectName" extractedConfidences={extractedConfidences}>
+                Project name
+              </FieldLabelWithExtraction>
               <input
                 className={`w-full rounded px-3 py-2 ${fieldVerifyClass(isVerifyHighlight('project_name'))}`}
                 value={projectName}
@@ -1336,8 +1575,10 @@ export default function RealEstateIFRS15Page() {
                 <p className="text-xs text-amber-700 mt-1">⚠️ Please verify</p>
               ) : null}
             </label>
-            <label className="text-sm">
-              <span className="text-text-muted block mb-1">RERA Registration Number *</span>
+            <label className="text-sm block">
+              <FieldLabelWithExtraction field="reraNumber" extractedConfidences={extractedConfidences} required>
+                RERA Registration Number
+              </FieldLabelWithExtraction>
               <input
                 className={`w-full rounded px-3 py-2 ${
                   reraError ? 'border-red-500 border-2' : fieldVerifyClass(isVerifyHighlight('rera_registration_number'))
@@ -1358,8 +1599,10 @@ export default function RealEstateIFRS15Page() {
                 <p className="text-xs text-red-600 mt-1">{reraError}</p>
               ) : null}
             </label>
-            <label className="text-sm">
-              <span className="text-text-muted block mb-1">SPA execution date (contract date) *</span>
+            <label className="text-sm block">
+              <FieldLabelWithExtraction field="contractDate" extractedConfidences={extractedConfidences} required>
+                SPA execution date (contract date)
+              </FieldLabelWithExtraction>
               <input
                 type="date"
                 className="w-full border rounded px-3 py-2"
@@ -1370,7 +1613,7 @@ export default function RealEstateIFRS15Page() {
                 Revenue schedule starts from this date (IFRS 15.9), not before contract exists.
               </p>
             </label>
-            <label className="text-sm">
+            <label className="text-sm block">
               <span className="text-text-muted block mb-1">Construction start</span>
               <input
                 type="date"
@@ -1710,9 +1953,13 @@ export default function RealEstateIFRS15Page() {
 
         {/* 1. SPA Upload */}
         <section className="bg-white border border-border-default rounded-lg p-6">
-          <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-            <Upload className="w-5 h-5 text-orange-primary" /> Upload SPA
-          </h2>
+          <ContractPdfUploadBar
+            uploading={spaLoading}
+            uploadingSeconds={spaUploadSeconds}
+            uploadError={spaUploadError}
+            extractionSummary={extractionSummary}
+            onFileSelect={(f) => void handleSpaUpload(f)}
+          />
           {spaFilename && (
             <div className="flex items-center gap-2 mb-3 text-sm text-text-secondary">
               <FileText className="w-4 h-4" />
@@ -1792,28 +2039,6 @@ export default function RealEstateIFRS15Page() {
                 ✓ SPA extracted successfully
               </p>
             )}
-          <label className="flex flex-col items-center justify-center border-2 border-dashed border-border-default rounded-lg p-10 cursor-pointer hover:border-orange-primary transition-colors">
-            <input
-              type="file"
-              accept=".pdf,.doc,.docx,.txt"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handleSpaUpload(f);
-              }}
-            />
-            {spaLoading ? (
-              <div className="flex flex-col items-center gap-2">
-                <Loader2 className="w-8 h-8 animate-spin text-orange-primary" />
-                <span className="text-sm text-text-secondary">Detecting language and extracting fields...</span>
-              </div>
-            ) : (
-              <>
-                <FileText className="w-10 h-10 text-text-muted mb-2" />
-                <span className="text-sm text-text-secondary">Drag & drop UAE Sale & Purchase Agreement (PDF)</span>
-              </>
-            )}
-          </label>
           {spaExtracted && (
             <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
               {['property_unit_number', 'buyer_name', 'developer_name', 'project_name', 'total_contract_price', 'handover_date'].map(
@@ -1882,13 +2107,13 @@ export default function RealEstateIFRS15Page() {
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             {(
               [
-                ['Contract value (AED)', contractValue, setContractValue, undefined, 'contract_price_aed'],
+                ['Contract value (AED)', contractValue, setContractValue, undefined, 'contract_price_aed', 'contractValue'],
                 ['Costs incurred', costsIncurred, setCostsIncurred],
                 ['Total estimated costs', totalCosts, setTotalCosts],
                 ['Revenue prior period', revenuePrior, setRevenuePrior],
-                ['SPA execution date (contract date) *', spaExecutionDate, setSpaExecutionDate, 'date'],
+                ['SPA execution date (contract date) *', spaExecutionDate, setSpaExecutionDate, 'date', undefined, 'contractDate'],
                 ['Construction start', constructionStart, setConstructionStart, 'date'],
-                ['Expected handover', expectedHandover, setExpectedHandover, 'date', 'handover_date'],
+                ['Expected handover', expectedHandover, setExpectedHandover, 'date', 'handover_date', 'expectedHandover'],
                 ['Current date', currentDate, setCurrentDate, 'date'],
               ] as const
             ).map((row) => {
@@ -1897,10 +2122,17 @@ export default function RealEstateIFRS15Page() {
               const setVal = row[2];
               const type = row[3];
               const verifyKey = row.length > 4 ? row[4] : undefined;
+              const confField = row.length > 5 ? row[5] : undefined;
               const highlight = verifyKey ? isVerifyHighlight(verifyKey) : false;
               return (
-                <label key={String(label)} className="text-sm">
-                  <span className="text-text-muted block mb-1">{label}</span>
+                <label key={String(label)} className="text-sm block">
+                  {confField ? (
+                    <FieldLabelWithExtraction field={confField} extractedConfidences={extractedConfidences}>
+                      {label.replace(' *', '')}
+                    </FieldLabelWithExtraction>
+                  ) : (
+                    <span className="text-text-muted block mb-1">{label}</span>
+                  )}
                   <input
                     type={(type as string) || 'text'}
                     className={`w-full rounded px-3 py-2 ${fieldVerifyClass(highlight)}`}
@@ -2456,6 +2688,7 @@ export default function RealEstateIFRS15Page() {
           </div>
         ) : null}
       </div>
+      </Ifrs15WorkspaceShell>
     </SidebarLayout>
   );
 }

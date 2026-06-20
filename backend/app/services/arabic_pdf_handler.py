@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 
+from claude_model_config import CLAUDE_MODEL
 from backend.app.services.spa_parser import (
     SPA_EXTRACTION_PROMPT,
     _extract_json_from_response,
@@ -263,7 +264,7 @@ def extract_spa_fields(
     existing_claude_client: Any,
     *,
     filename: str = "upload.pdf",
-    model: str = "claude-sonnet-4-20250514",
+    model: str = CLAUDE_MODEL,
 ) -> SPAExtractionResult:
     warnings: List[str] = []
 

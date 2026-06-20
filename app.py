@@ -28,6 +28,7 @@ if hasattr(sys.stdout, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
         pass
+from claude_model_config import CLAUDE_MODEL
 from currency_format import format_currency_value  # noqa: F401 — INR vs international amount formatting
 import gc
 from macro_sensitivity_config import MACRO_SENSITIVITY_DEFAULTS, update_sensitivity, get_sensitivity, is_db_loaded, set_db_loaded
@@ -406,6 +407,10 @@ class LeaseRequest(BaseModel):
     monthly_payment: float = Field(..., gt=0, description="Monthly payment amount")
     non_lease_component: float = Field(default=0, ge=0, description="Monthly non-lease portion (e.g. service/maintenance) excluded from IFRS 16 liability")
     non_lease_description: str = Field(default="", description="What the non-lease component covers")
+    non_lease_additive: bool = Field(
+        default=False,
+        description="True when non-lease is charged on top of base rent (not embedded in monthly_payment)",
+    )
     practical_expedient_elected: bool = Field(default=False, description="IFRS 16 §15: elect not to separate components")
     annual_discount_rate: float = Field(..., gt=0.0001, le=1, description="Annual discount rate (e.g., 0.085 for 8.5%). IBR must be > 0%.")
     initial_direct_costs: float = Field(default=0, ge=0, description="Initial direct costs (legacy; use legal+brokerage+other if provided)")
@@ -425,7 +430,11 @@ class LeaseRequest(BaseModel):
     rvg_amount: float = Field(default=0, ge=0, description="Residual value guarantee (guaranteed amount)")
     rvg_guaranteed_by: str = Field(default="None", description="Lessee | Third party | None")
     rvg_expected_payment: float = Field(default=0, ge=0, description="Expected payment at end of lease")
-    
+    reporting_date: Optional[str] = Field(
+        default=None,
+        description="Balance sheet reporting date for maturity analysis (YYYY-MM-DD)",
+    )
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -585,6 +594,12 @@ class IFRS15CalculateRequest(BaseModel):
     payment_terms: str = ""
     realestate_period_schedule: List[Dict[str, Any]] = Field(default_factory=list)
     realestate_overlay: Optional[Dict[str, Any]] = None
+    # Off-plan / construction (IFRS 15.35(c) input method — not straight-line contract term)
+    construction_start: Optional[str] = None
+    expected_handover: Optional[str] = None
+    construction_completion_pct: Optional[float] = None
+    progress_measurement: Optional[str] = None
+    current_date: Optional[str] = None
 
 
 class IFRS15ClassifyContractRequest(BaseModel):
@@ -854,6 +869,10 @@ class PortfolioContractRequest(BaseModel):
     escrow_releases: List[EscrowReleaseEntry] = Field(default_factory=list)
     construction_completion_pct: Optional[float] = None
     realestate_snapshot: Optional[Dict[str, Any]] = None
+    extraction_raw: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Full UAE SPA extractor JSON with per-field confidence (mirrors ifrs16_leases.lease_data.contract_data)",
+    )
 
 
 class AuditSignOffRequest(BaseModel):
@@ -1192,6 +1211,7 @@ def convert_lease_request_to_input(request: LeaseRequest):
         monthly_payment=Decimal(str(request.monthly_payment)),
         non_lease_component=Decimal(str(getattr(request, 'non_lease_component', 0) or 0)),
         non_lease_description=getattr(request, 'non_lease_description', '') or '',
+        non_lease_additive=bool(getattr(request, 'non_lease_additive', False)),
         practical_expedient_elected=bool(getattr(request, 'practical_expedient_elected', False)),
         annual_discount_rate=Decimal(str(request.annual_discount_rate)),
         initial_direct_costs=Decimal(str(request.initial_direct_costs)),
@@ -1354,7 +1374,7 @@ Return ONLY valid JSON in this exact format:
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=1500,
             temperature=0,
             messages=[{"role": "user", "content": prompt}]
@@ -1424,7 +1444,14 @@ async def calculate_lease(request: LeaseRequest):
         
         # Perform calculation
         calculator = IFRS16Calculator()
-        results = calculator.calculate_full_ifrs16(lease_input)
+        reporting_dt = None
+        raw_report = getattr(request, "reporting_date", None)
+        if raw_report:
+            try:
+                reporting_dt = datetime.strptime(str(raw_report)[:10], "%Y-%m-%d")
+            except ValueError:
+                reporting_dt = None
+        results = calculator.calculate_full_ifrs16(lease_input, reporting_date=reporting_dt)
         
         # Convert DataFrame to dict for JSON serialization
         results_json = results.copy()
@@ -2093,6 +2120,38 @@ def _ifrs16_lease_active(lease: Dict[str, Any]) -> bool:
     return status not in ("expired", "draft", "terminated", "churned")
 
 
+def _ifrs16_lease_currency(lease: Dict[str, Any]) -> str:
+    payments = lease.get("payments") if isinstance(lease.get("payments"), dict) else {}
+    res = lease.get("results") if isinstance(lease.get("results"), dict) else {}
+    disc = res.get("disclosure_data") if isinstance(res.get("disclosure_data"), dict) else {}
+    ccy = str(
+        lease.get("currency")
+        or payments.get("currency")
+        or disc.get("currency")
+        or "AED"
+    ).strip().upper()
+    return ccy or "AED"
+
+
+def _ifrs16_dominant_currency(leases: List[Dict[str, Any]]) -> str:
+    counts: Dict[str, int] = {}
+    for lease in leases:
+        ccy = _ifrs16_lease_currency(lease)
+        counts[ccy] = counts.get(ccy, 0) + 1
+    if not counts:
+        return "AED"
+    return max(counts, key=lambda k: counts[k])
+
+
+def _ifrs16_fmt_money(amount: float, currency: str) -> str:
+    ccy = (currency or "AED").upper()
+    if ccy == "AED":
+        return f"AED {amount:,.0f}"
+    if ccy == "INR":
+        return f"INR {amount:,.0f}"
+    return f"{ccy} {amount:,.0f}"
+
+
 @app.post("/api/ifrs16/cfo-insights")
 async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
     """IFRS 16 CFO strategic insights — portfolio metrics + Claude analysis."""
@@ -2153,26 +2212,29 @@ async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
             reverse=True,
         )[:5]
 
+        portfolio_currency = _ifrs16_dominant_currency(leases)
+        fmt = lambda amt: _ifrs16_fmt_money(amt, portfolio_currency)
+
         import anthropic
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
         portfolio_summary = f"""
-Lease Portfolio for CFO Analysis:
+Lease Portfolio for CFO Analysis (all amounts in {portfolio_currency}):
 - Total Leases: {len(leases)} ({len(active_leases)} active)
-- Total Lease Liability: ${total_liability:,.0f}
-- Total ROU Assets: ${total_rou:,.0f}
-- Annual Lease Payments: ${total_annual_payments:,.0f}
+- Total Lease Liability: {fmt(total_liability)}
+- Total ROU Assets: {fmt(total_rou)}
+- Annual Lease Payments: {fmt(total_annual_payments)}
 - Leases Expiring in 90 days: {len(expiring_90)}
 - Leases Expiring in 12 months: {len(expiring_365)}
 - Leverage Ratio (liability/assets): {leverage_ratio:.1f}%
 - Lease Intensity (payments/revenue): {lease_intensity:.1f}%
-- Budget Variance: ${budget_variance:+,.0f}
+- Budget Variance: {fmt(budget_variance)}
 
 Top 5 Leases by Liability:
 {chr(10).join([
     f"  - {l.get('title', l.get('contract_id', l.get('id', 'Unknown')))}: "
-    f"${_ifrs16_lease_liability(l):,.0f} liability, "
+    f"{fmt(_ifrs16_lease_liability(l))} liability, "
     f"ends {_ifrs16_end_date(l) or 'N/A'}"
     for l in top_leases
 ])}
@@ -2180,13 +2242,13 @@ Top 5 Leases by Liability:
 Expiring in 90 days:
 {chr(10).join([
     f"  - {l.get('title', l.get('asset', 'Unknown'))}: "
-    f"${_ifrs16_monthly_payment(l):,.0f}/month"
+    f"{fmt(_ifrs16_monthly_payment(l))}/month"
     for l in expiring_90
 ]) or "  None"}
 """
 
         ai_response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=1500,
             messages=[
                 {
@@ -2194,6 +2256,10 @@ Expiring in 90 days:
                     "content": f"""You are a CFO advisor analysing a company's lease portfolio under IFRS 16.
 
 {portfolio_summary}
+
+CRITICAL: Portfolio reporting currency is {portfolio_currency}. Every monetary amount in your JSON response
+must use {portfolio_currency} (e.g. "{portfolio_currency} 305,549,758" or "{portfolio_currency} 305.5M"). Never use $ or USD
+unless the portfolio currency is USD.
 
 Generate exactly 4 strategic insights for the CFO.
 Each insight must be specific, actionable, and reference actual numbers.
@@ -2319,25 +2385,113 @@ async def ifrs15_extract(request: IFRS15ExtractRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/ifrs15/extract-contract")
+async def ifrs15_extract_contract(
+    file: UploadFile = File(...),
+    contract_type: str = Query("uae_spa", description="uae_spa | generic"),
+):
+    """
+    Upload IFRS 15 contract PDF/DOCX and extract with per-field confidence.
+    Default: UAE SPA off-plan schema (RERA, Oqood, payment plan, IFRS 15 fields).
+    """
+    import traceback
+
+    safe_name = (file.filename or "upload").replace("\\", "_").replace("/", "_")
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="Claude API not configured.")
+
+    allowed_extensions = [".pdf", ".docx", ".txt"]
+    file_ext = Path(safe_name).suffix.lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}",
+        )
+
+    file_id = str(uuid.uuid4())
+    upload_path = UPLOAD_DIR / f"ifrs15_contract_{file_id}_{safe_name}"
+    try:
+        with open(upload_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        from ifrs15_extractor import IFRS15ContractExtractor, detect_nonstandard_clauses, read_contract_file_to_text
+
+        extractor = IFRS15ContractExtractor(api_key=ANTHROPIC_API_KEY)
+        ctype = (contract_type or "uae_spa").strip().lower()
+        extracted_data = extractor.extract_from_file(str(upload_path), contract_type=ctype)
+        if ctype in ("uae_spa", "spa", "realestate"):
+            validation = extractor.validate_uae_spa_extraction(extracted_data)
+        else:
+            validation = extractor.validate_ifrs15_extraction(extracted_data)
+
+        extraction_file = OUTPUT_DIR / f"ifrs15_contract_extraction_{file_id}.json"
+        extractor.save_extraction(extracted_data, str(extraction_file))
+
+        contract_text = ""
+        try:
+            contract_text = read_contract_file_to_text(str(upload_path))
+        except Exception:
+            pass
+        clause_detection = (
+            detect_nonstandard_clauses(contract_text, api_key=ANTHROPIC_API_KEY)
+            if contract_text.strip()
+            else {"clauses": [], "overall_risk": "CLEAN", "summary": "No text for clause scan."}
+        )
+
+        meta = extracted_data.get("extraction_metadata") or {}
+        return {
+            "status": "success",
+            "file_id": file_id,
+            "filename": safe_name,
+            "contract_type": ctype,
+            "extracted_data": extracted_data,
+            "validation": validation,
+            "clause_detection": clause_detection,
+            "extraction_id": file_id,
+            "overall_confidence": meta.get("overall_confidence"),
+            "low_confidence_fields": meta.get("low_confidence_fields", []),
+        }
+    except Exception as e:
+        err_msg = str(e)
+        print(f"❌ IFRS15 extract-contract error: {err_msg}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {err_msg[:300]}")
+    finally:
+        try:
+            if upload_path.exists():
+                upload_path.unlink()
+        except Exception:
+            pass
+
+
 @app.post("/api/ifrs15/upload-contract")
-async def ifrs15_upload_contract(file: UploadFile = File(...)):
+async def ifrs15_upload_contract(
+    file: UploadFile = File(...),
+    include_clauses: bool = Query(False, description="Run non-standard clause scan (adds ~30-60s)"),
+):
     """
     Upload revenue contract (PDF, DOCX, TXT, XLSX) and extract IFRS 15 terms
     """
+    import traceback
+    safe_name = (file.filename or "upload").replace("\\", "_").replace("/", "_")
+    print(f"📥 IFRS15 upload received: {safe_name} ({file.content_type})")
+
     if not ANTHROPIC_API_KEY:
         raise HTTPException(
             status_code=503,
             detail="Claude API not configured. Set ANTHROPIC_API_KEY environment variable."
         )
     allowed_extensions = ['.pdf', '.docx', '.txt', '.xlsx', '.xls']
-    file_ext = Path(file.filename).suffix.lower()
+    file_ext = Path(safe_name).suffix.lower()
     if file_ext not in allowed_extensions:
         raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}")
+
+    file_id = str(uuid.uuid4())
+    upload_path = UPLOAD_DIR / f"ifrs15_{file_id}_{safe_name}"
     try:
-        file_id = str(uuid.uuid4())
-        upload_path = UPLOAD_DIR / f"ifrs15_{file_id}_{file.filename}"
         with open(upload_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+
         from ifrs15_extractor import IFRS15ContractExtractor, detect_nonstandard_clauses, read_contract_file_to_text
 
         extractor = IFRS15ContractExtractor(api_key=ANTHROPIC_API_KEY)
@@ -2349,18 +2503,50 @@ async def ifrs15_upload_contract(file: UploadFile = File(...)):
             contract_text = read_contract_file_to_text(str(upload_path))
         except Exception:
             contract_text = ""
-        clause_detection = detect_nonstandard_clauses(contract_text, api_key=ANTHROPIC_API_KEY)
+        if include_clauses and contract_text.strip():
+            clause_detection = detect_nonstandard_clauses(contract_text, api_key=ANTHROPIC_API_KEY)
+        else:
+            clause_detection = {
+                "clauses": [],
+                "clauses_found": 0,
+                "high_severity": 0,
+                "medium_severity": 0,
+                "low_severity": 0,
+                "overall_risk": "CLEAN",
+                "summary": "Clause scan skipped for faster upload.",
+            }
+        del extractor
         gc.collect()
+        print(f"✅ IFRS15 extraction complete: {safe_name}")
         return {
             "status": "success",
             "file_id": file_id,
-            "filename": file.filename,
+            "filename": safe_name,
             "extracted_data": extracted_data,
             "validation": validation,
             "clause_detection": clause_detection,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        err_msg = str(e)
+        print(f"❌ IFRS15 upload error: {err_msg}")
+        traceback.print_exc()
+        if "api_key" in err_msg.lower() or "authentication" in err_msg.lower():
+            raise HTTPException(status_code=503, detail="Invalid Claude API key. Check ANTHROPIC_API_KEY in .env")
+        if "rate" in err_msg.lower() or "overloaded" in err_msg.lower():
+            raise HTTPException(status_code=503, detail="Claude API rate limit. Please try again in a moment.")
+        if "JSON" in err_msg or "json" in err_msg.lower() or "invalid JSON" in err_msg:
+            raise HTTPException(
+                status_code=500,
+                detail="AI extraction returned invalid format. For Excel templates use PDF/DOCX contract text, or try Paste Text with a shorter excerpt.",
+            )
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {err_msg[:200]}")
+    finally:
+        try:
+            if upload_path.exists():
+                upload_path.unlink()
+        except Exception as cleanup_err:
+            print(f"⚠️ Could not delete temp file {upload_path}: {cleanup_err}")
+        gc.collect()
 
 
 @app.post("/api/ifrs15/calculate")
@@ -2436,6 +2622,41 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
                 obligation_description=po_desc,
                 currency=request.currency or "AED",
             )
+        else:
+            from backend.app.services.ifrs15_realestate import (
+                apply_offplan_input_method_to_calculate,
+                should_use_offplan_input_method,
+            )
+
+            offplan_ctx = {
+                "construction_start": request.construction_start or "",
+                "expected_handover": request.expected_handover or "",
+                "spa_execution_date": request.effective_date,
+                "construction_completion_pct": request.construction_completion_pct,
+                "total_estimated_costs": request.total_estimated_cost,
+                "costs_incurred_to_date": request.actual_cost_to_date,
+                "progress_measurement": request.progress_measurement or "",
+            }
+            if should_use_offplan_input_method(offplan_ctx):
+                po_desc = ""
+                if request.performance_obligations:
+                    po_desc = str(request.performance_obligations[0].description or "")
+                results_json = apply_offplan_input_method_to_calculate(
+                    results_json,
+                    contract_value=float(request.fixed_consideration),
+                    construction_start=request.construction_start or "",
+                    expected_handover=request.expected_handover or "",
+                    spa_execution_date=request.effective_date,
+                    current_date=request.current_date or "",
+                    costs_incurred=float(request.actual_cost_to_date),
+                    total_costs=float(request.total_estimated_cost),
+                    revenue_prior=float(request.prior_revenue_recognised),
+                    construction_completion_pct=request.construction_completion_pct,
+                    escrow_receipts=[],
+                    currency=request.currency or "AED",
+                    obligation_description=po_desc,
+                    progress_measurement=request.progress_measurement or "input_costs",
+                )
         if 'recognition_schedule' in results_json and hasattr(results_json['recognition_schedule'], 'to_dict'):
             results_json['recognition_schedule'] = results_json['recognition_schedule'].to_dict(orient='records')
         file_id = str(uuid.uuid4())
@@ -3660,7 +3881,7 @@ async def ifrs15_master_report(request: IFRS15MasterReportRequest):
                 )
                 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
                 response = client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model=CLAUDE_MODEL,
                     max_tokens=1500,
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -4509,7 +4730,7 @@ async def ifrs15_classify_contract(request: IFRS15ClassifyContractRequest):
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=1200,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -4605,7 +4826,7 @@ async def cfo_insights(request: CFOInsightsRequest):
         import re
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=4000,
             messages=[{"role": "user", "content": request.prompt}],
         )
@@ -4795,7 +5016,7 @@ the JSON. Format:
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=800,
             temperature=0,
             system=system_prompt,
@@ -4895,291 +5116,7 @@ async def consolidation_run(payload: dict):
     return consolidate(entity_ids=entity_ids, group_currency=payload.get("group_currency", "INR"))
 
 
-# ==================== IFRS 9 ECL Endpoints ====================
-
-# Standard PD by credit rating (IFRS 9 para 5.5.17)
-PD_BY_RATING = {
-    "AAA": 0.0001, "AA+": 0.0002, "AA": 0.0002, "AA-": 0.0003,
-    "A+": 0.0004, "A": 0.0005, "A-": 0.001,
-    "BBB+": 0.0015, "BBB": 0.002, "BBB-": 0.003,
-    "BB+": 0.005, "BB": 0.01, "BB-": 0.02,
-    "B+": 0.03, "B": 0.05, "B-": 0.08,
-    "CCC": 0.10, "CC": 0.20, "C": 0.30, "D": 1.0,
-}
-
-
-class IFRS9ClassificationRequest(BaseModel):
-    instrument_name: str
-    instrument_type: str
-    business_model_indicators: List[str]
-    sppi_features: List[str]
-    prepayment_penalty_reasonable: bool = True
-    fair_value_option_elected: bool = False
-    fvo_reason: Optional[str] = None
-    business_model_changed: bool = False
-    nominal_rate: Optional[float] = None
-    issue_price: Optional[float] = None
-    face_value: Optional[float] = None
-    term_months: Optional[int] = None
-
-
-class MacroScenario(BaseModel):
-    gdp_growth: float
-    unemployment_rate: float
-    interest_rate: float
-    property_price_change: float = 0.0
-    credit_spread: float = 0.0
-    probability: float
-
-
-class IFRS9MacroOverlayRequest(BaseModel):
-    portfolio_name: str
-    base_pd: float
-    lgd: float
-    ead: float
-    base_scenario: MacroScenario
-    optimistic_scenario: MacroScenario
-    pessimistic_scenario: MacroScenario
-    loans: Optional[List[Any]] = None
-
-
-class ReceivableItem(BaseModel):
-    invoice_id: str
-    customer: str
-    gross_amount: float
-    days_past_due: int
-    currency: str = "USD"
-
-
-class BucketTotal(BaseModel):
-    label: str
-    gross_amount: float
-    historical_loss_rate: Optional[float] = None
-
-
-class HistoricalData(BaseModel):
-    bucket_label: str
-    historical_balance: float
-    historical_writeoffs: float
-
-
-class IFRS9ProvisionMatrixRequest(BaseModel):
-    portfolio_name: str
-    reporting_date: Optional[str] = None
-    receivable_type: str = "trade_receivables"
-    receivables: Optional[List[ReceivableItem]] = None
-    bucket_totals: Optional[List[BucketTotal]] = None
-    loss_rates: Optional[Dict[str, Any]] = None
-    historical_data: Optional[List[HistoricalData]] = None
-    macro_adjustment_factor: Optional[float] = 0.0
-    writeoffs_this_period: Optional[float] = 0.0
-    custom_buckets: Optional[List[Dict[str, Any]]] = None
-
-
-class IFRS9DownloadExcelRequest(BaseModel):
-    portfolio_name: str = "Portfolio"
-    entity_name: Optional[str] = ""
-    reporting_date: Optional[str] = None
-    applicable_ecl: Optional[float] = 0
-    ecl_12m: Optional[float] = 0
-    ecl_lifetime: Optional[float] = 0
-    total_ead: Optional[float] = 0
-    pd_used: Optional[float] = 0
-    lgd_used: Optional[float] = 0
-    coverage_ratio: Optional[float] = 0
-    weighted_avg_pd: Optional[float] = 0
-    stage_summary: Optional[Dict[str, Any]] = None
-    loans: Optional[List[Any]] = None
-    ecl_movement: Optional[Dict[str, Any]] = None
-    journal_entries: Optional[List[Any]] = None
-    disclosure_notes: Optional[Any] = None
-    scenario_results: Optional[Dict[str, Any]] = None
-    bucket_results: Optional[List[Any]] = None
-    macro_sensitivity: Optional[str] = None
-    discount_rate: Optional[float] = None
-    master_report_data: Optional[Dict[str, Any]] = None
-
-
-class IFRS9MasterReportRequest(BaseModel):
-    portfolio_name: str
-    entity_name: Optional[str] = ""
-    reporting_date: Optional[str] = None
-    core_results: Optional[Dict[str, Any]] = None
-    classification_result: Optional[Dict[str, Any]] = None
-    macro_overlay_result: Optional[Dict[str, Any]] = None
-    provision_matrix_result: Optional[Dict[str, Any]] = None
-
-
-@app.get("/api/ifrs9/pd-rates")
-async def get_ifrs9_pd_rates():
-    """Return standard PD rates by credit rating (AAA to D)."""
-    return {"pd_rates": PD_BY_RATING}
-
-
-@app.post("/api/ifrs9/upload-portfolio")
-async def upload_portfolio(file: UploadFile = File(...)):
-    """
-    Read uploaded Excel/CSV debtor ageing or loan schedule.
-    Returns structured data for form auto-fill (counterparty, amounts, ageing buckets).
-    """
-    allowed = [".xlsx", ".xls", ".csv"]
-    ext = Path(file.filename).suffix.lower()
-    if ext not in allowed:
-        raise HTTPException(status_code=400, detail=f"Allowed: {', '.join(allowed)}")
-    try:
-        import pandas as pd
-        contents = await file.read()
-        if ext == ".csv":
-            df = pd.read_csv(io.BytesIO(contents), encoding="utf-8", on_bad_lines="skip")
-        else:
-            df = pd.read_excel(io.BytesIO(contents), sheet_name=0)
-        # Normalize column names (strip, lower, replace spaces)
-        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-        # Build ageing-style buckets if we have amount columns
-        rows = df.head(100).to_dict(orient="records")
-        # Try to infer: outstanding_balance, days_past_due, counterparty, etc.
-        extracted = {
-            "rows": rows,
-            "columns": list(df.columns),
-            "row_count": len(df),
-        }
-        gc.collect()
-        return {"status": "success", "filename": file.filename, "extracted_data": extracted}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload error: {str(e)}")
-
-
-@app.post("/api/ifrs9/calculate")
-async def calculate_ecl(data: dict):
-    """
-    Core ECL calculation engine.
-    Input: approach (simplified/general), stage (1/2/3), pd_12m, pd_lifetime, lgd, ead,
-           ageing_buckets (for simplified), scenarios (base/optimistic/pessimistic with weights).
-    Returns: ecl_12m, ecl_lifetime, applicable_ecl, coverage_ratio, journal_entries, disclosure_notes, scenario_results.
-    """
-    try:
-        def apply_macro_overlay_pd_pct(base_pd_pct: float, macro: dict | None) -> float:
-            """Apply macro overlay to PD in percentage points."""
-            if not macro:
-                return base_pd_pct
-            gdp_growth = float((macro or {}).get("gdp_growth", 0) or 0)
-            unemployment = float((macro or {}).get("unemployment", 0) or 0)
-            interest_rate = float((macro or {}).get("interest_rate", 0) or 0)
-            gdp_s = get_sensitivity("gdp_sensitivity")
-            unemp_s = get_sensitivity("unemployment_sensitivity")
-            rate_s = get_sensitivity("interest_rate_sensitivity")
-            gdp_adj = max(0.20, 1 + ((-gdp_growth) * gdp_s))
-            unemp_adj = max(0.20, 1 + (unemployment * unemp_s))
-            rate_adj = max(0.20, 1 + (interest_rate * rate_s))
-            return max(0.0, min(100.0, base_pd_pct * gdp_adj * unemp_adj * rate_adj))
-
-        approach = data.get("approach", "general")
-        stage = int(data.get("stage", 1))
-        pd_12m = float(data.get("pd_12m", 0.01))
-        pd_lifetime = float(data.get("pd_lifetime", 0.05))
-        lgd = float(data.get("lgd", 0.45))
-        ead = float(data.get("ead", 0))
-        discount_rate = float(data.get("discount_rate", 0.08))
-
-        scenarios = data.get("scenarios") or {}
-        base_macro = scenarios.get("base_macro") or {}
-        optimistic_macro = scenarios.get("optimistic_macro") or {}
-        pessimistic_macro = scenarios.get("pessimistic_macro") or {}
-        pd_12m_base = apply_macro_overlay_pd_pct(pd_12m, base_macro)
-        pd_lifetime_base = apply_macro_overlay_pd_pct(pd_lifetime, base_macro)
-
-        if approach == "simplified" and data.get("ageing_buckets"):
-            # Provision matrix: sum(amount * rate) per bucket
-            total_ecl = 0
-            bucket_results = []
-            for b in data["ageing_buckets"]:
-                amt = float(b.get("amount", 0) or 0)
-                rate = float(b.get("rate", 0) or 0) / 100
-                ecl = amt * rate
-                total_ecl += ecl
-                bucket_results.append({"bucket": b.get("bucket", ""), "amount": amt, "rate_pct": rate * 100, "ecl": ecl})
-            applicable_ecl = total_ecl
-        else:
-            # General: ECL = PD × LGD × EAD (with optional discount)
-            dfactor = 1 / (1 + discount_rate)
-            ecl_12m = ead * (pd_12m_base / 100) * (lgd / 100) * dfactor
-            ecl_lifetime = ead * (pd_lifetime_base / 100) * (lgd / 100) * dfactor
-            applicable_ecl = float(ecl_12m if stage == 1 else ecl_lifetime)
-            bucket_results = []
-
-        coverage = (applicable_ecl / ead * 100) if ead else 0
-
-        # Scenario-weighted ECL (optional)
-        base_w = float(scenarios.get("base_weight", 50)) / 100
-        opt_w = float(scenarios.get("optimistic_weight", 30)) / 100
-        pess_w = float(scenarios.get("pessimistic_weight", 20)) / 100
-        if approach == "general":
-            dfactor = 1 / (1 + discount_rate)
-            pd_12m_opt = apply_macro_overlay_pd_pct(pd_12m, optimistic_macro)
-            pd_12m_pess = apply_macro_overlay_pd_pct(pd_12m, pessimistic_macro)
-            pd_lifetime_opt = apply_macro_overlay_pd_pct(pd_lifetime, optimistic_macro)
-            pd_lifetime_pess = apply_macro_overlay_pd_pct(pd_lifetime, pessimistic_macro)
-            base_ecl_calc = ead * ((pd_12m_base if stage == 1 else pd_lifetime_base) / 100) * (lgd / 100) * dfactor
-            opt_ecl_calc = ead * ((pd_12m_opt if stage == 1 else pd_lifetime_opt) / 100) * (lgd / 100) * dfactor
-            pess_ecl_calc = ead * ((pd_12m_pess if stage == 1 else pd_lifetime_pess) / 100) * (lgd / 100) * dfactor
-            base_ecl = float(scenarios.get("base_ecl", base_ecl_calc))
-            opt_ecl = float(scenarios.get("optimistic_ecl", opt_ecl_calc))
-            pess_ecl = float(scenarios.get("pessimistic_ecl", pess_ecl_calc))
-        else:
-            base_ecl = float(scenarios.get("base_ecl", applicable_ecl))
-            opt_ecl = float(scenarios.get("optimistic_ecl", applicable_ecl * 0.8))
-            pess_ecl = float(scenarios.get("pessimistic_ecl", applicable_ecl * 1.2))
-        ecl_weighted = base_ecl * base_w + opt_ecl * opt_w + pess_ecl * pess_w
-
-        journal_entries = [
-            {"type": "ECL Recognition", "dr": "Impairment Loss (P&L)", "cr": "Loss Allowance (BS)", "amount": applicable_ecl},
-        ]
-
-        disclosure_notes = (
-            f"Note: Expected Credit Losses (IFRS 9)\n\n"
-            f"The Company applies the {approach} approach. ECL = PD × LGD × EAD.\n"
-            f"PD (12M): {pd_12m}% (macro-adjusted: {pd_12m_base:.2f}%) | "
-            f"PD (Lifetime): {pd_lifetime}% (macro-adjusted: {pd_lifetime_base:.2f}%) | LGD: {lgd}% | EAD: {ead:,.0f}\n"
-            f"Applicable ECL: {applicable_ecl:,.0f} | Coverage: {coverage:.2f}%\n"
-            f"Probability-weighted ECL (scenarios): {ecl_weighted:,.0f}"
-        )
-
-        return {
-            "ecl_12m": ead * (pd_12m_base / 100) * (lgd / 100) if approach == "general" else None,
-            "ecl_lifetime": ead * (pd_lifetime_base / 100) * (lgd / 100) if approach == "general" else None,
-            "ecl_simplified": applicable_ecl if approach == "simplified" else None,
-            "applicable_ecl": applicable_ecl,
-            "ecl_weighted": ecl_weighted,
-            "coverage_ratio": round(coverage, 2),
-            "pd_used": pd_12m_base if stage == 1 else pd_lifetime_base,
-            "macro_pd": {
-                "base_pd_12m": pd_12m_base,
-                "base_pd_lifetime": pd_lifetime_base,
-                "optimistic_pd_12m": apply_macro_overlay_pd_pct(pd_12m, optimistic_macro),
-                "optimistic_pd_lifetime": apply_macro_overlay_pd_pct(pd_lifetime, optimistic_macro),
-                "pessimistic_pd_12m": apply_macro_overlay_pd_pct(pd_12m, pessimistic_macro),
-                "pessimistic_pd_lifetime": apply_macro_overlay_pd_pct(pd_lifetime, pessimistic_macro),
-            },
-            "macro_sensitivity_used": {
-                "gdp_sensitivity": get_sensitivity("gdp_sensitivity"),
-                "unemployment_sensitivity": get_sensitivity("unemployment_sensitivity"),
-                "interest_rate_sensitivity": get_sensitivity("interest_rate_sensitivity"),
-                "config_source": "db" if is_db_loaded() else "default",
-            },
-            "lgd_used": lgd,
-            "ead_used": ead,
-            "journal_entries": journal_entries,
-            "disclosure_notes": disclosure_notes,
-            "bucket_results": bucket_results,
-            "scenario_results": {
-                "base": base_ecl,
-                "optimistic": opt_ecl,
-                "pessimistic": pess_ecl,
-                "weighted": ecl_weighted,
-            },
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# ==================== IFRS 9 Macro Sensitivity Admin (SQLite) ====================
 
 
 @app.get("/api/admin/macro-sensitivity")
@@ -5241,111 +5178,6 @@ async def macro_sensitivity_history(tenant_id: str = "default", portfolio_type: 
     return [dict(zip(cols, r)) for r in rows]
 
 
-@app.post("/api/ifrs9/classify")
-async def classify_instrument(request: IFRS9ClassificationRequest):
-    """IFRS 9 classification & measurement (business model, SPPI, optional EIR)."""
-    from ifrs9_ecl_calculator import IFRS9ClassificationEngine
-
-    engine = IFRS9ClassificationEngine()
-    return engine.classify(request.model_dump())
-
-
-@app.post("/api/ifrs9/macro-overlay")
-async def ifrs9_macro_overlay(request: IFRS9MacroOverlayRequest):
-    """Forward-looking macro scenario overlay for ECL (IFRS 9.5.5.17)."""
-    from ifrs9_ecl_calculator import IFRS9MacroOverlayEngine
-
-    try:
-        engine = IFRS9MacroOverlayEngine()
-        payload = request.model_dump()
-        if payload.get("loans") is None:
-            payload["loans"] = []
-        return engine.calculate(payload)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/api/ifrs9/provision-matrix")
-async def ifrs9_provision_matrix(request: IFRS9ProvisionMatrixRequest):
-    """IFRS 9.5.5.15 simplified provision matrix (ageing buckets × loss rates)."""
-    from ifrs9_ecl_calculator import IFRS9ProvisionMatrixEngine
-
-    try:
-        engine = IFRS9ProvisionMatrixEngine()
-        payload = request.model_dump()
-        if payload.get("receivables") is None:
-            payload["receivables"] = []
-        if payload.get("bucket_totals") is None:
-            payload["bucket_totals"] = []
-        if payload.get("historical_data") is None:
-            payload["historical_data"] = []
-        return engine.calculate(payload)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/api/ifrs9/master-report")
-async def ifrs9_master_report(request: IFRS9MasterReportRequest):
-    """Aggregate IFRS 9 ECL, classification, macro overlay, and provision matrix into one master report."""
-    from ifrs9_ecl_calculator import IFRS9MasterSummaryEngine
-
-    engine = IFRS9MasterSummaryEngine()
-    return engine.generate(request.model_dump())
-
-
-@app.post("/api/ifrs9/download-report")
-async def download_ecl_report(data: dict):
-    """Generate Excel ECL report. Returns file_id for frontend download."""
-    try:
-        import pandas as pd
-        file_id = str(uuid.uuid4())
-        path = OUTPUT_DIR / f"ecl_report_{file_id}.xlsx"
-        with pd.ExcelWriter(path, engine="openpyxl") as w:
-            pd.DataFrame([{"ECL Summary": data.get("applicable_ecl", 0), "Coverage %": data.get("coverage_ratio", 0)}]).to_excel(w, sheet_name="ECL Summary", index=False)
-            if data.get("bucket_results"):
-                pd.DataFrame(data["bucket_results"]).to_excel(w, sheet_name="Provision Matrix", index=False)
-            if data.get("journal_entries"):
-                pd.DataFrame(data["journal_entries"]).to_excel(w, sheet_name="Journal Entries", index=False)
-        gc.collect()
-        return {"file_id": file_id, "filename": path.name}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/ifrs9/download-excel")
-async def ifrs9_download_excel(request: IFRS9DownloadExcelRequest):
-    """IFRS 9 ECL audit pack (openpyxl); optional first sheet when master_report_data is supplied."""
-    try:
-        from ifrs9_excel_export import export_ifrs9_excel
-
-        payload = request.model_dump()
-        master = payload.pop("master_report_data", None)
-        file_id = export_ifrs9_excel(payload, master_report=master)
-        safe_name = (request.portfolio_name or "Portfolio").replace(" ", "_").replace("/", "_")
-        date_str = (request.reporting_date or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
-        filename = f"IFRS9_ECL_{safe_name}_{date_str}_{file_id}.xlsx"
-        gc.collect()
-        n_sheets = 6 if master else 5
-        return {"file_id": file_id, "filename": filename, "sheets": n_sheets}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/ifrs9/download/{file_id}")
-async def download_ifrs9_file(file_id: str):
-    """Download IFRS 9 Excel (audit pack or legacy ecl_report)."""
-    matching = list(OUTPUT_DIR.glob(f"*{file_id}*.xlsx"))
-    if not matching:
-        raise HTTPException(status_code=404, detail="File not found")
-    path = sorted(matching, key=lambda p: p.stat().st_mtime, reverse=True)[0]
-    return FileResponse(
-        path=str(path),
-        filename=path.name,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
-    )
-
-
 @app.delete("/api/rag/document/{company_id}/{document_id}")
 async def delete_rag_document(company_id: str, document_id: str):
     """
@@ -5386,6 +5218,27 @@ try:
     app.include_router(_rev_rec_recon_router)
 except ImportError as _rev_rec_import_err:
     print(f"WARNING: Rev-rec reconciliation router not loaded: {_rev_rec_import_err}")
+
+try:
+    from backend.app.routers.ifrs16_comparative import router as _ifrs16_comparative_router
+
+    app.include_router(_ifrs16_comparative_router)
+except ImportError as _ifrs16_comp_err:
+    print(f"WARNING: IFRS 16 comparative router not loaded: {_ifrs16_comp_err}")
+
+for _router_mod in ("ifrs16_portfolio", "ifrs16_lessor", "ifrs16_sale_leaseback", "ifrs16_finreportai"):
+    try:
+        _mod = __import__(f"backend.app.routers.{_router_mod}", fromlist=["router"])
+        app.include_router(_mod.router)
+    except ImportError as _router_err:
+        print(f"WARNING: {_router_mod} router not loaded: {_router_err}")
+
+try:
+    from backend.app.routers.ifrs9_routes import router as _ifrs9_router
+
+    app.include_router(_ifrs9_router)
+except ImportError as _ifrs9_err:
+    print(f"WARNING: IFRS 9 router not loaded: {_ifrs9_err}")
 
 
 # Run application (local dev). Tries PORT/API_PORT then scans for a free port if busy (Windows 10048, etc.).

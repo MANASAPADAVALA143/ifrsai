@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from claude_model_config import CLAUDE_MODEL
+
 
 async def call_nova(system: str, user: str, max_tokens: int = 800) -> str:
     """Call Anthropic Claude; returns plain text or a fallback message if unavailable."""
@@ -17,7 +19,7 @@ async def call_nova(system: str, user: str, max_tokens: int = 800) -> str:
 
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=max_tokens,
             temperature=0,
             system=system,

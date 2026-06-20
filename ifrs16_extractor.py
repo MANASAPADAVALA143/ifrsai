@@ -5,11 +5,14 @@ Extracts lease terms from contracts with confidence scoring
 
 import anthropic
 import json
+import re
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
 import os
 from pathlib import Path
+
+from claude_model_config import CLAUDE_MODEL
 
 
 class IFRS16LeaseExtractor:
@@ -17,7 +20,39 @@ class IFRS16LeaseExtractor:
     
     def __init__(self, api_key: str):
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = "claude-sonnet-4-20250514"
+        self.model = CLAUDE_MODEL
+
+    @staticmethod
+    def _parse_json_response(json_text: str) -> Dict:
+        """Parse Claude JSON output with light repair for truncated or fenced responses."""
+        attempts = [json_text.strip()]
+        stripped = attempts[0]
+        if "{" in stripped and "}" in stripped:
+            attempts.append(stripped[stripped.find("{") : stripped.rfind("}") + 1])
+
+        last_error: json.JSONDecodeError | None = None
+        for candidate in attempts:
+            if not candidate:
+                continue
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError as je:
+                last_error = je
+
+        msg = last_error.msg if last_error else "invalid JSON"
+        raise ValueError(f"AI returned invalid JSON (try again or use a clearer contract): {msg}") from last_error
+
+    @staticmethod
+    def _normalize_contract_text(text: str) -> str:
+        """Normalize Arabic-Indic numerals and collapse whitespace."""
+        normalized = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    @staticmethod
+    def _has_arabic_script(text: str) -> bool:
+        return bool(re.search(r"[\u0600-\u06FF]", text))
     
     def extract_lease_terms(self, contract_text: str) -> Dict:
         """
@@ -30,8 +65,17 @@ class IFRS16LeaseExtractor:
             Dictionary with structured lease data and confidence scores
         """
         
-        prompt = f"""You are an IFRS 16 lease accounting expert. Extract all relevant lease terms from this contract.
+        contract_text = self._normalize_contract_text(contract_text)
+        arabic_note = ""
+        if self._has_arabic_script(contract_text):
+            arabic_note = """
+NOTE: This contract contains Arabic (RTL) text — common in UAE lease agreements.
+Extract bilingual fields; prefer ISO dates (YYYY-MM-DD), AED currency when UAE-based,
+and English numerals in JSON values. Map Arabic party names to lessee_name / lessor_name.
+"""
 
+        prompt = f"""You are an IFRS 16 lease accounting expert. Extract all relevant lease terms from this contract.
+{arabic_note}
 LEASE CONTRACT:
 {contract_text}
 
@@ -40,6 +84,15 @@ Extract the following in JSON format. For each field provide:
 2. "confidence": score 0-100%
 3. "source_text": exact quote from contract
 4. "assumptions": any assumptions made
+
+CRITICAL IFRS 16 EXTRACTION RULES:
+- rent_free_months: count months with zero rent at commencement (e.g. "2 months rent-free" → 2).
+- non_lease_component: monthly amount for service charges, facilities management, maintenance,
+  CAM, or any payment explicitly excluded from IFRS 16 lease liability. Do NOT include in
+  monthly_amount if stated separately; if only a combined total is given, subtract the
+  non-lease portion to derive monthly_amount (lease component).
+- escalation_clause: include fixed % step-ups (e.g. "5% at month 12") even when not CPI-linked.
+- monthly_amount: the lease component used for IFRS 16 measurement (base rent only).
 
 REQUIRED FIELDS:
 
@@ -105,6 +158,30 @@ REQUIRED FIELDS:
     }},
     "payment_frequency": {{
       "value": "Monthly/Quarterly/Annual",
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
+    "payment_type": {{
+      "value": "Arrears or Advance",
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
+    "rent_free_months": {{
+      "value": integer (0 if none),
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
+    "non_lease_component": {{
+      "value": number or 0 (monthly service charge / CAM / maintenance excluded from IFRS 16),
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
+    "non_lease_description": {{
+      "value": "description of non-lease component e.g. service charge",
       "confidence": 0-100,
       "source_text": "quote",
       "assumptions": "explanation"
@@ -281,7 +358,7 @@ Begin extraction:"""
         try:
             message = self.client.messages.create(
                 model=self.model,
-                max_tokens=4000,
+                max_tokens=8192,
                 temperature=0,  # Deterministic
                 messages=[{"role": "user", "content": prompt}]
             )
@@ -306,10 +383,7 @@ Begin extraction:"""
             json_text = json_text[:-3]
         json_text = json_text.strip()
         
-        try:
-            data = json.loads(json_text)
-        except json.JSONDecodeError as je:
-            raise ValueError(f"AI returned invalid JSON (try again or use a clearer contract): {je.msg}") from je
+        data = self._parse_json_response(json_text)
         
         if not isinstance(data, dict):
             raise ValueError("AI extraction must return a JSON object")
@@ -413,6 +487,7 @@ Begin extraction:"""
                 for page in reader.pages:
                     raw = page.extract_text()
                     contract_text += (raw if raw is not None else "") + "\n"
+                contract_text = self._normalize_contract_text(contract_text)
             except ImportError:
                 raise ImportError("PyPDF2 not installed. Run: pip install PyPDF2")
             except Exception as e:
@@ -441,7 +516,13 @@ Begin extraction:"""
                     df = pd.read_excel(excel_file, sheet_name=sheet_name)
                     contract_text += " | ".join(str(col) for col in df.columns) + "\n"
                     contract_text += "-" * 80 + "\n"
-                    for _, row in df.iterrows():
+                    max_rows = 200
+                    for i, (_, row) in enumerate(df.iterrows()):
+                        if i >= max_rows:
+                            remaining = len(df) - max_rows
+                            if remaining > 0:
+                                contract_text += f"... ({remaining} more rows omitted)\n"
+                            break
                         row_text = " | ".join(str(val) if pd.notna(val) else "" for val in row.values)
                         contract_text += row_text + "\n"
                     contract_text += "\n"
@@ -458,7 +539,7 @@ Begin extraction:"""
         if len(contract_text) < 30:
             raise ValueError(
                 "No readable text was extracted from this file. "
-                "Scanned PDFs need OCR, or try DOCX/TXT, or a text-based PDF."
+                "Scanned or Arabic-only PDFs may need manual entry — try a text-based PDF or DOCX."
             )
 
         return self.extract_lease_terms(contract_text)

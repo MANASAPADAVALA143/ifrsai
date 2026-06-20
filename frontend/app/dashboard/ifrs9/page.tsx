@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { Plus, Upload, FileBarChart, Eye, Calculator, Download, Copy, ChevronDown, ChevronUp, Loader2, Trash2, X, FileText } from 'lucide-react';
-import { getEclPortfolioRepository, type ECLPortfolioEntry } from '@/lib/ecl-portfolio-repository';
+import { getEclPortfolioRepository, refreshEclPortfolioFromServer, type ECLPortfolioEntry } from '@/lib/ecl-portfolio-repository';
 import { formatIndianCurrency } from '@/lib/utils';
 import {
   ifrs9Api,
@@ -15,6 +15,10 @@ import {
 } from '@/lib/api';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
+import { ModuleWorkspaceLayout } from '@/components/module/ModuleWorkspaceLayout';
+import { IFRS9_NAV_GROUPS, ifrs9NavHref, IFRS9_ECL_STEPS, ifrs9NavIdToStep, ifrs9StepToNavId, isIfrs9EclWorkflowNav, type Ifrs9NavId } from '@/lib/ifrs9-nav';
+import { CalculateStepper } from '@/components/module/CalculateStepper';
+import { useRouter } from 'next/navigation';
 import {
   BarChart,
   Bar,
@@ -191,6 +195,9 @@ function liveMeasurementFrom(
 
 export default function IFRS9OverviewPage() {
   const [portfolios, setPortfolios] = useState<ECLPortfolioEntry[]>([]);
+  const [activeNavId, setActiveNavId] = useState<Ifrs9NavId>('overview');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const router = useRouter();
   const [openDisclosureId, setOpenDisclosureId] = useState<string | null>(null);
   const [showAllLoans, setShowAllLoans] = useState(false);
   const [downloadLoading, setDownloadLoading] = useState(false);
@@ -337,12 +344,17 @@ export default function IFRS9OverviewPage() {
   }, [scOpt.probability, scBase.probability, scPess.probability]);
   const macroProbOk = Math.abs(macroProbSumPct - 100) < 0.01;
 
-  const load = useCallback(() => {
-    setPortfolios(getEclPortfolioRepository());
+  const load = useCallback(async () => {
+    try {
+      const rows = await refreshEclPortfolioFromServer();
+      setPortfolios(rows);
+    } catch {
+      setPortfolios(getEclPortfolioRepository());
+    }
   }, []);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   const calculated = useMemo(
@@ -826,12 +838,74 @@ export default function IFRS9OverviewPage() {
         : null;
   const showTotalEclKpi = totalEclKpiValue != null && (macroOverlayResult != null || hasCalcData);
 
+  const handleIfrs9NavSelect = (navId: string) => {
+    const id = navId as Ifrs9NavId;
+    const href = ifrs9NavHref(id);
+    if (href) {
+      router.push(href);
+      return;
+    }
+    setActiveNavId(id);
+    if (id === 'classification') setClassificationPanelOpen(true);
+    if (id === 'macro-overlay') setMacroPanelOpen(true);
+    if (id === 'provision-matrix') setProvisionPanelOpen(true);
+    if (id === 'reports' && hasCalcData) void handleGenerateMasterReport();
+  };
+
+  const handleIfrs9EclStepChange = (step: number) => {
+    handleIfrs9NavSelect(ifrs9StepToNavId(step));
+  };
+
+  const ifrs9EclStep = ifrs9NavIdToStep(activeNavId) ?? 1;
+  const showIfrs9EclStepper = isIfrs9EclWorkflowNav(activeNavId);
+
+  const ifrs9KpiItems = [
+    {
+      label: 'Total Portfolio Value (EAD)',
+      value: hasCalcData ? fmtKpi(results!.total_ead) : '—',
+      accent: 'orange' as const,
+    },
+    {
+      label: 'Total ECL Provision',
+      value: showTotalEclKpi ? fmtKpi(totalEclKpiValue) : '—',
+      accent: 'orange' as const,
+    },
+    {
+      label: 'Weighted Average PD',
+      value: hasCalcData && results!.weighted_avg_pd != null ? fmtPct(results!.weighted_avg_pd) : '—',
+      accent: 'orange' as const,
+    },
+    {
+      label: 'Coverage Ratio',
+      value: hasCalcData && results!.coverage_ratio != null ? fmtPct(results!.coverage_ratio) : '—',
+      accent: 'pink' as const,
+    },
+  ];
+
   return (
     <SidebarLayout
       pageTitle="IFRS 9 — ECL Estimation Platform"
       pageSubtitle="Automate ECL calculations and deliver audit-ready results"
     >
+      <ModuleWorkspaceLayout
+        navGroups={IFRS9_NAV_GROUPS}
+        activeNavId={activeNavId}
+        onNavSelect={handleIfrs9NavSelect}
+        mobileNavOpen={mobileNavOpen}
+        onMobileNavOpenChange={setMobileNavOpen}
+        kpiItems={ifrs9KpiItems}
+        navTitle="IFRS 9 Menu"
+      >
       <div className="space-y-6">
+        {showIfrs9EclStepper ? (
+          <CalculateStepper
+            steps={IFRS9_ECL_STEPS}
+            currentStep={ifrs9EclStep}
+            onStepChange={handleIfrs9EclStepChange}
+            maxReachableStep={hasCalcData ? 5 : classificationResult ? 3 : 1}
+          />
+        ) : null}
+        {(activeNavId === 'overview') && (
         <div className="flex flex-wrap gap-3">
           <Link href="/dashboard/ifrs9/portfolios/new">
             <Button variant="primary" className="bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white">
@@ -852,26 +926,22 @@ export default function IFRS9OverviewPage() {
             </Button>
           </Link>
         </div>
+        )}
 
+        {(activeNavId === 'classification') && (
         <div className="bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] overflow-hidden">
-          <button
-            type="button"
-            className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-[#f8fafc]"
-            onClick={() => setClassificationPanelOpen((o) => !o)}
-          >
+          <div className="px-5 py-4 border-b border-[#e2e8f0]">
             <div>
               <h2 className="text-base font-bold text-[#1e293b]">Classification &amp; Measurement</h2>
               <p className="text-xs text-[#64748b] mt-0.5">Business model, SPPI, and measurement category (IFRS 9.4.1)</p>
             </div>
-            {classificationPanelOpen ? <ChevronUp className="w-5 h-5 text-[#64748b]" /> : <ChevronDown className="w-5 h-5 text-[#64748b]" />}
-          </button>
+          </div>
           <div className="px-5 pb-3 border-t border-[#e2e8f0]">
             <div className="rounded-[12px] border border-[#bfdbfe] bg-[#eff6ff] p-4 text-sm text-[#1e3a5f]">
               Classification determines how this financial instrument is measured. It must be assessed before ECL is calculated — ECL only applies to instruments at Amortised Cost or FVOCI.
             </div>
           </div>
-          {classificationPanelOpen && (
-            <div className="px-5 pb-5 pt-0 space-y-6 border-t border-[#f1f5f9]">
+          <div className="px-5 pb-5 pt-0 space-y-6 border-t border-[#f1f5f9]">
               <div className="space-y-3">
                 <h3 className="text-sm font-semibold text-[#334155] border-b border-[#f1f5f9] pb-2">Instrument details</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1312,28 +1382,23 @@ export default function IFRS9OverviewPage() {
                 </div>
               )}
             </div>
-          )}
         </div>
+        )}
 
+        {(activeNavId === 'macro-overlay') && (
         <div className="bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] overflow-hidden">
-          <button
-            type="button"
-            className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-[#f8fafc]"
-            onClick={() => setMacroPanelOpen((o) => !o)}
-          >
+          <div className="px-5 py-4 border-b border-[#e2e8f0]">
             <div>
               <h2 className="text-base font-bold text-[#1e293b]">Forward-Looking Macro Overlay</h2>
               <p className="text-xs text-[#64748b] mt-0.5">IFRS 9.5.5.17 scenario PDs and probability-weighted ECL</p>
             </div>
-            {macroPanelOpen ? <ChevronUp className="w-5 h-5 text-[#64748b]" /> : <ChevronDown className="w-5 h-5 text-[#64748b]" />}
-          </button>
+          </div>
           <div className="px-5 pb-3 border-t border-[#e2e8f0]">
             <div className="mt-3 rounded-[12px] border border-[#bfdbfe] bg-[#eff6ff] p-4 text-sm text-[#1e3a5f]">
               IFRS 9.5.5.17 requires forward-looking macroeconomic information to be incorporated into ECL calculations. This module adjusts your base PD across three economic scenarios and probability-weights the result.
             </div>
           </div>
-          {macroPanelOpen && (
-            <div className="px-5 pb-5 space-y-6 border-t border-[#f1f5f9]">
+          <div className="px-5 pb-5 space-y-6 border-t border-[#f1f5f9]">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="text-xs font-medium text-[#64748b]">Portfolio name</label>
@@ -1660,15 +1725,12 @@ export default function IFRS9OverviewPage() {
                 </div>
               )}
             </div>
-          )}
         </div>
+        )}
 
+        {(activeNavId === 'provision-matrix') && (
         <div className="bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] overflow-hidden">
-          <button
-            type="button"
-            className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-[#f8fafc]"
-            onClick={() => setProvisionPanelOpen((o) => !o)}
-          >
+          <div className="px-5 py-4 border-b border-[#e2e8f0]">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-base font-bold text-[#1e293b]">Provision Matrix</h2>
               <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-teal-100 text-teal-900 border border-teal-200">
@@ -1676,16 +1738,14 @@ export default function IFRS9OverviewPage() {
               </span>
               <p className="text-xs text-[#64748b] w-full sm:w-auto sm:ml-2">Simplified Approach (IFRS 9.5.5.15)</p>
             </div>
-            {provisionPanelOpen ? <ChevronUp className="w-5 h-5 text-[#64748b]" /> : <ChevronDown className="w-5 h-5 text-[#64748b]" />}
-          </button>
+          </div>
           <div className="px-5 pb-3 border-t border-[#e2e8f0]">
             <div className="mt-3 rounded-[12px] border border-[#bfdbfe] bg-[#eff6ff] p-4 text-sm text-[#1e3a5f]">
               Groups receivables by ageing bucket and applies historical loss rates. Suitable for trade receivables, contract assets (IFRS 15), and lease
               receivables (IFRS 16).
             </div>
           </div>
-          {provisionPanelOpen && (
-            <div className="px-5 pb-5 space-y-6 border-t border-[#f1f5f9]">
+          <div className="px-5 pb-5 space-y-6 border-t border-[#f1f5f9]">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 <div>
                   <label className="text-xs font-medium text-[#64748b]">Portfolio name</label>
@@ -2126,75 +2186,22 @@ export default function IFRS9OverviewPage() {
                 </div>
               )}
             </div>
-          )}
         </div>
+        )}
 
-        {classificationResult && !classificationResult.ecl_applies && (
+        {(activeNavId === 'calculate') && classificationResult && !classificationResult.ecl_applies && (
           <div className="rounded-[14px] border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-900">
             ⚠ ECL not applicable for this classification ({classificationResult.measurement_label || classificationResult.measurement}). ECL
             under IFRS 9 applies to amortised cost and FVOCI debt instruments — not to FVTPL positions unless separately required.
           </div>
         )}
-        {classificationResult && classificationResult.ecl_applies && (
+        {(activeNavId === 'calculate') && classificationResult && classificationResult.ecl_applies && (
           <div className="rounded-[14px] border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
             ✓ ECL applicable — proceed to calculate Expected Credit Loss below.
           </div>
         )}
 
-        {/* 4 KPI cards — values only after calculate (aggregated applicableEcl) */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
-            <div className="flex flex-wrap items-start justify-between gap-2 mb-1">
-              <p className="text-xs font-medium text-[#64748b]">Total ECL Provision</p>
-              {macroOverlayResult && (
-                <div className="flex rounded-lg border border-[#e2e8f0] overflow-hidden text-[10px] font-semibold">
-                  <button
-                    type="button"
-                    className={`px-2 py-1 ${eclKpiMode === 'pit' ? 'bg-[#0f172a] text-white' : 'bg-white text-[#64748b]'}`}
-                    onClick={() => setEclKpiMode('pit')}
-                  >
-                    Point-in-time
-                  </button>
-                  <button
-                    type="button"
-                    className={`px-2 py-1 ${eclKpiMode === 'macro' ? 'bg-[#0f172a] text-white' : 'bg-white text-[#64748b]'}`}
-                    onClick={() => setEclKpiMode('macro')}
-                  >
-                    Macro-adjusted
-                  </button>
-                </div>
-              )}
-            </div>
-            <p className={`text-2xl font-bold font-mono ${showTotalEclKpi ? 'text-red-600' : 'text-[#94a3b8]'}`}>
-              {showTotalEclKpi ? fmtKpi(totalEclKpiValue) : '—'}
-            </p>
-            {macroOverlayResult && eclKpiMode === 'macro' && (
-              <p className="text-[10px] text-[#64748b] mt-1">Macro-adjusted (prob-weighted)</p>
-            )}
-            {macroOverlayResult && eclKpiMode === 'pit' && (
-              <p className="text-[10px] text-[#64748b] mt-1">Point-in-time (no macro overlay)</p>
-            )}
-          </div>
-          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
-            <p className="text-xs font-medium text-[#64748b] mb-1">Total Portfolio Value (EAD)</p>
-            <p className={`text-2xl font-bold font-mono ${hasCalcData ? 'text-blue-600' : 'text-[#94a3b8]'}`}>
-              {hasCalcData ? fmtKpi(results!.total_ead) : '—'}
-            </p>
-          </div>
-          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
-            <p className="text-xs font-medium text-[#64748b] mb-1">Weighted Average PD</p>
-            <p className={`text-2xl font-bold font-mono ${hasCalcData ? 'text-[#ea580c]' : 'text-[#94a3b8]'}`}>
-              {hasCalcData && results!.weighted_avg_pd != null ? fmtPct(results!.weighted_avg_pd) : '—'}
-            </p>
-          </div>
-          <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
-            <p className="text-xs font-medium text-[#64748b] mb-1">Coverage Ratio</p>
-            <p className={`text-2xl font-bold font-mono ${hasCalcData ? 'text-[#64748b]' : 'text-[#94a3b8]'}`}>
-              {hasCalcData && results!.coverage_ratio != null ? fmtPct(results!.coverage_ratio) : '—'}
-            </p>
-          </div>
-        </div>
-
+        {(activeNavId === 'calculate') && (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
           {/* LEFT */}
           <div className="space-y-6">
@@ -2464,7 +2471,43 @@ export default function IFRS9OverviewPage() {
           </div>
         </div>
 
-        {/* Recent portfolios quick links */}
+        )}
+
+        {(activeNavId === 'reconciliation') && (
+        <div className="bg-white rounded-lg border border-[#E5E7EB] p-6">
+          <h3 className="text-base font-bold text-[#1e293b] mb-2">ECL Reconciliation</h3>
+          <p className="text-sm text-[#64748b] mb-4">Roll-forward from opening to closing ECL provision — compare calculated ECL to GL balances.</p>
+          {hasCalcData ? (
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between py-2 border-b"><span>Opening ECL provision</span><span className="font-mono">—</span></div>
+              <div className="flex justify-between py-2 border-b"><span>Current period charge</span><span className="font-mono text-red-600">{fmtKpi(results!.total_ecl)}</span></div>
+              <div className="flex justify-between py-2 border-b"><span>Write-offs / recoveries</span><span className="font-mono">—</span></div>
+              <div className="flex justify-between py-2 font-semibold"><span>Closing ECL provision</span><span className="font-mono">{fmtKpi(results!.total_ecl)}</span></div>
+            </div>
+          ) : (
+            <p className="text-sm text-[#64748b]">Calculate ECL on at least one portfolio to run reconciliation.</p>
+          )}
+        </div>
+        )}
+
+        {(activeNavId === 'reports') && (
+        <div className="bg-white rounded-lg border border-[#E5E7EB] p-6 space-y-4">
+          <h3 className="text-base font-bold text-[#1e293b]">Export &amp; Reports</h3>
+          <p className="text-sm text-[#64748b]">Generate the IFRS 9 master compliance report with staging, ECL, and disclosure narrative.</p>
+          <Button
+            type="button"
+            variant="primary"
+            className="bg-gradient-to-r from-orange-500 to-orange-600 text-white"
+            disabled={!hasCalcData || masterLoading}
+            onClick={() => void handleGenerateMasterReport()}
+            isLoading={masterLoading}
+          >
+            <FileBarChart className="w-4 h-4 mr-2" /> Generate IFRS 9 Master Report
+          </Button>
+        </div>
+        )}
+
+        {(activeNavId === 'overview') && (
         <div className="bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] overflow-hidden">
           <div className="px-6 py-4 border-b border-[#e2e8f0] flex justify-between items-center">
             <h4 className="text-sm font-semibold text-[#1e293b]">All portfolios</h4>
@@ -2523,7 +2566,9 @@ export default function IFRS9OverviewPage() {
             </table>
           </div>
         </div>
+        )}
       </div>
+      </ModuleWorkspaceLayout>
 
       {hasCalcData ? (
         <button

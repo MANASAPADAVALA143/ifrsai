@@ -1,7 +1,10 @@
 /**
- * ECL Portfolio Repository - localStorage for IFRS 9 ECL portfolios
- * Key: ecl_portfolio_repository
+ * ECL Portfolio Repository — server-first with localStorage cache (offline fallback).
+ * Mirrors lease-repository.ts pattern. Supabase via /api/ifrs9/portfolio/* (migration 005).
  */
+
+import { ifrs9Api } from './api';
+import { getLeaseRepositoryFirmId } from './lease-repository';
 
 export type AssetClass =
   | 'Trade Receivables'
@@ -54,7 +57,6 @@ export interface ECLPortfolioEntry {
   undrawnCommitment: number;
   accruedInterest: number;
   collateralValue: number;
-  /** Classification */
   businessModel: 'hold_to_collect' | 'hold_collect_sell' | 'trading';
   sppiPass: boolean;
   classification: 'AC' | 'FVOCI' | 'FVTPL';
@@ -62,14 +64,12 @@ export interface ECLPortfolioEntry {
   initialRecognitionAmount: number;
   transactionCosts: number;
   originationFees: number;
-  /** Staging */
   stage: Stage;
   stagingRationale: string;
   stage1Criteria: Record<string, boolean>;
   stage2Triggers: Record<string, boolean>;
   stage3Triggers: Record<string, boolean>;
   stagingHistory: Array<{ date: string; previousStage: Stage; newStage: Stage; reason: string; changedBy: string }>;
-  /** ECL */
   approach: 'simplified' | 'general';
   pdSource: string;
   pd12m: number;
@@ -86,21 +86,18 @@ export interface ECLPortfolioEntry {
   useProvisionMatrix: boolean;
   provisionMatrix: ProvisionMatrixRow[];
   ageingBuckets: AgeingBucket[];
-  /** Calculated (set after /api/ifrs9/calculate) */
   ecl12m?: number;
   eclLifetime?: number;
   applicableEcl?: number;
   coverageRatio?: number;
   scenarioResults?: { base: number; optimistic: number; pessimistic: number; weighted: number };
-  journalEntries?: Array<{ type: string; dr: string; cr: string; amount: number }>;
+  journalEntries?: Array<{ type: string; dr: string; cr: string; amount: number } | Record<string, unknown>>;
   disclosureNotes?: string;
-  /** Scenario analysis */
   scenarios?: {
     base?: { gdp: number; unemployment: number; interestRate: number; weight: number; pd?: number; ecl?: number };
     optimistic?: { gdp: number; unemployment: number; interestRate: number; weight: number; pd?: number; ecl?: number };
     pessimistic?: { gdp: number; unemployment: number; interestRate: number; weight: number; pd?: number; ecl?: number };
   };
-  /** Audit */
   status: 'Draft' | 'Pending Review' | 'Approved' | 'Archived';
   lastUpdated: string;
   auditTrail: Array<{ dateTime: string; user: string; action: string; oldValue: string; newValue: string; reason: string }>;
@@ -108,6 +105,124 @@ export interface ECLPortfolioEntry {
 }
 
 const STORAGE_KEY = 'ecl_portfolio_repository';
+const MIGRATION_DONE_KEY = 'ifrs9_server_migration_done';
+const USER_ID_KEY = 'user_id';
+
+function getEclRepositoryUserId(): string {
+  if (typeof window === 'undefined') return '';
+  return localStorage.getItem(USER_ID_KEY) || '';
+}
+
+function getFirmHeaders(): HeadersInit {
+  const firmId = getLeaseRepositoryFirmId();
+  const userId = getEclRepositoryUserId();
+  return {
+    'Content-Type': 'application/json',
+    'X-Firm-Id': firmId,
+    ...(userId ? { 'X-User-Id': userId } : {}),
+  };
+}
+
+function normalizePortfolioEntry(raw: Record<string, unknown>): ECLPortfolioEntry {
+  const portfolioId = String(raw.portfolioId || raw.portfolio_id || raw.id || '');
+  const id = String(raw.id || portfolioId);
+  return {
+    ...(raw as ECLPortfolioEntry),
+    id,
+    portfolioId: portfolioId || id,
+    lastUpdated: String(raw.lastUpdated || raw.last_updated || new Date().toISOString()),
+  };
+}
+
+function queueServerSync(fn: () => Promise<void>): void {
+  void fn().catch((err) => {
+    console.warn('[ecl-portfolio-repository] server sync failed:', err);
+  });
+}
+
+async function serverUpsertPortfolio(entry: ECLPortfolioEntry): Promise<void> {
+  const res = await ifrs9Api.portfolioUpsert(entry as Record<string, unknown>, getFirmHeaders());
+  if (res.error) {
+    throw new Error(res.error);
+  }
+}
+
+async function serverDeletePortfolio(portfolioId: string): Promise<void> {
+  const res = await ifrs9Api.portfolioDelete(portfolioId, getFirmHeaders());
+  if (res.error && !res.error.includes('404')) {
+    throw new Error(res.error);
+  }
+}
+
+/** Pull portfolios from Supabase into localStorage cache. */
+export async function refreshEclPortfolioFromServer(): Promise<ECLPortfolioEntry[]> {
+  if (typeof window === 'undefined') return [];
+  try {
+    const res = await ifrs9Api.portfolioList(getFirmHeaders());
+    if (res.error) {
+      console.warn('[ecl-portfolio-repository] refresh failed:', res.error);
+      return getEclPortfolioRepository();
+    }
+    const portfolios = (res.data?.portfolios || []).map((p) =>
+      normalizePortfolioEntry(p as Record<string, unknown>)
+    );
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(portfolios));
+    return portfolios;
+  } catch {
+    return getEclPortfolioRepository();
+  }
+}
+
+/** Portfolio count for sidebar badge — prefers server summary when available. */
+export async function fetchEclPortfolioSummary(): Promise<{
+  portfolio_count: number;
+  total_ecl: number;
+  total_ead: number;
+  coverage_ratio: number;
+} | null> {
+  const res = await ifrs9Api.portfolioSummary(getFirmHeaders());
+  if (res.error || !res.data?.summary) {
+    return null;
+  }
+  const s = res.data.summary;
+  return {
+    portfolio_count: s.portfolio_count ?? 0,
+    total_ecl: s.total_ecl ?? 0,
+    total_ead: s.total_ead ?? 0,
+    coverage_ratio: s.coverage_ratio ?? 0,
+  };
+}
+
+/** One-time push of browser-only portfolios to server after migration 005. */
+export async function migrateEclLocalStorageToServer(): Promise<{ migrated: number; failed: number }> {
+  if (typeof window === 'undefined') return { migrated: 0, failed: 0 };
+  if (localStorage.getItem(MIGRATION_DONE_KEY) === '1') {
+    return { migrated: 0, failed: 0 };
+  }
+
+  const local = getEclPortfolioRepository();
+  if (local.length === 0) {
+    localStorage.setItem(MIGRATION_DONE_KEY, '1');
+    return { migrated: 0, failed: 0 };
+  }
+
+  let migrated = 0;
+  let failed = 0;
+  for (const portfolio of local) {
+    try {
+      await serverUpsertPortfolio(portfolio);
+      migrated++;
+    } catch {
+      failed++;
+    }
+  }
+
+  if (failed === 0) {
+    localStorage.setItem(MIGRATION_DONE_KEY, '1');
+    await refreshEclPortfolioFromServer();
+  }
+  return { migrated, failed };
+}
 
 export function getEclPortfolioRepository(): ECLPortfolioEntry[] {
   if (typeof window === 'undefined') return [];
@@ -115,7 +230,8 @@ export function getEclPortfolioRepository(): ECLPortfolioEntry[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((p: ECLPortfolioEntry) => normalizePortfolioEntry(p as Record<string, unknown>));
   } catch {
     return [];
   }
@@ -123,23 +239,55 @@ export function getEclPortfolioRepository(): ECLPortfolioEntry[] {
 
 export function saveToEclPortfolioRepository(entry: ECLPortfolioEntry): void {
   const repo = getEclPortfolioRepository();
-  const exists = repo.findIndex((e) => e.id === entry.id || e.portfolioId === entry.portfolioId);
-  entry.lastUpdated = new Date().toISOString();
+  const enriched: ECLPortfolioEntry = {
+    ...entry,
+    lastUpdated: new Date().toISOString(),
+    id: entry.id || entry.portfolioId,
+    portfolioId: entry.portfolioId || entry.id,
+  };
+  const exists = repo.findIndex(
+    (e) => e.id === enriched.id || e.portfolioId === enriched.portfolioId
+  );
   if (exists >= 0) {
-    repo[exists] = entry;
+    repo[exists] = enriched;
   } else {
-    repo.unshift(entry);
+    repo.unshift(enriched);
   }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(repo));
+  queueServerSync(() => serverUpsertPortfolio(enriched));
 }
 
 export function getEclPortfolioById(id: string): ECLPortfolioEntry | undefined {
   return getEclPortfolioRepository().find((e) => e.id === id || e.portfolioId === id);
 }
 
+export async function fetchEclPortfolioById(id: string): Promise<ECLPortfolioEntry | undefined> {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    const res = await ifrs9Api.portfolioGet(id, getFirmHeaders());
+    if (res.error || !res.data?.portfolio) {
+      return getEclPortfolioById(id);
+    }
+    const entry = normalizePortfolioEntry(res.data.portfolio as Record<string, unknown>);
+    const repo = getEclPortfolioRepository();
+    const idx = repo.findIndex((e) => e.id === entry.id || e.portfolioId === entry.portfolioId);
+    if (idx >= 0) {
+      repo[idx] = entry;
+    } else {
+      repo.unshift(entry);
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(repo));
+    return entry;
+  } catch {
+    return getEclPortfolioById(id);
+  }
+}
+
 export function deleteEclPortfolioFromRepository(id: string): void {
   const repo = getEclPortfolioRepository().filter((e) => e.id !== id && e.portfolioId !== id);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(repo));
+  const pid = id;
+  queueServerSync(() => serverDeletePortfolio(pid));
 }
 
 const DEFAULT_AGEING: AgeingBucket[] = [

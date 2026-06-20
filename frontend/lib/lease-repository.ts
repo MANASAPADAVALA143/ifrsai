@@ -1,11 +1,14 @@
 /**
- * Lease Repository - localStorage management for IFRS 16 leases
+ * Lease Repository — server-first with localStorage cache (offline fallback).
+ * Existing sync API preserved for all IFRS 16 pages.
  */
 
 import {
   getDefaultIfrs16Currency,
   migrateLeaseEntry,
 } from './ifrs16-currency';
+import { API_URL } from './api';
+import { getCurrentFirmId, LEGACY_FIRM_ID_KEY } from './firm-workspace';
 
 export interface LeaseRepositoryEntry {
   id: string;
@@ -57,6 +60,11 @@ export interface LeaseRepositoryEntry {
   description?: string;
   termination_clauses?: string;
   renewal_options?: string;
+  restoration_obligations?: string;
+  rera_registration_no?: string;
+  emirate?: string;
+  area_district?: string;
+  free_zone?: string;
   lessor_details?: Record<string, string>;
   lessee_details?: Record<string, string>;
   legal_details?: Record<string, string>;
@@ -107,10 +115,67 @@ export interface LeaseRepositoryEntry {
   practical_expedient_elected?: boolean;
   /** Full IFRS 16 extractor JSON from upload-contract (for modification advisor, etc.) */
   contract_data?: Record<string, unknown>;
+  /** True for legacy merged bulk-import rows — exclude from CFO portfolio analytics */
+  is_portfolio_aggregate?: boolean;
   [key: string]: unknown;
 }
 
 const STORAGE_KEY = 'lease_repository';
+const USER_ID_KEY = 'user_id';
+const MIGRATION_DONE_KEY = 'ifrs16_server_migration_done';
+
+export function setLeaseRepositoryAuthContext(firmId: string, userId?: string): void {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(LEGACY_FIRM_ID_KEY, firmId);
+  if (userId) localStorage.setItem(USER_ID_KEY, userId);
+}
+
+export function getLeaseRepositoryFirmId(): string {
+  return getCurrentFirmId();
+}
+
+function getLeaseRepositoryUserId(): string {
+  if (typeof window === 'undefined') return '';
+  return localStorage.getItem(USER_ID_KEY) || '';
+}
+
+function getFirmHeaders(): HeadersInit {
+  const firmId = getLeaseRepositoryFirmId();
+  const userId = getLeaseRepositoryUserId();
+  return {
+    'Content-Type': 'application/json',
+    'X-Firm-Id': firmId,
+    ...(userId ? { 'X-User-Id': userId } : {}),
+  };
+}
+
+async function serverUpsertLease(entry: LeaseRepositoryEntry): Promise<void> {
+  const res = await fetch(`${API_URL}/api/ifrs16/portfolio/add`, {
+    method: 'POST',
+    headers: getFirmHeaders(),
+    body: JSON.stringify({ lease_data: entry }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `Server upsert failed (${res.status})`);
+  }
+}
+
+async function serverDeleteLease(leaseId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/ifrs16/portfolio/${encodeURIComponent(leaseId)}`, {
+    method: 'DELETE',
+    headers: getFirmHeaders(),
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`Server delete failed (${res.status})`);
+  }
+}
+
+function queueServerSync(fn: () => Promise<void>): void {
+  void fn().catch((err) => {
+    console.warn('[lease-repository] server sync failed:', err);
+  });
+}
 
 function formatDisclosureAmount(amount: number, currency: string): string {
   const ccy = String(currency || 'INR').toUpperCase();
@@ -216,6 +281,7 @@ export function saveToLeaseRepository(entry: LeaseRepositoryEntry): void {
     repo.unshift(enrichedEntry);
   }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(repo));
+  queueServerSync(() => serverUpsertLease(enrichedEntry));
 }
 
 export function getLeaseById(id: string): LeaseRepositoryEntry | undefined {
@@ -224,6 +290,14 @@ export function getLeaseById(id: string): LeaseRepositoryEntry | undefined {
 
 export function deleteLeaseFromRepository(id: string): void {
   const repo = getLeaseRepository().filter((e) => e.id !== id && e.lease_id !== id);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(repo));
+  queueServerSync(() => serverDeleteLease(id));
+}
+
+export function deleteLeasesFromRepository(ids: string[]): void {
+  const drop = new Set(ids.filter(Boolean));
+  if (drop.size === 0) return;
+  const repo = getLeaseRepository().filter((e) => !drop.has(e.id) && !drop.has(String(e.lease_id ?? '')));
   localStorage.setItem(STORAGE_KEY, JSON.stringify(repo));
 }
 
@@ -257,6 +331,7 @@ export function buildLeaseEntry(params: {
   other_initial_direct_costs?: number;
   cash_incentive?: number;
   payment_type?: string;
+  is_portfolio_aggregate?: boolean;
 }): LeaseRepositoryEntry {
   const start = new Date(params.commencement_date || params.start_date || '');
   const endDateStr = params.end_date || (() => {
@@ -306,6 +381,7 @@ export function buildLeaseEntry(params: {
     other_initial_direct_costs: params.other_initial_direct_costs,
     cash_incentive: params.cash_incentive,
     payment_type: params.payment_type,
+    is_portfolio_aggregate: params.is_portfolio_aggregate ?? false,
   };
 }
 
@@ -408,6 +484,11 @@ export function buildLeaseEntryFromForm(
     description: form.description ?? existing?.description,
     termination_clauses: form.terminationClauses ?? existing?.termination_clauses,
     renewal_options: form.renewalOptions ?? existing?.renewal_options,
+    restoration_obligations: form.restorationObligations ?? existing?.restoration_obligations,
+    rera_registration_no: form.reraRegistrationNo ?? existing?.rera_registration_no,
+    emirate: form.emirate ?? existing?.emirate,
+    area_district: form.areaDistrict ?? existing?.area_district,
+    free_zone: form.freeZone ?? existing?.free_zone,
     lessor_details: form.lessorDetails ?? existing?.lessor_details,
     lessee_details: form.lesseeDetails ?? existing?.lessee_details,
     legal_details: form.legalDetails ?? existing?.legal_details,
@@ -426,6 +507,7 @@ export function buildLeaseEntryFromForm(
     lease_incentive_description: form.leaseIncentiveDescription ?? (existing as any)?.lease_incentive_description ?? '',
     non_lease_component: form.nonLeaseComponent != null && form.nonLeaseComponent !== '' ? parseFloat(String(form.nonLeaseComponent)) : (existing as any)?.non_lease_component ?? 0,
     non_lease_description: form.nonLeaseDescription ?? (existing as any)?.non_lease_description ?? '',
+    non_lease_additive: Boolean(form.nonLeaseAdditive ?? (existing as any)?.non_lease_additive),
     practical_expedient_elected: Boolean(form.practicalExpedientElected ?? (existing as any)?.practical_expedient_elected ?? false),
     rvg_amount: form.rvgAmount != null && form.rvgAmount !== '' ? parseFloat(String(form.rvgAmount)) : (existing as any)?.rvg_amount,
     rvg_guaranteed_by: form.rvgGuaranteedBy ?? (existing as any)?.rvg_guaranteed_by ?? 'None',
@@ -471,4 +553,96 @@ export function buildLeaseEntryFromForm(
         : (existing as { contract_data?: Record<string, unknown> })?.contract_data,
   };
   return entry;
+}
+
+/** Pull leases from server into localStorage cache. */
+export async function refreshLeaseRepositoryFromServer(): Promise<LeaseRepositoryEntry[]> {
+  if (typeof window === 'undefined') return [];
+  try {
+    const res = await fetch(`${API_URL}/api/ifrs16/portfolio/list`, {
+      method: 'GET',
+      headers: getFirmHeaders(),
+    });
+    if (!res.ok) return getLeaseRepository();
+    const json = (await res.json()) as { leases?: LeaseRepositoryEntry[] };
+    const leases = Array.isArray(json.leases) ? json.leases : [];
+    const migrated = leases.map((e) => ensureDisclosureNotes(migrateLeaseEntry(e)));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+    return migrated;
+  } catch {
+    return getLeaseRepository();
+  }
+}
+
+/** One-time push of browser-only leases to server after login. */
+export async function migrateLocalStorageToServer(): Promise<{ migrated: number; failed: number }> {
+  if (typeof window === 'undefined') return { migrated: 0, failed: 0 };
+  if (localStorage.getItem(MIGRATION_DONE_KEY) === '1') {
+    return { migrated: 0, failed: 0 };
+  }
+
+  const local = getLeaseRepository();
+  if (local.length === 0) {
+    localStorage.setItem(MIGRATION_DONE_KEY, '1');
+    return { migrated: 0, failed: 0 };
+  }
+
+  let migrated = 0;
+  let failed = 0;
+  for (const lease of local) {
+    try {
+      await serverUpsertLease(lease);
+      migrated++;
+    } catch {
+      failed++;
+    }
+  }
+
+  if (failed === 0) {
+    localStorage.setItem(MIGRATION_DONE_KEY, '1');
+    await refreshLeaseRepositoryFromServer();
+  }
+  return { migrated, failed };
+}
+
+/** Save calculation outputs to server (and local cache via saveToLeaseRepository). */
+export async function saveLeaseCalculationToServer(
+  leaseId: string,
+  payload: {
+    results?: Record<string, unknown>;
+    amortization_schedule?: unknown[];
+    journal_entries?: unknown[];
+    disclosure_notes?: unknown;
+    excel_file_id?: string;
+  }
+): Promise<void> {
+  const res = await fetch(
+    `${API_URL}/api/ifrs16/portfolio/${encodeURIComponent(leaseId)}/save-calculation`,
+    {
+      method: 'POST',
+      headers: getFirmHeaders(),
+      body: JSON.stringify(payload),
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`Save calculation failed (${res.status})`);
+  }
+  const json = (await res.json()) as { lease?: LeaseRepositoryEntry };
+  if (json.lease) {
+    const repo = getLeaseRepository();
+    const idx = repo.findIndex((e) => e.id === leaseId || e.lease_id === leaseId);
+    const enriched = ensureDisclosureNotes(migrateLeaseEntry(json.lease));
+    if (idx >= 0) repo[idx] = enriched;
+    else repo.unshift(enriched);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(repo));
+  }
+}
+
+export async function getPortfolioSummaryFromServer(): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_URL}/api/ifrs16/portfolio/summary/portfolio`, {
+    headers: getFirmHeaders(),
+  });
+  if (!res.ok) throw new Error(`Portfolio summary failed (${res.status})`);
+  const json = (await res.json()) as { summary?: Record<string, unknown> };
+  return json.summary || {};
 }

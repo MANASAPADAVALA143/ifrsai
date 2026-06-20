@@ -18,13 +18,13 @@ import {
   CheckCircle,
   Copy,
 } from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
 import { ifrs9Api } from '@/lib/api';
 import {
   getEclPortfolioById,
   saveToEclPortfolioRepository,
   deleteEclPortfolioFromRepository,
   createBlankEclPortfolio,
+  fetchEclPortfolioById,
   type ECLPortfolioEntry,
   type AssetClass,
   type CounterpartyType,
@@ -35,17 +35,15 @@ import { formatIndianCurrency } from '@/lib/utils';
 import Link from 'next/link';
 import { useRouter, useParams } from 'next/navigation';
 import toast from 'react-hot-toast';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from '@/components/Charts';
+import { CalculateStepper } from '@/components/module/CalculateStepper';
+import {
+  IFRS9_PORTFOLIO_STEPS,
+  ifrs9PortfolioTabToStep,
+  ifrs9PortfolioStepToTab,
+  type Ifrs9PortfolioTabId,
+} from '@/lib/ifrs9-nav';
 
 const TAB_IDS = ['instrument', 'classification', 'staging', 'ecl', 'scenario', 'results'] as const;
-const TABS: { id: (typeof TAB_IDS)[number]; label: string; icon: LucideIcon }[] = [
-  { id: 'instrument', label: 'Instrument Details', icon: FileText },
-  { id: 'classification', label: 'Classification', icon: BarChart3 },
-  { id: 'staging', label: 'Staging', icon: AlertTriangle },
-  { id: 'ecl', label: 'ECL Calculation', icon: Calculator },
-  { id: 'scenario', label: 'Scenario Analysis', icon: TrendingUp },
-  { id: 'results', label: 'Results & Audit', icon: CheckCircle },
-];
 
 const ASSET_CLASSES: AssetClass[] = [
   'Trade Receivables',
@@ -99,20 +97,40 @@ export default function PortfolioDetailPage() {
   const [uploading, setUploading] = useState(false);
   const [calculating, setCalculating] = useState(false);
   const [saving, setSaving] = useState(false);
-
-  const existing = getEclPortfolioById(id);
-  const isNew = id === 'new' || !existing;
+  const [loadingPortfolio, setLoadingPortfolio] = useState(true);
 
   useEffect(() => {
-    if (isNew && id !== 'new') {
-      const blank = createBlankEclPortfolio(id);
-      setPortfolio(blank);
-    } else if (existing) {
-      setPortfolio(JSON.parse(JSON.stringify(existing)));
-    } else if (id && id !== 'new') {
-      setPortfolio(null);
-    }
-  }, [id, isNew, existing?.lastUpdated]);
+    let cancelled = false;
+    const init = async () => {
+      setLoadingPortfolio(true);
+      if (id === 'new') {
+        setPortfolio(createBlankEclPortfolio());
+        setLoadingPortfolio(false);
+        return;
+      }
+      if (!id) {
+        setPortfolio(null);
+        setLoadingPortfolio(false);
+        return;
+      }
+      const cached = getEclPortfolioById(id);
+      if (cached) {
+        setPortfolio(JSON.parse(JSON.stringify(cached)));
+      }
+      const remote = await fetchEclPortfolioById(id);
+      if (cancelled) return;
+      if (remote) {
+        setPortfolio(JSON.parse(JSON.stringify(remote)));
+      } else if (!cached) {
+        setPortfolio(null);
+      }
+      setLoadingPortfolio(false);
+    };
+    void init();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   const update = useCallback((patch: Partial<ECLPortfolioEntry>) => {
     setPortfolio((p) => (p ? { ...p, ...patch } : null));
@@ -164,6 +182,10 @@ export default function PortfolioDetailPage() {
           ? portfolio.provisionMatrix.map((r) => ({ bucket: r.bucket, amount: r.grossAmount, rate: r.eclRate }))
           : undefined;
       const payload = {
+        portfolio_id: portfolio.portfolioId || portfolio.id,
+        portfolio_name: portfolio.name || portfolio.portfolioId || portfolio.id,
+        reporting_date: portfolio.reportingDate,
+        previous_ecl: portfolio.applicableEcl ?? 0,
         approach: portfolio.useProvisionMatrix ? 'simplified' : 'general',
         stage: portfolio.stage || 1,
         pd_12m: portfolio.pd12m ?? 1,
@@ -271,7 +293,17 @@ export default function PortfolioDetailPage() {
     toast.success('Report download started');
   }, [portfolio]);
 
-  if (!portfolio && !isNew) {
+  if (loadingPortfolio) {
+    return (
+      <SidebarLayout pageTitle="Portfolio" pageSubtitle="Loading">
+        <div className="flex items-center justify-center min-h-[40vh]">
+          <Loader2 className="w-8 h-8 animate-spin text-[#f97316]" />
+        </div>
+      </SidebarLayout>
+    );
+  }
+
+  if (!portfolio && id !== 'new') {
     return (
       <SidebarLayout pageTitle="Portfolio" pageSubtitle="Not found">
         <p className="text-[#64748b]">Portfolio not found.</p>
@@ -348,23 +380,13 @@ export default function PortfolioDetailPage() {
         </div>
       </div>
 
-      {/* Tab bar */}
-      <div className="flex flex-wrap gap-1 mt-6 border-b border-[#e2e8f0]">
-        {TABS.map(({ id: tabId, label, icon: Icon }) => (
-          <button
-            key={tabId}
-            onClick={() => setActiveTab(tabId)}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium rounded-t-lg border-b-2 transition-colors ${
-              activeTab === tabId
-                ? 'border-[#f97316] text-[#f97316] bg-white'
-                : 'border-transparent text-[#64748b] hover:text-[#1e293b] hover:bg-[#f8fafc]'
-            }`}
-          >
-            <Icon className="w-4 h-4" />
-            {label}
-          </button>
-        ))}
-      </div>
+      {/* Portfolio workflow stepper */}
+      <CalculateStepper
+        steps={IFRS9_PORTFOLIO_STEPS}
+        currentStep={ifrs9PortfolioTabToStep(activeTab as Ifrs9PortfolioTabId)}
+        onStepChange={(step) => setActiveTab(ifrs9PortfolioStepToTab(step))}
+        maxReachableStep={portfolio?.applicableEcl != null ? 6 : portfolio?.name ? 4 : 1}
+      />
 
       {/* Tab content */}
       <div className="mt-6 bg-white rounded-[14px] p-6 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">

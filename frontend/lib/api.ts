@@ -2,6 +2,7 @@ import {
   getBackendConnectivityMessage,
   getApiHealthTimeoutMessage,
 } from '@/lib/service-messages';
+import { getCurrentFirmId } from '@/lib/firm-workspace';
 import { parseJsonText } from '@/lib/utils';
 
 // Use '' so browser calls same-origin /api/*; the Next server proxies to Python (see app/api/[...path]/route.ts).
@@ -150,7 +151,7 @@ export const ifrs16Api = {
     if (typeof window !== 'undefined') console.log('[Upload] POST to', url);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 min timeout
+    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 min — Claude PDF extraction can exceed 2 min
     abortSignal?.addEventListener?.('abort', () => {
       clearTimeout(timeoutId);
       controller.abort();
@@ -198,7 +199,11 @@ export const ifrs16Api = {
       const isAbort = error instanceof Error && error.name === 'AbortError';
       const isNetworkError = msg === 'Failed to fetch' || msg.includes('NetworkError') || msg.includes('Load failed') || msg.includes('connection') || msg.includes('reset');
       return {
-        error: isAbort ? 'Extraction cancelled or timed out.' : isNetworkError ? getConnectionErrorMessage() : msg,
+        error: isAbort
+          ? 'Extraction timed out after 5 minutes. Try a smaller PDF or enter details manually.'
+          : isNetworkError
+            ? getConnectionErrorMessage()
+            : msg,
       };
     }
   },
@@ -325,6 +330,115 @@ export const ifrs16ExtApi = {
     const blob = await res.blob();
     return { data: blob };
   },
+};
+
+function _firmId(): string {
+  if (typeof window === 'undefined') return 'default';
+  return getCurrentFirmId();
+}
+
+function firmApiCall<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
+  return apiCall<T>(endpoint, {
+    ...options,
+    headers: {
+      'X-Firm-Id': _firmId(),
+      ...options.headers,
+    },
+  });
+}
+
+export const ifrs16ComparativeApi = {
+  getSettings: () =>
+    firmApiCall<{ success: boolean; settings: Record<string, unknown> }>('/api/ifrs16/comparative/settings'),
+  updateSettings: (body: Record<string, unknown>) =>
+    firmApiCall<{ success: boolean; settings: Record<string, unknown> }>('/api/ifrs16/comparative/settings', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  previewSnapshot: (body: { year: number; entity_name?: string; notes?: string }) =>
+    firmApiCall<{ success: boolean; preview: Record<string, unknown> }>('/api/ifrs16/comparative/snapshots/preview', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  createSnapshot: (body: { year: number; entity_name?: string; notes?: string }) =>
+    firmApiCall<{ success: boolean; snapshot: Record<string, unknown> }>('/api/ifrs16/comparative/snapshots', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  listSnapshots: (status?: string) =>
+    firmApiCall<{ success: boolean; snapshots: Record<string, unknown>[]; count: number }>(
+      `/api/ifrs16/comparative/snapshots${status ? `?status=${encodeURIComponent(status)}` : ''}`
+    ),
+  getSnapshot: (id: string) =>
+    firmApiCall<{ success: boolean; snapshot: Record<string, unknown> }>(`/api/ifrs16/comparative/snapshots/${id}`),
+  closeSnapshot: (id: string, closed_by = '') =>
+    firmApiCall<{ success: boolean; snapshot: Record<string, unknown>; message: string }>(
+      `/api/ifrs16/comparative/snapshots/${id}/close`,
+      { method: 'POST', body: JSON.stringify({ closed_by }) }
+    ),
+  reopenSnapshot: (id: string, reopened_by = '') =>
+    firmApiCall<{ success: boolean; snapshot: Record<string, unknown> }>(
+      `/api/ifrs16/comparative/snapshots/${id}/reopen`,
+      { method: 'POST', body: JSON.stringify({ reopened_by }) }
+    ),
+  getReport: (periodLabel: string) =>
+    firmApiCall<{
+      success: boolean;
+      has_comparative: boolean;
+      current_period: string;
+      prior_period: string | null;
+      data: Record<string, Record<string, { curr: number | null; prior: number | null }>>;
+    }>(`/api/ifrs16/comparative/report/${encodeURIComponent(periodLabel)}`),
+  getAvailablePeriods: () =>
+    firmApiCall<{ success: boolean; periods: { label: string; period_end: string }[] }>(
+      '/api/ifrs16/comparative/available-periods'
+    ),
+};
+
+export const ifrs16LessorApi = {
+  getIndicators: () =>
+    apiCall<{ success: boolean; indicators: Record<string, unknown>[] }>(
+      '/api/ifrs16/lessor/classification-indicators'
+    ),
+  classify: (body: Record<string, unknown>) =>
+    apiCall<Record<string, unknown>>('/api/ifrs16/lessor/classify', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  calculate: (body: Record<string, unknown>) =>
+    apiCall<{ success: boolean; result: Record<string, unknown> }>('/api/ifrs16/lessor/calculate', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+};
+
+export const ifrs16SlbApi = {
+  getIndicators: () =>
+    apiCall<{ success: boolean; indicators: Record<string, unknown>[] }>('/api/ifrs16/sale-leaseback/ifrs15-indicators'),
+  assess: (body: Record<string, unknown>) =>
+    apiCall<Record<string, unknown>>('/api/ifrs16/sale-leaseback/assess', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  calculate: (body: Record<string, unknown>) =>
+    apiCall<{ success: boolean; result: Record<string, unknown> }>('/api/ifrs16/sale-leaseback/calculate', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+};
+
+export const ifrs16FinReportApi = {
+  check: (body: Record<string, unknown>) =>
+    apiCall<Record<string, unknown>>('/api/ifrs16/finreportai/check', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  post: (body: Record<string, unknown>) =>
+    apiCall<Record<string, unknown>>('/api/ifrs16/finreportai/post', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  status: () => apiCall<Record<string, unknown>>('/api/ifrs16/finreportai/status'),
 };
 
 // IFRS 16 Smart Alerts
@@ -465,28 +579,108 @@ export const ifrs15Api = {
       body: JSON.stringify({ contract_text: contractText }),
     }),
 
-  uploadContract: async (file: File) => {
+  /** UAE SPA extraction with per-field confidence (recommended for real estate). */
+  extractContract: async (file: File, contractType: 'uae_spa' | 'generic' = 'uae_spa') => {
     const formData = new FormData();
     formData.append('file', file);
+    const url = `${API_URL}/api/ifrs15/extract-contract?contract_type=${contractType}`;
+    if (typeof window !== 'undefined') console.log('[IFRS15 Extract] POST to', url);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300000);
+
     try {
-      const response = await fetch(`${API_URL}/api/ifrs15/upload-contract`, {
+      const response = await fetch(url, {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
+
+      const bodyText = await response.text();
       if (!response.ok) {
-        let errorMessage = `Upload failed: ${response.statusText}`;
+        let errorMessage = `Extraction failed (${response.status})`;
         try {
-          const errorData = await response.json();
-          if (errorData.detail) errorMessage = errorData.detail;
-          else if (errorData.error) errorMessage = errorData.error;
-        } catch { /* ignore */ }
+          const errorData = JSON.parse(bodyText) as { detail?: unknown };
+          if (typeof errorData.detail === 'string') errorMessage = errorData.detail;
+        } catch {
+          /* ignore */
+        }
         throw new Error(errorMessage);
       }
-      return { data: await response.json() };
+      const data = parseJsonText<Record<string, unknown>>(bodyText);
+      if (!data) throw new Error('Empty extraction response');
+      return { data };
     } catch (error) {
+      clearTimeout(timeoutId);
+      const msg = error instanceof Error ? error.message : 'Extraction failed';
+      const isAbort = error instanceof Error && error.name === 'AbortError';
+      return {
+        error: isAbort
+          ? 'Extraction cancelled or timed out (large SPAs can take up to 5 minutes).'
+          : msg,
+      };
+    }
+  },
+
+  uploadContract: async (file: File, options?: { includeClauses?: boolean }) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const clauses = options?.includeClauses ? 'true' : 'false';
+    const url = `${API_URL}/api/ifrs15/upload-contract?include_clauses=${clauses}`;
+    if (typeof window !== 'undefined') console.log('[IFRS15 Upload] POST to', url);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 180000);
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      const bodyText = await response.text();
+      if (!response.ok) {
+        let errorMessage = `Upload failed (${response.status} ${response.statusText || ''})`.trim();
+        try {
+          const errorData = JSON.parse(bodyText) as {
+            detail?: unknown;
+            error?: unknown;
+            message?: unknown;
+          };
+          const d = errorData.detail;
+          if (typeof d === 'string') errorMessage = d;
+          else if (Array.isArray(d))
+            errorMessage = d.map((x: { msg?: string }) => x?.msg || JSON.stringify(x)).join('; ');
+          else if (d != null) errorMessage = String(d);
+          else if (errorData.error != null) errorMessage = String(errorData.error);
+          else if (errorData.message != null) errorMessage = String(errorData.message);
+        } catch {
+          const snippet = bodyText.replace(/\s+/g, ' ').trim().slice(0, 400);
+          if (snippet) errorMessage = `${errorMessage}. ${snippet}`;
+        }
+        throw new Error(errorMessage);
+      }
+
+      const data = parseJsonText<Record<string, unknown>>(bodyText);
+      if (data == null) {
+        throw new Error('Upload succeeded but the server returned an empty response');
+      }
+      return { data };
+    } catch (error) {
+      clearTimeout(timeoutId);
       const msg = error instanceof Error ? error.message : 'Upload failed';
-      const isNetworkError = msg === 'Failed to fetch' || msg.includes('NetworkError') || msg.includes('Load failed');
-      return { error: isNetworkError ? getConnectionErrorMessage() : msg };
+      const isAbort = error instanceof Error && error.name === 'AbortError';
+      const isNetworkError = msg === 'Failed to fetch' || msg.includes('NetworkError') || msg.includes('Load failed') || msg.includes('connection') || msg.includes('reset');
+      return {
+        error: isAbort
+          ? 'Extraction cancelled or timed out (large contracts can take up to 3 minutes).'
+          : isNetworkError
+            ? getConnectionErrorMessage()
+            : msg,
+      };
     }
   },
 
@@ -1320,6 +1514,49 @@ export const ifrs9Api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  portfolioUpsert: async (instrumentData: Record<string, unknown>, headers?: HeadersInit) =>
+    apiCall<{ success: boolean; portfolio: Record<string, unknown> }>('/api/ifrs9/portfolio/upsert', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ instrument_data: instrumentData }),
+    }),
+
+  portfolioList: async (headers?: HeadersInit) =>
+    apiCall<{ success: boolean; portfolios: Record<string, unknown>[]; count: number }>(
+      '/api/ifrs9/portfolio/list',
+      { headers }
+    ),
+
+  portfolioSummary: async (headers?: HeadersInit) =>
+    apiCall<{
+      success: boolean;
+      summary: {
+        portfolio_count: number;
+        total_ecl: number;
+        total_ead: number;
+        coverage_ratio: number;
+        ecl_by_stage: Record<string, number>;
+      };
+    }>('/api/ifrs9/portfolio/summary', { headers }),
+
+  portfolioGet: async (portfolioId: string, headers?: HeadersInit) =>
+    apiCall<{ success: boolean; portfolio: Record<string, unknown>; row: Record<string, unknown> }>(
+      `/api/ifrs9/portfolio/${encodeURIComponent(portfolioId)}`,
+      { headers }
+    ),
+
+  portfolioDelete: async (portfolioId: string, headers?: HeadersInit) =>
+    apiCall<{ success: boolean }>(`/api/ifrs9/portfolio/${encodeURIComponent(portfolioId)}`, {
+      method: 'DELETE',
+      headers,
+    }),
+
+  portfolioCalculationRuns: async (portfolioId: string, headers?: HeadersInit) =>
+    apiCall<{ success: boolean; runs: Record<string, unknown>[]; count: number }>(
+      `/api/ifrs9/portfolio/${encodeURIComponent(portfolioId)}/runs`,
+      { headers }
+    ),
 };
 
 export const macroSensitivityApi = {

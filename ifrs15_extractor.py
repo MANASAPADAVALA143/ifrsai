@@ -5,11 +5,89 @@ AI-powered extraction of revenue recognition terms using Claude API
 
 import anthropic
 import json
+import re
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from decimal import Decimal
 import os
 from pathlib import Path
+
+from claude_model_config import CLAUDE_MODEL
+
+
+def _field_confidence_schema(description: str) -> str:
+    return f"""{{
+      "value": {description},
+      "confidence": 0-100,
+      "source_text": "exact quote from contract",
+      "assumptions": "explanation or empty string"
+    }}"""
+
+
+UAE_SPA_JSON_SCHEMA = """
+{
+  "contract_identification": {
+    "spa_reference": FIELD,
+    "oqood_number": FIELD,
+    "rera_registration": FIELD,
+    "contract_date": FIELD
+  },
+  "property": {
+    "project_name": FIELD,
+    "unit_number": FIELD,
+    "unit_type": FIELD,
+    "floor_area_sqft": FIELD,
+    "floor_number": FIELD
+  },
+  "parties": {
+    "developer_name": FIELD,
+    "buyer_name": FIELD,
+    "buyer_eid": FIELD
+  },
+  "financial": {
+    "contract_value_aed": FIELD,
+    "booking_amount_aed": FIELD,
+    "handover_payment_aed": FIELD,
+    "vat_amount_aed": FIELD,
+    "payment_plan": {
+      "value": [
+        {
+          "label": "milestone description",
+          "amount_aed": number,
+          "pct": number or null,
+          "due_date": "YYYY-MM-DD or null",
+          "trigger": "booking|months|completion_pct|handover|other"
+        }
+      ],
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }
+  },
+  "construction_timeline": {
+    "construction_start_date": FIELD,
+    "expected_completion_date": FIELD,
+    "expected_handover_date": FIELD,
+    "current_completion_pct": FIELD
+  },
+  "ifrs15_specific": {
+    "performance_obligation": FIELD,
+    "revenue_recognition_method": FIELD,
+    "variable_consideration": FIELD,
+    "cancellation_terms": FIELD,
+    "penalty_clauses": FIELD,
+    "modification_clauses": FIELD
+  },
+  "validation": {
+    "missing_fields": { "value": [], "confidence": 100, "source_text": "N/A", "assumptions": "N/A" },
+    "low_confidence_fields": { "value": [], "confidence": 100, "source_text": "N/A", "assumptions": "N/A" },
+    "overall_confidence": { "value": 0-100, "confidence": 100, "source_text": "N/A", "assumptions": "N/A" }
+  }
+}
+""".replace(
+    "FIELD",
+    '{ "value": <type>, "confidence": 0-100, "source_text": "quote", "assumptions": "explanation" }',
+)
 
 
 class IFRS15ContractExtractor:
@@ -17,7 +95,215 @@ class IFRS15ContractExtractor:
     
     def __init__(self, api_key: str):
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = "claude-sonnet-4-20250514"
+        self.model = CLAUDE_MODEL
+
+    @staticmethod
+    def _parse_json_response(json_text: str) -> Dict:
+        """Parse Claude JSON output with light repair for truncated or fenced responses."""
+        attempts = [json_text.strip()]
+        stripped = attempts[0]
+        if stripped.startswith("```json"):
+            stripped = stripped[7:].lstrip()
+        elif stripped.startswith("```"):
+            stripped = stripped.split("\n", 1)[-1]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].rstrip()
+        attempts[0] = stripped.strip()
+        if "{" in stripped and "}" in stripped:
+            attempts.append(stripped[stripped.find("{") : stripped.rfind("}") + 1])
+
+        last_error: json.JSONDecodeError | None = None
+        for candidate in attempts:
+            if not candidate:
+                continue
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError as je:
+                last_error = je
+
+        msg = last_error.msg if last_error else "invalid JSON"
+        raise ValueError(f"AI returned invalid JSON (try again or use a clearer contract): {msg}") from last_error
+
+    @staticmethod
+    def _normalize_contract_text(text: str) -> str:
+        """Normalize Arabic-Indic numerals and collapse whitespace."""
+        normalized = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    @staticmethod
+    def _has_arabic_script(text: str) -> bool:
+        return bool(re.search(r"[\u0600-\u06FF]", text))
+
+    @staticmethod
+    def _unwrap_field(obj: Any) -> Any:
+        if isinstance(obj, dict) and "value" in obj:
+            return obj.get("value")
+        return obj
+
+    @staticmethod
+    def _field_confidence(obj: Any) -> Optional[int]:
+        if isinstance(obj, dict) and "confidence" in obj:
+            try:
+                return int(obj["confidence"])
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def compute_uae_spa_confidence_summary(self, data: Dict) -> Dict[str, Any]:
+        """Aggregate per-field confidence into overall score and low-confidence list."""
+        scores: List[int] = []
+        low: List[str] = []
+        paths = [
+            ("contract_identification.spa_reference", data.get("contract_identification", {}).get("spa_reference")),
+            ("contract_identification.oqood_number", data.get("contract_identification", {}).get("oqood_number")),
+            ("contract_identification.rera_registration", data.get("contract_identification", {}).get("rera_registration")),
+            ("contract_identification.contract_date", data.get("contract_identification", {}).get("contract_date")),
+            ("property.project_name", data.get("property", {}).get("project_name")),
+            ("property.unit_number", data.get("property", {}).get("unit_number")),
+            ("parties.buyer_name", data.get("parties", {}).get("buyer_name")),
+            ("parties.developer_name", data.get("parties", {}).get("developer_name")),
+            ("financial.contract_value_aed", data.get("financial", {}).get("contract_value_aed")),
+            ("financial.payment_plan", data.get("financial", {}).get("payment_plan")),
+            ("construction_timeline.expected_handover_date", data.get("construction_timeline", {}).get("expected_handover_date")),
+            ("ifrs15_specific.performance_obligation", data.get("ifrs15_specific", {}).get("performance_obligation")),
+        ]
+        for path, field in paths:
+            conf = self._field_confidence(field)
+            val = self._unwrap_field(field)
+            if val is None or val == "" or val == []:
+                continue
+            if conf is not None:
+                scores.append(conf)
+                if conf < 70:
+                    low.append(path.split(".")[-1])
+        overall = round(sum(scores) / len(scores)) if scores else 0
+        validation = data.setdefault("validation", {})
+        validation["low_confidence_fields"] = {
+            "value": low,
+            "confidence": 100,
+            "source_text": "N/A",
+            "assumptions": "Auto-computed from field confidence scores",
+        }
+        validation["overall_confidence"] = {
+            "value": overall,
+            "confidence": 100,
+            "source_text": "N/A",
+            "assumptions": f"Average of {len(scores)} extracted fields",
+        }
+        return {"overall_confidence": overall, "low_confidence_fields": low, "fields_scored": len(scores)}
+
+    def extract_uae_spa_terms(self, contract_text: str) -> Dict:
+        """
+        Extract UAE Sale & Purchase Agreement fields with per-field confidence
+        (IFRS 16-style structure for IFRS 15 real estate contracts).
+        """
+        text = self._normalize_contract_text(contract_text or "")
+        if not text:
+            raise ValueError("Contract text is empty")
+
+        max_chars = 120_000
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n\n[... contract text truncated for extraction ...]"
+
+        arabic_note = ""
+        if self._has_arabic_script(text):
+            arabic_note = """
+NOTE: Bilingual or Arabic UAE SPA detected. Extract from English section when present;
+otherwise use Arabic. Convert Arabic-Indic numerals (٠١٢٣) to Western digits in JSON values.
+Map: عقد البيع والشراء=SPA, سعر العقد=contract value, اسم المشتري=buyer, اسم المطور=developer,
+رقم الوحدة=unit, رقم تسجيل ريرا=RERA, خطة الدفع=payment plan, تاريخ التسليم=handover.
+"""
+
+        prompt = f"""You are an IFRS 15 revenue recognition expert specialising in UAE off-plan real estate SPAs.
+
+Extract all fields from this Sale & Purchase Agreement for IFRS 15 revenue recognition.
+{arabic_note}
+
+SPA / CONTRACT TEXT:
+{text}
+
+Return ONLY valid JSON matching this structure (every leaf field uses value/confidence/source_text/assumptions):
+
+{UAE_SPA_JSON_SCHEMA}
+
+CRITICAL UAE SPA RULES:
+1. spa_reference: SPA contract number / agreement reference on cover page.
+2. oqood_number: DLD Oqood registration (e.g. DLD-2024-OQ-48291). Also check "Oqood", "DLD registration".
+3. rera_registration: RERA project registration (e.g. RERA-DT2-2024-001). Required for Dubai off-plan.
+4. contract_value_aed: total sale price EXCLUDING VAT unless contract states VAT-inclusive total — note in assumptions.
+5. payment_plan: extract EVERY instalment with amount_aed; use trigger "completion_pct" for "on X% completion" milestones.
+6. booking_amount_aed: initial deposit / booking fee (often 10%).
+7. handover_payment_aed: final payment due on handover / completion.
+8. vat_amount_aed: UAE VAT at 5% if stated separately.
+9. cancellation_terms: cite UAE Law 8/2007 refund rules if mentioned.
+10. revenue_recognition_method: "over_time" for off-plan construction, "point_in_time" for completed units.
+11. performance_obligation: e.g. "Delivery of apartment unit at handover".
+12. Do NOT guess — use null value with low confidence if not found.
+13. Dates must be YYYY-MM-DD.
+14. currency amounts as numbers without commas or AED symbol.
+
+Begin extraction:"""
+
+        message = self.client.messages.create(
+            model=self.model,
+            max_tokens=8192,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        response_text = message.content[0].text
+        data = self._parse_json_response(response_text.strip())
+        summary = self.compute_uae_spa_confidence_summary(data)
+        data["extraction_metadata"] = {
+            "timestamp": datetime.now().isoformat(),
+            "model": self.model,
+            "tokens_used": message.usage.input_tokens + message.usage.output_tokens,
+            "extractor_version": "uae_spa_v1",
+            "language": "bilingual" if self._has_arabic_script(contract_text) else "english",
+            **summary,
+        }
+        return data
+
+    def validate_uae_spa_extraction(self, data: Dict) -> Dict:
+        """Validate UAE SPA extraction completeness for IFRS 15 real estate."""
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        ci = data.get("contract_identification") or {}
+        fin = data.get("financial") or {}
+        prop = data.get("property") or {}
+        parties = data.get("parties") or {}
+        tl = data.get("construction_timeline") or {}
+
+        if not self._unwrap_field(parties.get("buyer_name")):
+            errors.append("Missing buyer name")
+        if not self._unwrap_field(fin.get("contract_value_aed")):
+            errors.append("Missing contract value (AED)")
+        if not self._unwrap_field(ci.get("rera_registration")):
+            warnings.append("RERA registration not found — required for Dubai off-plan")
+        if not self._unwrap_field(prop.get("unit_number")):
+            warnings.append("Unit number not found")
+        plan = self._unwrap_field(fin.get("payment_plan"))
+        if not plan or not isinstance(plan, list) or len(plan) == 0:
+            warnings.append("Payment plan not extracted — manual entry required")
+
+        summary = data.get("extraction_metadata") or {}
+        overall = summary.get("overall_confidence") or self._unwrap_field(
+            (data.get("validation") or {}).get("overall_confidence")
+        )
+        if overall is not None and int(overall) < 50:
+            warnings.append(f"Low overall extraction confidence ({overall}%)")
+
+        return {
+            "is_valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "requires_review": len(errors) > 0 or len(warnings) > 0,
+            "error_count": len(errors),
+            "warning_count": len(warnings),
+            "overall_confidence": overall,
+        }
     
     def extract_contract_terms(self, contract_text: str) -> Dict:
         """
@@ -36,11 +322,15 @@ class IFRS15ContractExtractor:
         Returns:
             Dictionary with structured IFRS 15 data
         """
+        max_chars = 50_000
+        text = (contract_text or "").strip()
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n\n[... contract text truncated for extraction ...]"
         
         prompt = f"""You are an IFRS 15 revenue recognition expert. Analyze this contract and extract all relevant revenue accounting information.
 
 CONTRACT:
-{contract_text}
+{text}
 
 Extract the following in JSON format. For each element, provide confidence scores and source text.
 
@@ -173,7 +463,7 @@ Begin extraction:"""
 
         message = self.client.messages.create(
             model=self.model,
-            max_tokens=6000,
+            max_tokens=8192,
             temperature=0,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -184,10 +474,12 @@ Begin extraction:"""
         json_text = response_text.strip()
         if json_text.startswith("```json"):
             json_text = json_text[7:]
+        if json_text.startswith("```"):
+            json_text = json_text.split("\n", 1)[-1]
         if json_text.endswith("```"):
             json_text = json_text[:-3]
         
-        data = json.loads(json_text.strip())
+        data = self._parse_json_response(json_text.strip())
         
         # Add metadata
         data['extraction_metadata'] = {
@@ -244,64 +536,20 @@ Begin extraction:"""
             'warning_count': len(warnings)
         }
     
-    def extract_from_file(self, file_path: str) -> Dict:
+    def extract_from_file(self, file_path: str, contract_type: str = "generic") -> Dict:
         """
         Extract IFRS 15 terms from a file
         
         Args:
             file_path: Path to contract file (PDF, DOCX, TXT)
+            contract_type: "generic" for standard IFRS 15 5-step, "uae_spa" for UAE SPA
             
         Returns:
             Extracted contract data
         """
-        file_path = Path(file_path)
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-        
-        # Read file based on extension
-        if file_path.suffix.lower() == '.txt':
-            with open(file_path, 'r', encoding='utf-8') as f:
-                contract_text = f.read()
-        
-        elif file_path.suffix.lower() == '.pdf':
-            try:
-                from PyPDF2 import PdfReader
-                reader = PdfReader(str(file_path))
-                contract_text = ""
-                for page in reader.pages:
-                    contract_text += page.extract_text() + "\n"
-            except ImportError:
-                raise ImportError("PyPDF2 not installed. Run: pip install PyPDF2")
-        
-        elif file_path.suffix.lower() in ['.docx', '.doc']:
-            try:
-                from docx import Document
-                doc = Document(str(file_path))
-                contract_text = "\n".join([para.text for para in doc.paragraphs])
-            except ImportError:
-                raise ImportError("python-docx not installed. Run: pip install python-docx")
-        
-        elif file_path.suffix.lower() in ['.xlsx', '.xls']:
-            try:
-                import pandas as pd
-                excel_file = pd.ExcelFile(str(file_path))
-                contract_text = ""
-                for sheet_name in excel_file.sheet_names:
-                    contract_text += f"\n=== Sheet: {sheet_name} ===\n"
-                    df = pd.read_excel(excel_file, sheet_name=sheet_name)
-                    contract_text += " | ".join(str(col) for col in df.columns) + "\n"
-                    contract_text += "-" * 80 + "\n"
-                    for _, row in df.iterrows():
-                        row_text = " | ".join(str(val) if pd.notna(val) else "" for val in row.values)
-                        contract_text += row_text + "\n"
-                    contract_text += "\n"
-            except ImportError:
-                raise ImportError("pandas and openpyxl not installed. Run: pip install pandas openpyxl")
-        
-        else:
-            raise ValueError(f"Unsupported file type: {file_path.suffix}")
-        
+        contract_text = read_contract_file_to_text(file_path)
+        if (contract_type or "").strip().lower() in ("uae_spa", "spa", "realestate"):
+            return self.extract_uae_spa_terms(contract_text)
         return self.extract_contract_terms(contract_text)
     
     def save_extraction(self, data: Dict, output_path: str):
@@ -441,7 +689,13 @@ def read_contract_file_to_text(file_path: str) -> str:
                 df = pd.read_excel(excel_file, sheet_name=sheet_name)
                 contract_text += " | ".join(str(col) for col in df.columns) + "\n"
                 contract_text += "-" * 80 + "\n"
-                for _, row in df.iterrows():
+                max_rows = 200
+                for i, (_, row) in enumerate(df.iterrows()):
+                    if i >= max_rows:
+                        remaining = len(df) - max_rows
+                        if remaining > 0:
+                            contract_text += f"... ({remaining} more rows omitted)\n"
+                        break
                     row_text = " | ".join(str(val) if pd.notna(val) else "" for val in row.values)
                     contract_text += row_text + "\n"
                 contract_text += "\n"
@@ -552,7 +806,7 @@ If no non-standard clauses found:
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=2000,
             system=system_prompt,
             messages=[

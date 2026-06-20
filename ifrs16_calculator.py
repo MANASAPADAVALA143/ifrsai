@@ -26,6 +26,7 @@ class LeaseInput:
     annual_discount_rate: Decimal  # e.g. 0.085 for 8.5%
     non_lease_component: Decimal = Decimal('0')  # e.g. service/maintenance portion
     non_lease_description: str = ""  # e.g. "Building maintenance, security"
+    non_lease_additive: bool = False  # True when non-lease is on top of base rent (not embedded in monthly_payment)
     practical_expedient_elected: bool = False  # If True, don't separate — use full payment
     initial_direct_costs: Decimal = Decimal('0')  # Total; or computed from legal+brokerage+other
     escalation_rate: Decimal = Decimal('0')  # Annual, e.g. 0.05 for 5%
@@ -61,12 +62,13 @@ class IFRS16Calculator:
         """
         IFRS 16 §12-15: Return only the lease component of monthly payment.
         If practical expedient elected, return full monthly_payment.
-        If non_lease_component provided, subtract it.
-        Raises ValueError if non_lease_component >= monthly_payment.
+        If non_lease_additive is True, monthly_payment is already the lease component
+        and non_lease_component is tracked separately (not subtracted).
+        Otherwise non_lease_component is embedded in monthly_payment and subtracted.
         """
         if lease.practical_expedient_elected:
             return lease.monthly_payment
-        if lease.non_lease_component > 0:
+        if lease.non_lease_component > 0 and not getattr(lease, 'non_lease_additive', False):
             lease_payment = lease.monthly_payment - lease.non_lease_component
             if lease_payment <= 0:
                 raise ValueError(
@@ -190,31 +192,30 @@ class IFRS16Calculator:
     ) -> Decimal:
         """
         Update running monthly payment after CPI review and/or fixed escalation.
-        Preserves legacy timing: first fixed escalation at period > rent_free + 1
-        with (period - 1 - rent_free) % 12 == 0; CPI review on (period - rent_free) % freq == 0.
+
+        Annual fixed escalation applies at the start of periods 13, 25, 37…
+        (i.e. after each 12-month lease year), aligned with typical step-up clauses.
+        CPI index reviews use the same anniversary periods when indices are provided.
         """
         if period <= rent_free:
-            return payment
-        months_since_rf = period - rent_free
-        if months_since_rf <= 0:
             return payment
         freq = int(getattr(lease, 'cpi_adjustment_frequency_months', 12) or 12)
         er = lease.escalation_rate or Decimal('0')
         cpi_base = getattr(lease, 'cpi_index_base', Decimal('0')) or Decimal('0')
         cpi_cur = getattr(lease, 'cpi_index_current', Decimal('0')) or Decimal('0')
 
-        if months_since_rf % freq == 0 and cpi_base > 0 and cpi_cur > 0:
+        if period > 1 and (period - 1) % freq == 0 and cpi_base > 0 and cpi_cur > 0:
             base_lease_payment = self.get_lease_component_payment(lease)
             cpi_adjusted = self._get_cpi_adjusted_payment(
                 base_lease_payment,
                 cpi_base,
                 cpi_cur,
             )
-            escalation_cycles = months_since_rf // 12
+            escalation_cycles = (period - 1) // 12
             return (cpi_adjusted * ((Decimal('1') + er) ** escalation_cycles)).quantize(
                 self.precision, ROUND_HALF_UP
             )
-        if er > 0 and period > rent_free + 1 and (period - 1 - rent_free) % 12 == 0:
+        if er > 0 and period > 12 and (period - 1) % 12 == 0:
             return (payment * (Decimal('1') + er)).quantize(self.precision, ROUND_HALF_UP)
         return payment
 
@@ -344,22 +345,31 @@ class IFRS16Calculator:
 
             balance = closing
             current_date += relativedelta(months=1)
+            # Stop once liability is fully extinguished (IFRS 16 — no post-payoff rows)
+            if balance <= 0:
+                break
 
         return pd.DataFrame(schedule)
     
     def generate_journal_entries(
-        self, 
-        rou_asset: Decimal, 
+        self,
+        rou_asset: Decimal,
         lease_liability: Decimal,
         monthly_depreciation: Decimal,
         first_month_interest: Decimal,
         first_month_payment: Decimal,
         currency: str = "INR",
-        payment_type: str = "Arrears"
+        payment_type: str = "Arrears",
+        liability_split: Optional[Dict] = None,
+        initial_direct_costs: Decimal = Decimal('0'),
+        cash_incentive: Decimal = Decimal('0'),
     ) -> Dict:
         """
         Generate accounting journal entries for IFRS 16.
         For Advance: Month 1 has no interest — Dr Lease Liability, Cr Cash only.
+
+        Initial recognition separates lease liability into current / non-current and
+        credits Cash / Accounts Payable for initial direct costs paid separately (IFRS 16 para 24).
         """
         
         is_advance = (payment_type or "Arrears").strip().lower() == "advance"
@@ -409,44 +419,64 @@ class IFRS16Calculator:
                 }
             ]
         
+        split = liability_split or {}
+        current_ll = Decimal(str(split.get('current_portion', lease_liability)))
+        noncurrent_ll = Decimal(str(split.get('non_current_portion', Decimal('0'))))
+        if current_ll + noncurrent_ll == 0:
+            current_ll = lease_liability
+            noncurrent_ll = Decimal('0')
+
         initial_entries = [
             {
                 'account': 'Right-of-Use Asset',
                 'account_type': 'Non-Current Asset',
                 'dr': float(rou_asset),
                 'cr': 0,
-                'narration': 'Recognition of ROU asset'
+                'narration': 'Recognition of ROU asset (lease liability PV plus initial direct costs less incentives)',
             },
             {
-                'account': 'Lease Liability',
-                'account_type': 'Current & Non-Current Liability',
+                'account': 'Lease Liability (Current)',
+                'account_type': 'Current Liability',
                 'dr': 0,
-                'cr': float(lease_liability),
-                'narration': 'Recognition of lease liability at PV'
-            }
+                'cr': float(current_ll),
+                'narration': 'Current portion of lease liability at commencement',
+            },
+            {
+                'account': 'Lease Liability (Non-Current)',
+                'account_type': 'Non-Current Liability',
+                'dr': 0,
+                'cr': float(noncurrent_ll),
+                'narration': 'Non-current portion of lease liability at commencement',
+            },
         ]
         initial_total_dr = rou_asset
-        initial_total_cr = lease_liability
-        net_initial_cash = (rou_asset - lease_liability).quantize(self.precision, ROUND_HALF_UP)
-        if net_initial_cash > 0:
+        initial_total_cr = current_ll + noncurrent_ll
+        idc_note = None
+        if initial_direct_costs > 0:
             initial_entries.append({
-                'account': 'Cash/Bank',
-                'account_type': 'Current Asset',
+                'account': 'Cash / Accounts Payable',
+                'account_type': 'Current Asset / Liability',
                 'dr': 0,
-                'cr': float(net_initial_cash),
-                'narration': 'Net initial direct costs paid less cash lease incentives received'
+                'cr': float(initial_direct_costs),
+                'narration': (
+                    f'Initial direct costs of {format_currency_value(float(initial_direct_costs), currency)} '
+                    f'paid separately and capitalized to ROU asset per IFRS 16 para 24'
+                ),
             })
-            initial_total_cr += net_initial_cash
-        elif net_initial_cash < 0:
-            cash_received = abs(net_initial_cash)
+            initial_total_cr += initial_direct_costs
+            idc_note = (
+                f'Initial direct costs of {format_currency_value(float(initial_direct_costs), currency)} '
+                f'paid separately and capitalized to ROU asset per IFRS 16 para 24.'
+            )
+        if cash_incentive > 0:
             initial_entries.append({
                 'account': 'Cash/Bank',
                 'account_type': 'Current Asset',
-                'dr': float(cash_received),
+                'dr': float(cash_incentive),
                 'cr': 0,
-                'narration': 'Net cash lease incentives received in excess of initial direct costs'
+                'narration': 'Cash lease incentives received at commencement (deducted from ROU asset)',
             })
-            initial_total_dr += cash_received
+            initial_total_dr += cash_incentive
 
         return {
             'initial_recognition': {
@@ -454,7 +484,8 @@ class IFRS16Calculator:
                 'description': 'Initial recognition of lease under IFRS 16',
                 'entries': initial_entries,
                 'total_dr': float(initial_total_dr),
-                'total_cr': float(initial_total_cr)
+                'total_cr': float(initial_total_cr),
+                'idc_note': idc_note,
             },
             'monthly_depreciation': {
                 'description': 'Monthly depreciation expense (recurring entry)',
@@ -487,28 +518,88 @@ class IFRS16Calculator:
             }
         }
     
-    def generate_maturity_analysis(self, schedule: pd.DataFrame) -> Dict:
+    def generate_maturity_analysis(
+        self,
+        schedule: pd.DataFrame,
+        reporting_date: Optional[datetime] = None,
+    ) -> Dict:
         """
-        Generate future lease payment maturity analysis by year
-        Required for IFRS 16 disclosure notes
-        
-        Args:
-            schedule: Amortization schedule DataFrame
-            
-        Returns:
-            Dictionary with payments by year
+        Future undiscounted lease payments by maturity bucket (IFRS 16 para 58(b)).
+        Buckets are measured from the reporting date, not from lease commencement.
         """
-        
-        total = len(schedule)
-        return {
-            'Year_1': float(schedule.iloc[:min(12, total)]['Payment'].sum()),
-            'Year_2': float(schedule.iloc[12:min(24, total)]['Payment'].sum()) if total > 12 else 0.0,
-            'Year_3': float(schedule.iloc[24:min(36, total)]['Payment'].sum()) if total > 24 else 0.0,
-            'Year_4': float(schedule.iloc[36:min(48, total)]['Payment'].sum()) if total > 36 else 0.0,
-            'Year_5': float(schedule.iloc[48:min(60, total)]['Payment'].sum()) if total > 48 else 0.0,
-            'Thereafter': float(schedule.iloc[60:]['Payment'].sum()) if total > 60 else 0.0,
-            'Total': float(schedule['Payment'].sum())
-        }
+        if schedule is None or len(schedule) == 0:
+            return {
+                'Less than 1 year': 0.0,
+                '1 to 2 years': 0.0,
+                '2 to 3 years': 0.0,
+                '3 to 4 years': 0.0,
+                '4 to 5 years': 0.0,
+                'More than 5 years': 0.0,
+                'Total': 0.0,
+            }
+
+        report_dt = pd.Timestamp(reporting_date or datetime.now()).normalize()
+        sched = schedule.copy()
+        sched['Date_dt'] = pd.to_datetime(sched['Date'])
+
+        bucket_defs = [
+            ('Less than 1 year', 0, 1),
+            ('1 to 2 years', 1, 2),
+            ('2 to 3 years', 2, 3),
+            ('3 to 4 years', 3, 4),
+            ('4 to 5 years', 4, 5),
+            ('More than 5 years', 5, None),
+        ]
+        buckets: Dict[str, float] = {label: 0.0 for label, _, _ in bucket_defs}
+        buckets['Total'] = 0.0
+
+        future = sched[sched['Date_dt'] > report_dt]
+        source = future if len(future) > 0 else sched
+
+        for _, row in source.iterrows():
+            dt = row['Date_dt']
+            if len(future) > 0 and dt <= report_dt:
+                continue
+            payment = float(row.get('Payment', 0) or 0)
+            if payment <= 0:
+                continue
+            days = max(0, (dt - report_dt).days)
+            years = days / 365.25
+            for label, lo, hi in bucket_defs:
+                if hi is None:
+                    if years >= lo:
+                        buckets[label] += payment
+                        break
+                elif lo <= years < hi:
+                    buckets[label] += payment
+                    break
+            buckets['Total'] += payment
+
+        return buckets
+    
+    def _build_incentive_disclosure_note(
+        self,
+        rent_free: int,
+        cash_incentive: Decimal,
+        lease: LeaseInput,
+    ) -> Optional[str]:
+        """Rent-free and cash incentive disclosure aligned with lease inputs."""
+        parts: List[str] = []
+        if rent_free > 0:
+            parts.append(
+                f"The lease includes a rent-free period of {rent_free} month(s) commencing "
+                f"{lease.commencement_date.strftime('%Y-%m-%d')}. "
+                f"The rent-free period is reflected as zero lease payments in those months."
+            )
+        elif cash_incentive <= 0:
+            parts.append("No rent-free period applies.")
+        if cash_incentive > 0:
+            parts.append(
+                f"Cash lease incentives of {format_currency_value(float(cash_incentive), str(lease.currency))} "
+                f"have been deducted from the right-of-use asset at commencement in accordance with "
+                f"IFRS 16 paragraph 24."
+            )
+        return "\n".join(parts) if parts else None
     
     def calculate_current_vs_noncurrent(
         self, 
@@ -516,35 +607,58 @@ class IFRS16Calculator:
         reporting_date: datetime
     ) -> Dict:
         """
-        Split lease liability into current and non-current portions
-        
+        Split lease liability into current and non-current portions (IAS 1 / IFRS 16).
+
+        Current = principal portion of lease payments due within 12 months after reporting date.
+        Non-current = closing liability at reporting date minus current portion.
+
         Args:
             schedule: Amortization schedule
-            reporting_date: Date for balance sheet split
-            
+            reporting_date: Balance sheet reporting date
+
         Returns:
             Dictionary with current and non-current portions
         """
-        
         cutoff_date = reporting_date + relativedelta(months=12)
-        
-        schedule['Date_dt'] = pd.to_datetime(schedule['Date'])
-        
-        current = schedule[schedule['Date_dt'] <= cutoff_date]['Closing_Balance'].iloc[-1] \
-                  if len(schedule[schedule['Date_dt'] <= cutoff_date]) > 0 else 0
-        
-        total_liability = schedule.iloc[0]['Opening_Balance']
-        noncurrent = total_liability - current
-        
+
+        sched = schedule.copy()
+        sched['Date_dt'] = pd.to_datetime(sched['Date'])
+        reporting_dt = pd.Timestamp(reporting_date).normalize()
+        cutoff_dt = pd.Timestamp(cutoff_date).normalize()
+
+        on_or_before = sched[sched['Date_dt'] <= reporting_dt]
+        first_dt = sched['Date_dt'].iloc[0].normalize()
+
+        if len(on_or_before) == 0 or reporting_dt <= first_dt:
+            total_liability = float(sched.iloc[0]['Opening_Balance'])
+        else:
+            total_liability = float(on_or_before.iloc[-1]['Closing_Balance'])
+
+        # IFRS 16 / IAS 1: current liability = principal repayments (not gross cash payments)
+        # due within 12 months after the reporting date.
+        due_after = sched[(sched['Date_dt'] > reporting_dt) & (sched['Date_dt'] <= cutoff_dt)]
+        current = float(due_after['Principal'].sum()) if len(due_after) > 0 else 0.0
+
+        # At commencement: current = principal due in first 12 payment periods
+        if reporting_dt <= first_dt:
+            current = float(sched.head(min(12, len(sched)))['Principal'].sum())
+            total_liability = float(sched.iloc[0]['Opening_Balance'])
+
+        noncurrent = max(0.0, total_liability - current)
+
         return {
-            'current_portion': float(current),
-            'non_current_portion': float(max(0, noncurrent)),
-            'total_liability': float(total_liability),
+            'current_portion': current,
+            'non_current_portion': noncurrent,
+            'total_liability': total_liability,
             'reporting_date': reporting_date.strftime('%Y-%m-%d'),
             'cutoff_date': cutoff_date.strftime('%Y-%m-%d')
         }
     
-    def calculate_full_ifrs16(self, lease: LeaseInput) -> Dict:
+    def calculate_full_ifrs16(
+        self,
+        lease: LeaseInput,
+        reporting_date: Optional[datetime] = None,
+    ) -> Dict:
         """
         Complete IFRS 16 calculation - main entry point
         
@@ -605,29 +719,44 @@ class IFRS16Calculator:
         # Step 6: Calculate Total Interest over lease term
         total_interest = schedule['Interest'].sum()
         
-        # Step 7: Generate Journal Entries
+        # Step 7: Current vs non-current (principal repayments within 12 months — IFRS 16 / IAS 1)
+        liability_split_at_commencement = self.calculate_current_vs_noncurrent(
+            schedule, lease.commencement_date
+        )
+        liability_split = liability_split_at_commencement
+        liability_split_at_reporting = None
+        if reporting_date is not None:
+            liability_split_at_reporting = self.calculate_current_vs_noncurrent(
+                schedule, reporting_date
+            )
+
+        # Step 8: Generate Journal Entries (after split — separate IDC credit line)
         first_month = schedule.iloc[0]
+        total_idc_for_je = (
+            lease.legal_fees + lease.brokerage_fees + lease.other_initial_direct_costs
+        ) or lease.initial_direct_costs
         journal_entries = self.generate_journal_entries(
-            rou_asset, 
-            lease_liability, 
+            rou_asset,
+            lease_liability,
             monthly_depreciation,
             Decimal(str(first_month['Interest'])),
             Decimal(str(first_month['Payment'])),
             lease.currency,
-            lease.payment_type
+            lease.payment_type,
+            liability_split=liability_split_at_commencement,
+            initial_direct_costs=total_idc_for_je,
+            cash_incentive=cash_incentive,
         )
-        
-        # Step 8: Generate Maturity Analysis
-        maturity = self.generate_maturity_analysis(schedule)
-        
-        # Step 9: Calculate Year 1 P&L Impact
+
+        # Step 9: Maturity analysis from reporting date (IFRS 16 para 58(b))
+        maturity_report_dt = reporting_date or lease.commencement_date
+        maturity = self.generate_maturity_analysis(schedule, maturity_report_dt)
+
+        # Step 10: Calculate Year 1 P&L Impact
         year_1_data = schedule.head(min(12, len(schedule)))
         year_1_interest = year_1_data['Interest'].sum()
         year_1_depreciation = float(monthly_depreciation) * min(12, len(schedule))
         year_1_payments = year_1_data['Payment'].sum()
-        
-        # Step 10: Calculate current vs non-current split
-        liability_split = self.calculate_current_vs_noncurrent(schedule, lease.commencement_date)
         
         # Step 11: Calculate total cost of lease
         total_payments = schedule['Payment'].sum()
@@ -649,6 +778,8 @@ class IFRS16Calculator:
             'journal_entries': journal_entries,
             'maturity_analysis': maturity,
             'liability_split': liability_split,
+            'liability_split_at_commencement': liability_split_at_commencement,
+            'liability_split_at_reporting': liability_split_at_reporting,
             'year_1_impact': {
                 'interest_expense': float(year_1_interest),
                 'depreciation_expense': float(year_1_depreciation),
@@ -669,7 +800,10 @@ class IFRS16Calculator:
                 'lessee': lease.lessee_name,
                 'lessor': lease.lessor_name,
                 'commencement': lease.commencement_date.strftime('%Y-%m-%d'),
-                'end_date': (lease.commencement_date + relativedelta(months=lease.lease_term_months)).strftime('%Y-%m-%d'),
+                'end_date': (
+                    lease.commencement_date
+                    + relativedelta(months=lease.lease_term_months, days=-1)
+                ).strftime('%Y-%m-%d'),
                 'term_months': lease.lease_term_months,
                 'discount_rate_pct': float(lease.annual_discount_rate * 100),
                 'currency': lease.currency
@@ -677,7 +811,19 @@ class IFRS16Calculator:
             'calculation_metadata': {
                 'calculation_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'calculator_version': '1.0',
-                'standard': 'IFRS 16'
+                'standard': 'IFRS 16',
+                'escalation_applied': bool((lease.escalation_rate or Decimal('0')) > 0),
+                'escalation_rate_pct': float((lease.escalation_rate or Decimal('0')) * 100),
+                'cpi_applied': bool(
+                    (getattr(lease, 'cpi_index_base', Decimal('0')) or Decimal('0')) > 0
+                    and (getattr(lease, 'cpi_index_current', Decimal('0')) or Decimal('0')) > 0
+                ),
+                'cpi_index_base': float(getattr(lease, 'cpi_index_base', 0) or 0),
+                'cpi_index_current': float(getattr(lease, 'cpi_index_current', 0) or 0),
+                'cpi_adjustment_frequency_months': int(
+                    getattr(lease, 'cpi_adjustment_frequency_months', 12) or 12
+                ),
+                'rent_free_months': int(rent_free),
             },
             'rou_build_up': {
                 'pv_lease_payments': float(lease_liability),
@@ -703,7 +849,11 @@ class IFRS16Calculator:
                 'total_lease_liability': float(lease_liability),
             },
             'component_analysis': {
-                'total_monthly_payment': float(lease.monthly_payment),
+                'total_monthly_payment': float(
+                    lease.monthly_payment + lease.non_lease_component
+                    if getattr(lease, 'non_lease_additive', False) and lease.non_lease_component > 0
+                    else lease.monthly_payment
+                ),
                 'lease_component': float(effective_payment),
                 'non_lease_component': float(lease.non_lease_component),
                 'non_lease_description': lease.non_lease_description,
@@ -718,13 +868,8 @@ class IFRS16Calculator:
                 if pv_rvg > 0 and rvg_guaranteed_by == 'lessee'
                 else None
             ),
-            'incentive_disclosure_note': (
-                f"The lease includes a rent-free period of {rent_free} months commencing {lease.commencement_date.strftime('%Y-%m-%d')}. "
-                f"The rent-free period is reflected as zero lease payments in those months. "
-                f"Cash lease incentives of {format_currency_value(float(cash_incentive), str(lease.currency))} have been deducted from the right-of-use asset at commencement "
-                f"in accordance with IFRS 16 paragraph 24."
-                if rent_free > 0 or cash_incentive > 0
-                else None
+            'incentive_disclosure_note': self._build_incentive_disclosure_note(
+                rent_free, cash_incentive, lease
             ),
         }
     

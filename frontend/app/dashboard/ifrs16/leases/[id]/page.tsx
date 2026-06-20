@@ -9,7 +9,6 @@ import {
   Save,
   Download,
   Trash2,
-  Upload,
   Loader2,
   FileText,
   DollarSign,
@@ -18,7 +17,6 @@ import {
   BarChart3,
   CheckCircle,
   ChevronDown,
-  ChevronUp,
   Plus,
   X,
   FileCheck,
@@ -37,12 +35,31 @@ import {
   scheduleMismatchStoredInputs,
   deleteLeaseFromRepository,
   buildLeaseEntryFromForm,
+  getLeaseRepositoryFirmId,
 } from '@/lib/lease-repository';
+import FinReportAIPostButton from '@/components/ifrs16/FinReportAIPostButton';
 import {
   formatLeaseMoney,
   getDefaultIfrs16Country,
   getDefaultIfrs16Currency,
 } from '@/lib/ifrs16-currency';
+import {
+  normalizeAnnualRate,
+  getIbrTypicalRangeHint,
+  getIbrRequiredMessage,
+  annualDecimalToPercentDisplay,
+} from '@/lib/ifrs16-rates';
+import {
+  financialInputsFingerprint,
+  resultsMatchFinancialInputs,
+} from '@/lib/ifrs16-calc-stale';
+import {
+  buildIfrs16CalculatePayload,
+  formatIdcReviewLine,
+  syncFormEscalationFromResults,
+} from '@/lib/ifrs16-calc-payload';
+import { buildMaturityBuckets, computeLiabilitySplitFromSchedule, MATURITY_BUCKET_LABELS } from '@/lib/ifrs16-liability-split';
+import { trimScheduleAtPayoff } from '@/lib/reports-utils';
 import Link from 'next/link';
 import { useRouter, useParams } from 'next/navigation';
 import toast from 'react-hot-toast';
@@ -50,6 +67,22 @@ import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, R
 import { ModificationAIAdvisor } from './ModificationAIAdvisor';
 import { CpiRemeasurementPanel } from '@/components/ifrs16/CpiRemeasurementPanel';
 import { ComponentSplitWizard } from '@/components/ifrs16/ComponentSplitWizard';
+import { ContractDetailsTab } from '@/components/ifrs16/ContractDetailsTab';
+import { DescriptionTermsTab } from '@/components/ifrs16/DescriptionTermsTab';
+import { FinancialManagementTab, useFinancialSym } from '@/components/ifrs16/FinancialManagementTab';
+import { AssetsLocationsTab } from '@/components/ifrs16/AssetsLocationsTab';
+import {
+  parseBulkSpreadsheetFile,
+  countReadyBulkRows,
+  bulkRowToFormExtraction,
+} from '@/lib/ifrs16-bulk-parse';
+import {
+  buildLeaseExtractionResult,
+  isArabicExtractionError,
+  type ExtractionConfidenceMap,
+} from '@/lib/ifrs16-lease-extraction';
+import { LeasePdfUploadBar } from '@/components/ifrs16/LeasePdfUploadBar';
+import { FieldLabelWithExtraction } from '@/components/ifrs16/FieldLabelWithExtraction';
 
 const TAB_IDS = ['contract', 'financial', 'modifications', 'assets', 'schedules', 'disclosures', 'review'] as const;
 const TABS: { id: typeof TAB_IDS[number]; label: string; icon: any }[] = [
@@ -62,8 +95,6 @@ const TABS: { id: typeof TAB_IDS[number]; label: string; icon: any }[] = [
   { id: 'review', label: 'Review & Calculate', icon: CheckCircle },
 ];
 
-const TRANSACTION_TYPES = ['Lessee', 'Lessor', 'Sale & Leaseback'];
-const LEASE_STATUS_OPTIONS = ['Active', 'Draft', 'Under Review', 'Terminated'];
 const PAYMENT_FREQ = ['Monthly', 'Quarterly', 'Semi-Annual', 'Annual'];
 const PAYMENT_TYPES = ['Advance', 'Arrears'];
 const CURRENCIES = ['INR', 'USD', 'AED', 'GBP', 'EUR', 'SGD'];
@@ -106,51 +137,8 @@ function getPriorLLFromSchedule(schedule: any[], scheduleRowFn: (r: any) => any,
   return Number(last.closing ?? 0);
 }
 
-const inputClass = 'w-full px-4 py-2.5 bg-white border border-[#e2e8f0] rounded-lg focus:ring-2 focus:ring-[#f97316]/30 focus:border-[#f97316] text-[#1e293b] font-mono';
-const labelClass = 'block text-xs font-medium text-[#64748b] uppercase tracking-wide mb-1.5';
-
-function getVal(obj: any): any {
-  if (obj == null) return null;
-  if (typeof obj === 'object' && 'value' in obj) return obj.value;
-  return obj;
-}
-
-function flattenExtraction(data: any): Record<string, any> {
-  if (!data) return {};
-  const startDateRaw = getVal(data?.dates?.commencement_date);
-  const endDateRaw = getVal(data?.dates?.end_date);
-  const startDate = startDateRaw != null ? String(startDateRaw).slice(0, 10) : '';
-  const endDate = endDateRaw != null ? String(endDateRaw).slice(0, 10) : '';
-  const discountVal = getVal(data?.discount_rate?.stated_rate);
-  const discountRate = discountVal == null ? '' : (Number(discountVal) > 1 ? String(Number(discountVal)) : String(Number(discountVal) * 100));
-  return {
-    title: getVal(data?.basic_info?.asset_description) ?? '',
-    assetDescription: getVal(data?.basic_info?.asset_description) ?? '',
-    lessee: getVal(data?.basic_info?.lessee_name) ?? '',
-    lessor: getVal(data?.basic_info?.lessor_name) ?? '',
-    leaseType: getVal(data?.basic_info?.lease_type) ?? '',
-    startDate,
-    endDate,
-    lease_term_months: getVal(data?.dates?.lease_term_months) ?? '',
-    baseRentAmount: getVal(data?.payments?.monthly_amount) ?? '',
-    currency: getVal(data?.payments?.currency) ?? getDefaultIfrs16Currency(),
-    paymentFrequency: getVal(data?.payments?.payment_frequency) ?? 'Monthly',
-    paymentType: getVal(data?.payments?.payment_type) ?? 'Arrears',
-    discountRate,
-    initialDirectCosts: getVal(data?.initial_costs?.total) ?? '',
-    leaseIncentives: getVal(data?.initial_costs?.incentives) ?? '',
-    renewalOptions: getVal(data?.options?.renewal_options) ?? '',
-    terminationClauses: getVal(data?.options?.termination_clause) ?? '',
-    description: getVal(data?.basic_info?.asset_description) ?? '',
-    country: getVal((data?.basic_info as any)?.country) || getVal((data as any)?.location?.country) || 'India',
-    city: getVal((data?.basic_info as any)?.city) || getVal((data as any)?.location?.city) || '',
-    location: getVal((data?.basic_info as any)?.location) || getVal((data?.basic_info as any)?.premises) || getVal((data as any)?.location?.address) || '',
-  };
-}
-
-function countExtracted(flat: Record<string, any>): number {
-  return Object.values(flat).filter((v) => v !== '' && v != null && v !== undefined).length;
-}
+const inputClass = 'w-full text-sm px-3 py-2 border border-gray-200 rounded-lg bg-white text-gray-900 placeholder-gray-400 focus:outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-100 transition-colors';
+const labelClass = 'block text-[11px] font-semibold text-gray-600 uppercase tracking-wide mb-1';
 
 const defaultFormState = (): Record<string, any> => {
   const defaultCurrency = getDefaultIfrs16Currency();
@@ -178,6 +166,11 @@ const defaultFormState = (): Record<string, any> => {
   description: '',
   terminationClauses: '',
   renewalOptions: '',
+  restorationObligations: '',
+  reraRegistrationNo: '',
+  emirate: 'Dubai',
+  areaDistrict: '',
+  freeZone: 'Not applicable',
   lessorDetails: {} as Record<string, string>,
   lesseeDetails: {} as Record<string, string>,
   legalDetails: {} as Record<string, string>,
@@ -190,6 +183,7 @@ const defaultFormState = (): Record<string, any> => {
   initialDirectCosts: '0',
   nonLeaseComponent: '0',
   nonLeaseDescription: '',
+  nonLeaseAdditive: false,
   practicalExpedientElected: false,
   legalFees: '0',
   brokerageFees: '0',
@@ -273,6 +267,11 @@ function leaseToForm(lease: any): ReturnType<typeof defaultFormState> {
   form.description = lease.description || '';
   form.terminationClauses = lease.termination_clauses || '';
   form.renewalOptions = lease.renewal_options || '';
+  form.restorationObligations = lease.restoration_obligations || '';
+  form.reraRegistrationNo = lease.rera_registration_no || '';
+  form.emirate = lease.emirate || 'Dubai';
+  form.areaDistrict = lease.area_district || '';
+  form.freeZone = lease.free_zone || 'Not applicable';
   form.lessorDetails = lease.lessor_details || {};
   form.lesseeDetails = lease.lessee_details || {};
   form.legalDetails = lease.legal_details || {};
@@ -282,6 +281,7 @@ function leaseToForm(lease: any): ReturnType<typeof defaultFormState> {
   form.initialDirectCosts = lease.initial_direct_costs != null ? String(lease.initial_direct_costs) : '0';
   form.nonLeaseComponent = (lease as any).non_lease_component != null ? String((lease as any).non_lease_component) : '0';
   form.nonLeaseDescription = (lease as any).non_lease_description ?? '';
+  form.nonLeaseAdditive = Boolean((lease as any).non_lease_additive);
   form.practicalExpedientElected = Boolean((lease as any).practical_expedient_elected ?? false);
   form.legalFees = (lease as any).legal_fees != null ? String((lease as any).legal_fees) : '0';
   form.brokerageFees = (lease as any).brokerage_fees != null ? String((lease as any).brokerage_fees) : '0';
@@ -303,7 +303,7 @@ function leaseToForm(lease: any): ReturnType<typeof defaultFormState> {
   form.costCenterAllocation = (lease.cost_centers || []).reduce((acc: any, c: any) => ({ ...acc, [c.name || c]: c.percent ?? 0 }), {});
   form.contractReference = lease.contract_reference || '';
   form.brand = lease.brand || '';
-  form.country = lease.country || 'India';
+  form.country = lease.country || getDefaultIfrs16Country();
   form.city = lease.city || '';
   form.location = lease.location || '';
   form.floorUnit = lease.floor_unit || '';
@@ -541,14 +541,19 @@ export default function LeaseDetailTabbedPage() {
   const isNew = id === 'new';
 
   const [form, setForm] = useState(defaultFormState);
+  const financialSym = useFinancialSym(form);
   const [activeTab, setActiveTab] = useState<typeof TAB_IDS[number]>('contract');
   const [dirtyTabs, setDirtyTabs] = useState<Set<string>>(new Set());
   const [calcResults, setCalcResults] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
-  const [leasePasteText, setLeasePasteText] = useState('');
-  const [contractIntakeTab, setContractIntakeTab] = useState<'upload' | 'paste'>('upload');
+  const [uploadingSeconds, setUploadingSeconds] = useState(0);
   const [extractionBanner, setExtractionBanner] = useState<string | null>(null);
   const [extractedTabs, setExtractedTabs] = useState<Set<string>>(new Set());
+  const [extractedConfidences, setExtractedConfidences] = useState<ExtractionConfidenceMap>({});
+  const [extractionSummary, setExtractionSummary] = useState<{
+    fieldCount: number;
+    avgConfidence: number;
+  } | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [ibrError, setIbrError] = useState<string | null>(null);
   const [ibrSuggestion, setIbrSuggestion] = useState<{
@@ -560,7 +565,6 @@ export default function LeaseDetailTabbedPage() {
   } | null>(null);
   const [ibrLoading, setIbrLoading] = useState(false);
   const ibrInputRef = useRef<HTMLInputElement>(null);
-  const [aiBarOpen, setAiBarOpen] = useState(true);
   const [costCenterInput, setCostCenterInput] = useState('');
   const [isCalculating, setIsCalculating] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -595,11 +599,13 @@ export default function LeaseDetailTabbedPage() {
     impairment_loss: 'Impairment Loss (ROU)',
     acc_impairment_rou: 'Accumulated Impairment (ROU)',
     gain_loss_termination: 'Gain/(Loss) on Termination',
+    idc_cash_ap: 'Cash / Accounts Payable',
   });
   const [auditTrail, setAuditTrail] = useState<{ id: string; dateTime: string; user: string; action: string; fieldChanged?: string; oldValue?: string; newValue?: string; ip?: string }[]>(() => []);
   const [finaliseModalOpen, setFinaliseModalOpen] = useState(false);
   const [versionHistoryModalOpen, setVersionHistoryModalOpen] = useState(false);
   const [lastCalculatedAt, setLastCalculatedAt] = useState<string | null>(null);
+  const [lastCalcFingerprint, setLastCalcFingerprint] = useState<string | null>(null);
   /** Raw extractor JSON from upload-contract (plus optional persisted `contract_data` on saved leases). */
   const [contractData, setContractData] = useState<Record<string, unknown> | null>(null);
 
@@ -639,7 +645,9 @@ export default function LeaseDetailTabbedPage() {
     [form.renewalOptions, form.terminationClauses, form.description, form.escalationType, form.escalationValue]
   );
   const hasResults = !!calcResults || !!existingLease?.results;
-  const schedule = (calcResults?.amortization_schedule ?? existingLease?.results?.amortization_schedule ?? []) as any[];
+  const schedule = trimScheduleAtPayoff(
+    (calcResults?.amortization_schedule ?? existingLease?.results?.amortization_schedule ?? []) as any[]
+  );
   const excelFileId = calcResults?.excel_file_id ?? existingLease?.excel_file_id;
 
   // Backend returns PascalCase (Opening_Balance, Payment, Date, etc.); support both
@@ -801,7 +809,23 @@ function getReportingDateForFY(fy: string): Date {
       const loaded = leaseToForm(existingLease);
       setForm(loaded);
       setContractData((existingLease as { contract_data?: Record<string, unknown> }).contract_data ?? null);
-      if (existingLease.results && !calcResults) setCalcResults(existingLease.results);
+      const storedDisc = (existingLease.results as { disclosure_data?: { discount_rate_pct?: number } })?.disclosure_data
+        ?.discount_rate_pct;
+      const formDisc = parseFloat(String(loaded.discountRate || ''));
+      const ibrAligned =
+        storedDisc == null ||
+        !Number.isFinite(formDisc) ||
+        Math.abs(storedDisc - formDisc) <= 0.05;
+      if (existingLease.results && !calcResults) {
+        setCalcResults(existingLease.results);
+        setLastCalcFingerprint(ibrAligned ? financialInputsFingerprint(loaded) : null);
+      }
+      if (!ibrAligned) {
+        toast(
+          'IBR on screen differs from the last calculation. Click Calculate IFRS 16 to remeasure with the current rate.',
+          { icon: '⚠️', duration: 9000 }
+        );
+      }
       const sched = (existingLease.results as { amortization_schedule?: unknown })?.amortization_schedule;
       if (
         scheduleMismatchStoredInputs(sched, {
@@ -832,101 +856,60 @@ function getReportingDateForFY(fy: string): Date {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
+  useEffect(() => {
+    if (!uploading) {
+      setUploadingSeconds(0);
+      return;
+    }
+    const t0 = Date.now();
+    const tick = window.setInterval(() => {
+      setUploadingSeconds(Math.floor((Date.now() - t0) / 1000));
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [uploading]);
+
   const markDirty = useCallback((tab: string) => {
     setDirtyTabs((s) => new Set(s).add(tab));
   }, []);
 
+  const clearExtractedField = useCallback((field: string) => {
+    setExtractedConfidences((prev) => {
+      if (!(field in prev)) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }, []);
+
   const applyExtractionFromRaw = useCallback((raw: unknown) => {
-    const extractedBlob = (raw as { extracted_data?: unknown })?.extracted_data ?? raw;
-    setContractData(
-      extractedBlob != null && typeof extractedBlob === 'object' && !Array.isArray(extractedBlob)
-        ? { ...(extractedBlob as Record<string, unknown>) }
-        : null
-    );
-    const flat = flattenExtraction(raw);
-    const result: Record<string, any> = { ...flat };
-    if (raw && typeof raw === 'object') {
-      const top = raw as Record<string, any>;
-      if (top.start_date != null) result.startDate = result.startDate ?? String(top.start_date).slice(0, 10);
-      if (top.end_date != null) result.endDate = result.endDate ?? String(top.end_date).slice(0, 10);
-      if (top.commencement_date != null) result.startDate = result.startDate ?? String(top.commencement_date).slice(0, 10);
-      if (top.monthly_payment != null) result.baseRentAmount = result.baseRentAmount ?? String(top.monthly_payment);
-      if (top.base_rent_amount != null) result.baseRentAmount = result.baseRentAmount ?? String(top.base_rent_amount);
-      if (top.discount_rate != null) result.discountRate = result.discountRate ?? String(top.discount_rate);
-      if (top.ibr != null) result.discountRate = result.discountRate ?? String(top.ibr);
-      if (top.asset_description != null) result.assetDescription = result.assetDescription ?? String(top.asset_description);
-      if (top.title != null) result.title = result.title ?? String(top.title);
-      if (top.lessor != null) result.lessor = result.lessor ?? String(top.lessor);
-      if (top.lessor_name != null) result.lessor = result.lessor ?? String(top.lessor_name);
-      if (top.lessee != null) result.lessee = result.lessee ?? String(top.lessee);
-      if (top.lessee_name != null) result.lessee = result.lessee ?? String(top.lessee_name);
-      if (top.currency != null) result.currency = result.currency ?? String(top.currency);
-      if (top.payment_frequency != null) result.paymentFrequency = result.paymentFrequency ?? String(top.payment_frequency);
-      if (top.payment_type != null) result.paymentType = result.paymentType ?? String(top.payment_type);
-      if (top.lease_type != null) result.leaseType = result.leaseType ?? String(top.lease_type);
-      if (top.asset_type != null) result.leaseType = result.leaseType ?? String(top.asset_type);
-      if (top.country != null) result.country = result.country ?? String(top.country);
-      if (top.city != null) result.city = result.city ?? String(top.city);
-      if (top.location != null) result.location = result.location ?? String(top.location);
-      if (top.address != null) result.location = result.location ?? String(top.address);
-      if (top.brand != null) result.brand = result.brand ?? String(top.brand);
-      if (top.residual_value != null) result.residualValue = result.residualValue ?? String(top.residual_value);
-      if (top.transaction_type != null) result.transactionType = result.transactionType ?? String(top.transaction_type);
-      if (top.description != null) result.description = result.description ?? String(top.description);
-      if (top.initial_direct_costs != null) result.initialDirectCosts = result.initialDirectCosts ?? String(top.initial_direct_costs);
-      if (top.lease_incentives != null) result.leaseIncentives = result.leaseIncentives ?? String(top.lease_incentives);
-      if (top.escalation_type != null) result.escalationType = result.escalationType ?? String(top.escalation_type);
-      if (top.escalation_value != null) result.escalationValue = result.escalationValue ?? String(top.escalation_value);
-    }
-    const tabsWithData = new Set<string>();
-    if (result.title || result.startDate || result.endDate || result.lessee || result.lessor || result.leaseType || result.lease_term_months || result.renewalOptions || result.terminationClauses || result.description || result.residualValue || result.transactionType) tabsWithData.add('contract');
-    if (result.baseRentAmount || result.currency || result.paymentFrequency || result.discountRate || result.initialDirectCosts || result.leaseIncentives || result.paymentType || result.escalationType || result.escalationValue) tabsWithData.add('financial');
-    if (result.assetDescription || result.leaseType || result.country || result.city || result.location || result.brand) tabsWithData.add('assets');
-    if (result.renewalOptions || result.terminationClauses) tabsWithData.add('modifications');
+    const { formPatch, confidences, tabsWithData, contractData, fieldCount, avgConfidence } =
+      buildLeaseExtractionResult(raw);
+
+    setContractData(contractData);
+    setExtractedConfidences(confidences);
+    setExtractionSummary(fieldCount > 0 ? { fieldCount, avgConfidence } : null);
+    setExtractedTabs(tabsWithData);
     setForm((p) => ({
       ...p,
-      title: result.title ?? result.assetDescription ?? p.title,
-      startDate: result.startDate ?? p.startDate,
-      endDate: result.endDate ?? p.endDate,
-      leaseStatus: 'Active',
-      transactionType: result.transactionType ?? p.transactionType,
-      description: result.description ?? p.description,
-      residualValue: result.residualValue ?? p.residualValue,
-      lessor: result.lessor ?? result.lessor_name ?? p.lessor,
-      lessee: result.lessee ?? result.lessee_name ?? p.lessee,
-      renewalOptions: result.renewalOptions ?? p.renewalOptions,
-      terminationClauses: result.terminationClauses ?? p.terminationClauses,
-      lease_term_months: result.lease_term_months ? String(result.lease_term_months) : p.lease_term_months,
-      baseRentAmount: result.baseRentAmount ?? result.monthly_payment ?? p.baseRentAmount,
-      discountRate: result.discountRate ?? result.ibr ?? p.discountRate,
-      currency: result.currency ?? p.currency,
-      paymentFrequency: result.paymentFrequency ?? p.paymentFrequency,
-      paymentType: result.paymentType ?? p.paymentType,
-      initialDirectCosts: result.initialDirectCosts ?? p.initialDirectCosts,
-      legalFees: result.legalFees ?? p.legalFees ?? '0',
-      brokerageFees: result.brokerageFees ?? p.brokerageFees ?? '0',
-      otherInitialDirectCosts: result.otherInitialDirectCosts ?? p.otherInitialDirectCosts ?? '0',
-      initialDirectCostsDescription: result.initialDirectCostsDescription ?? p.initialDirectCostsDescription ?? '',
-      leaseIncentives: result.leaseIncentives ?? p.leaseIncentives,
-      rentFreeMonths: result.rentFreeMonths ?? p.rentFreeMonths ?? 0,
-      cashIncentive: result.cashIncentive ?? result.leaseIncentives ?? p.cashIncentive ?? p.leaseIncentives,
-      leaseIncentiveDescription: result.leaseIncentiveDescription ?? p.leaseIncentiveDescription,
-      rvgAmount: result.rvgAmount ?? p.rvgAmount ?? '0',
-      rvgGuaranteedBy: result.rvgGuaranteedBy ?? p.rvgGuaranteedBy ?? 'None',
-      rvgExpectedPayment: result.rvgExpectedPayment ?? p.rvgExpectedPayment ?? '0',
-      escalationType: result.escalationType ?? p.escalationType,
-      escalationValue: result.escalationValue ?? p.escalationValue,
-      leaseType: result.leaseType ?? result.asset_type ?? p.leaseType,
-      assetDescription: result.assetDescription ?? p.assetDescription,
-      country: result.country ?? p.country,
-      city: result.city ?? p.city,
-      location: result.location ?? result.address ?? p.location,
-      brand: result.brand ?? p.brand,
+      ...formPatch,
+      lessorDetails: {
+        ...(p.lessorDetails || {}),
+        ...((formPatch.lessorDetails as Record<string, string>) || {}),
+        ...(formPatch.lessor ? { name: String(formPatch.lessor) } : {}),
+      },
+      lesseeDetails: {
+        ...(p.lesseeDetails || {}),
+        ...((formPatch.lesseeDetails as Record<string, string>) || {}),
+        ...(formPatch.lessee ? { name: String(formPatch.lessee) } : {}),
+      },
     }));
-    setExtractedTabs(tabsWithData);
-    setExtractionBanner('✅ AI extracted fields from your contract. Review each tab below.');
+    setExtractionBanner(
+      fieldCount > 0
+        ? `✅ AI extracted ${fieldCount} fields from your contract (avg confidence ${avgConfidence}%). Review each tab below.`
+        : '✅ Extraction complete — review populated fields below.'
+    );
     setActiveTab('contract');
-    toast.success('Extraction complete');
+    toast.success(`Extraction complete — ${fieldCount} fields populated`);
   }, []);
 
   const handleFileUpload = useCallback(
@@ -935,16 +918,50 @@ function getReportingDateForFY(fy: string): Date {
       setUploadError(null);
       setExtractionBanner(null);
       setExtractedTabs(new Set());
+      setExtractedConfidences({});
+      setExtractionSummary(null);
       try {
+        const ext = file.name.toLowerCase();
+        if (ext.endsWith('.xlsx') || ext.endsWith('.xls')) {
+          try {
+            const bulkRows = await parseBulkSpreadsheetFile(file);
+            const readyCount = bulkRows ? countReadyBulkRows(bulkRows) : 0;
+            if (bulkRows && readyCount >= 2) {
+              toast.error(
+                `This spreadsheet has ${readyCount} leases. Use Bulk Upload for multi-lease templates.`,
+                { duration: 7000 }
+              );
+              return;
+            }
+            if (bulkRows && readyCount === 1) {
+              const row = bulkRows.find((r) => r.status !== 'error');
+              if (row) {
+                applyExtractionFromRaw(bulkRowToFormExtraction(row));
+                setExtractionBanner('Loaded from Excel template. Review each tab below.');
+                toast.success('Loaded lease from spreadsheet');
+                return;
+              }
+            }
+          } catch (err) {
+            console.warn('Bulk template parse failed, falling back to AI extraction', err);
+          }
+        }
+
         const { data, error } = await ifrs16Api.uploadContract(file);
         if (error) {
-          setUploadError(error);
-          toast.error(error);
+          const friendly = isArabicExtractionError(error)
+            ? 'Could not read this PDF automatically (scanned or Arabic-only). Enter lease details manually, or try a text-based PDF.'
+            : error;
+          setUploadError(friendly);
+          toast.error(friendly);
           return;
         }
         applyExtractionFromRaw(data?.extracted_data ?? data);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Upload failed. Check file format.';
+        const raw = err instanceof Error ? err.message : 'Upload failed. Check file format.';
+        const msg = isArabicExtractionError(raw)
+          ? 'Could not read this PDF automatically (scanned or Arabic-only). Enter lease details manually, or try a text-based PDF.'
+          : raw;
         setUploadError(msg);
         toast.error(msg);
       } finally {
@@ -953,32 +970,6 @@ function getReportingDateForFY(fy: string): Date {
     },
     [applyExtractionFromRaw]
   );
-
-  const handlePasteLeaseExtract = useCallback(async () => {
-    if (!leasePasteText.trim()) {
-      toast.error('Please paste lease contract text');
-      return;
-    }
-    setUploading(true);
-    setUploadError(null);
-    setExtractionBanner(null);
-    setExtractedTabs(new Set());
-    try {
-      const { data, error } = await ifrs16Api.extractFromText(leasePasteText.trim());
-      if (error) {
-        setUploadError(error);
-        toast.error(error);
-        return;
-      }
-      applyExtractionFromRaw(data?.extracted_data ?? data);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Extraction failed';
-      setUploadError(msg);
-      toast.error(msg);
-    } finally {
-      setUploading(false);
-    }
-  }, [leasePasteText, applyExtractionFromRaw]);
 
   const handleCalculate = async (overrides?: Partial<typeof form>) => {
     const f = { ...form, ...overrides };
@@ -989,8 +980,9 @@ function getReportingDateForFY(fy: string): Date {
       return;
     }
     if (!f.discountRate || ibrNum <= 0) {
-      setIbrError('IBR rate is required. Typical range: 6%–12%');
-      toast.error('IBR rate is required. Typical range: 6%–12%');
+      const ibrMsg = getIbrRequiredMessage(f.currency);
+      setIbrError(ibrMsg);
+      toast.error(ibrMsg);
       setActiveTab('financial');
       setTimeout(() => ibrInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
       return;
@@ -1004,47 +996,40 @@ function getReportingDateForFY(fy: string): Date {
     }
     setIsCalculating(true);
     try {
-      const payload = {
-        lease_id: f.leaseId,
-        company_id: getCompanyId(),
-        asset_description: f.assetDescription,
-        lessee_name: f.lessee,
-        lessor_name: f.lessor,
-        commencement_date: start,
-        lease_term_months: termMonths,
-        monthly_payment: parseFloat(f.baseRentAmount) || 0,
-        non_lease_component: parseFloat(f.nonLeaseComponent ?? '0') || 0,
-        non_lease_description: String(f.nonLeaseDescription ?? '').trim(),
-        practical_expedient_elected: Boolean(f.practicalExpedientElected),
-        annual_discount_rate: (() => {
-          const v = parseFloat(f.discountRate) || 0.085;
-          return v > 1 ? v / 100 : v;
-        })(),
-        initial_direct_costs: (parseFloat(f.legalFees ?? '0') || 0) + (parseFloat(f.brokerageFees ?? '0') || 0) + (parseFloat(f.otherInitialDirectCosts ?? '0') || 0) || parseFloat(f.initialDirectCosts ?? '0') || 0,
-        legal_fees: parseFloat(f.legalFees ?? '0') || 0,
-        brokerage_fees: parseFloat(f.brokerageFees ?? '0') || 0,
-        other_initial_direct_costs: parseFloat(f.otherInitialDirectCosts ?? '0') || 0,
-        initial_direct_costs_description: String(f.initialDirectCostsDescription ?? '').trim(),
-        currency: f.currency,
-        payment_type: f.paymentType || 'Arrears',
-        rent_free_months: Number(f.rentFreeMonths ?? 0) || 0,
-        cash_incentive: parseFloat(f.cashIncentive ?? f.leaseIncentives ?? '0') || 0,
-        lease_incentive_description: String(f.leaseIncentiveDescription ?? '').trim(),
-        rvg_amount: parseFloat(f.rvgAmount ?? '0') || 0,
-        rvg_guaranteed_by: String(f.rvgGuaranteedBy ?? 'None').trim(),
-        rvg_expected_payment: parseFloat(f.rvgExpectedPayment ?? '0') || 0,
-      };
+      const reportingDate = getReportingDateForFY(disclosureFY).toISOString().slice(0, 10);
+      const payload = buildIfrs16CalculatePayload(f, { termMonths, reportingDate, companyId: getCompanyId() });
       const { data, error } = await ifrs16Api.calculate(payload);
       const typedData = data as LeaseCalculateResponse | undefined;
       if (error) {
         toast.error(error);
         return;
       }
-      setCalcResults({ ...typedData?.results, excel_file_id: typedData?.excel_file_id });
+      const resultsPayload = { ...typedData?.results, excel_file_id: typedData?.excel_file_id };
+      setCalcResults(resultsPayload);
       setLastCalculatedAt(new Date().toISOString());
+      setLastCalcFingerprint(financialInputsFingerprint(f));
+      const syncedIbr = annualDecimalToPercentDisplay(
+        normalizeAnnualRate(f.discountRate) || 0.085
+      );
       setForm((p) => {
         const nextVer = p.version && /^V(\d+)$/i.test(p.version) ? `V${parseInt(p.version.slice(1), 10) + 1}` : 'V2';
-        return { ...p, ...overrides, version: nextVer, leaseStatus: p.leaseStatus === 'Draft' ? 'Calculated' : p.leaseStatus };
+        const meta = typedData?.results?.calculation_metadata as Record<string, unknown> | undefined;
+        const escalationPatch = syncFormEscalationFromResults(p, meta);
+        const rentFreeFromCalc =
+          meta?.rent_free_months != null ? Number(meta.rent_free_months) : undefined;
+        return {
+          ...p,
+          ...overrides,
+          ...escalationPatch,
+          ...(rentFreeFromCalc != null &&
+          Number.isFinite(rentFreeFromCalc) &&
+          rentFreeFromCalc > 0
+            ? { rentFreeMonths: rentFreeFromCalc }
+            : {}),
+          discountRate: syncedIbr || p.discountRate,
+          version: nextVer,
+          leaseStatus: p.leaseStatus === 'Draft' ? 'Calculated' : p.leaseStatus,
+        };
       });
       setAuditTrail((prev) => [...prev, { id: `audit-${Date.now()}`, dateTime: new Date().toISOString(), user: 'System', action: 'Calculation run', fieldChanged: undefined, oldValue: undefined, newValue: undefined, ip: undefined }]);
       toast.success('Calculation complete — schedule generated');
@@ -1069,6 +1054,7 @@ function getReportingDateForFY(fy: string): Date {
       version: 'V1',
     }));
     setCalcResults(null);
+    setLastCalcFingerprint(null);
     setContractData(null);
     if (typeof setIbrSuggestion === 'function') setIbrSuggestion(null);
     toast.success(`✅ Loaded: ${SAMPLE_LEASES[key].label}`);
@@ -1076,6 +1062,18 @@ function getReportingDateForFY(fy: string): Date {
   };
 
   const handleSaveToRepo = () => {
+    const resultsToSave = calcResults ?? existingLease?.results ?? null;
+    if (
+      resultsToSave &&
+      Object.keys(resultsToSave as object).length > 0 &&
+      !resultsMatchFinancialInputs(form, resultsToSave as Record<string, unknown>, lastCalcFingerprint)
+    ) {
+      toast.error(
+        'Financial inputs changed since the last calculation (e.g. IBR). Click Calculate IFRS 16 before saving.'
+      );
+      setActiveTab('financial');
+      return;
+    }
     setSaving(true);
     try {
       const start = form.startDate || form.effectiveDate;
@@ -1218,40 +1216,15 @@ function getReportingDateForFY(fy: string): Date {
           </div>
         </div>
 
-        {/* AI Upload bar - collapsible */}
-        <div className="mb-6 rounded-[14px] border-2 border-dashed border-[#f97316] bg-[#fff7ed]/30 overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setAiBarOpen((o) => !o)}
-            className="w-full px-6 py-3 flex items-center justify-between text-left"
-          >
-            <span className="font-medium text-[#1e293b]">🤖 AI Contract Extraction — Upload PDF, DOCX, or Excel to auto-fill all tabs</span>
-            {aiBarOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          </button>
-          {aiBarOpen && (
-            <div className="px-6 pb-4">
-              <div
-                className="border-2 border-dashed border-[#f97316] rounded-lg p-6 text-center bg-white/50"
-                onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && /\.(pdf|docx|xlsx|xls|txt)$/i.test(f.name)) handleFileUpload(f); }}
-                onDragOver={(e) => e.preventDefault()}
-              >
-                <input
-                  type="file"
-                  accept=".pdf,.docx,.xlsx,.xls,.txt"
-                  className="hidden"
-                  id="ai-upload"
-                  onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileUpload(f); e.target.value = ''; }}
-                  disabled={uploading}
-                />
-                <label htmlFor="ai-upload" className="cursor-pointer block">
-                  {uploading ? <Loader2 className="w-10 h-10 mx-auto mb-2 animate-spin text-[#f97316]" /> : <Upload className="w-10 h-10 mx-auto mb-2 text-[#f97316]" />}
-                  <p className="text-[#1e293b] font-medium">Click to upload or drag and drop</p>
-                </label>
-              </div>
-              {uploadError && <p className="mt-2 text-sm text-red-600">{uploadError}</p>}
-            </div>
-          )}
-        </div>
+        {isNew && (
+          <LeasePdfUploadBar
+            uploading={uploading}
+            uploadingSeconds={uploadingSeconds}
+            uploadError={uploadError}
+            extractionSummary={extractionSummary}
+            onFileSelect={(file) => void handleFileUpload(file)}
+          />
+        )}
 
         {extractionBanner && (
           <div className="mb-6 p-4 rounded-xl bg-[#f0fdf4] border border-[#86efac] text-[#166534] text-sm">
@@ -1286,164 +1259,42 @@ function getReportingDateForFY(fy: string): Date {
         <div className="bg-white rounded-[14px] border border-[#e2e8f0] p-6 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
           {activeTab === 'contract' && (
             <>
-              <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2">
-                <FileText className="w-5 h-5 text-[#f97316]" /> Contract Details
-              </h3>
-              <section className="mb-6 rounded-[14px] border border-[#fed7aa] bg-[#fff7ed]/40 p-4">
-                <p className="text-sm font-medium text-[#1e293b] mb-3">
-                  Optional: AI-fill from contract (manual fields below stay editable)
-                </p>
-                <div className="flex gap-2 border-b border-[#fed7aa] mb-4">
-                  <button
-                    type="button"
-                    onClick={() => setContractIntakeTab('upload')}
-                    className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
-                      contractIntakeTab === 'upload'
-                        ? 'border-[#f97316] text-[#f97316]'
-                        : 'border-transparent text-[#64748b]'
-                    }`}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <Upload className="w-4 h-4" /> Upload file
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setContractIntakeTab('paste')}
-                    className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
-                      contractIntakeTab === 'paste'
-                        ? 'border-[#f97316] text-[#f97316]'
-                        : 'border-transparent text-[#64748b]'
-                    }`}
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <FileText className="w-4 h-4" /> Paste lease text
-                    </span>
-                  </button>
-                </div>
-                {contractIntakeTab === 'upload' ? (
-                  <div
-                    className="border-2 border-dashed border-[#f97316] rounded-lg p-6 text-center bg-white/60"
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      const f = e.dataTransfer.files[0];
-                      if (f && /\.(pdf|docx|xlsx|xls|txt)$/i.test(f.name)) handleFileUpload(f);
-                    }}
-                    onDragOver={(e) => e.preventDefault()}
-                  >
-                    <input
-                      type="file"
-                      accept=".pdf,.docx,.xlsx,.xls,.txt"
-                      className="hidden"
-                      id="contract-tab-upload"
-                      onChange={(e) => {
-                        const f = e.target.files?.[0];
-                        if (f) handleFileUpload(f);
-                        e.target.value = '';
-                      }}
-                      disabled={uploading}
-                    />
-                    <label htmlFor="contract-tab-upload" className="cursor-pointer block">
-                      {uploading ? (
-                        <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin text-[#f97316]" />
-                      ) : (
-                        <Upload className="w-8 h-8 mx-auto mb-2 text-[#f97316]" />
-                      )}
-                      <p className="text-sm text-[#1e293b] font-medium">Click to upload or drag and drop</p>
-                      <p className="text-xs text-[#64748b] mt-1">PDF, DOCX, Excel, or TXT</p>
-                    </label>
-                  </div>
-                ) : (
-                  <div>
-                    <label className="block text-sm font-medium text-[#1e293b] mb-2">Paste lease contract text</label>
-                    <textarea
-                      value={leasePasteText}
-                      onChange={(e) => setLeasePasteText(e.target.value)}
-                      rows={8}
-                      className="w-full px-4 py-3 border border-[#e2e8f0] rounded-lg text-sm focus:ring-2 focus:ring-[#f97316] focus:border-[#f97316]"
-                      placeholder="Paste lease agreement text (e.g. AED 15,000/month, 60 months, IBR 7.5%)..."
-                      disabled={uploading}
-                    />
-                    <Button
-                      className="mt-3 bg-[#f97316] text-white"
-                      onClick={() => void handlePasteLeaseExtract()}
-                      disabled={uploading || !leasePasteText.trim()}
-                    >
-                      {uploading ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                          Extracting…
-                        </>
-                      ) : (
-                        'Extract & fill form'
-                      )}
-                    </Button>
-                  </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <h3 className="text-lg font-semibold text-[#1e293b] flex items-center gap-2">
+                  <FileText className="w-5 h-5 text-[#f97316]" /> Contract Details
+                </h3>
+                {!isNew && (
+                  <LeasePdfUploadBar
+                    compact
+                    uploading={uploading}
+                    uploadingSeconds={uploadingSeconds}
+                    uploadError={null}
+                    extractionSummary={null}
+                    onFileSelect={(file) => void handleFileUpload(file)}
+                  />
                 )}
-                {uploadError && <p className="mt-2 text-sm text-red-600">{uploadError}</p>}
-                {extractionBanner && (
-                  <p className="mt-2 text-sm text-[#166534] bg-[#f0fdf4] border border-[#86efac] rounded-lg px-3 py-2">
-                    {extractionBanner}
-                  </p>
-                )}
-              </section>
-              <section className="mb-6">
-                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Basic Information</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div>
-                    <label className={labelClass}>Transaction Type</label>
-                    <select value={form.transactionType} onChange={(e) => { setForm((p) => ({ ...p, transactionType: e.target.value })); markDirty('contract'); }} className={inputClass}>
-                      {TRANSACTION_TYPES.map((o) => <option key={o}>{o}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className={labelClass}>Legal Entity</label>
-                    <input type="text" value={form.legalEntity} onChange={(e) => { setForm((p) => ({ ...p, legalEntity: e.target.value })); markDirty('contract'); }} className={inputClass} />
-                  </div>
-                  <div>
-                    <label className={labelClass}>Lease ID</label>
-                    <input type="text" value={form.leaseId} readOnly className={inputClass} />
-                  </div>
-                  <div>
-                    <label className={labelClass}>Title</label>
-                    <input type="text" value={form.title} onChange={(e) => { setForm((p) => ({ ...p, title: e.target.value })); markDirty('contract'); }} className={inputClass} />
-                  </div>
-                  <div>
-                    <label className={labelClass}>Lease Status</label>
-                    <select value={form.leaseStatus} onChange={(e) => { setForm((p) => ({ ...p, leaseStatus: e.target.value })); markDirty('contract'); }} className={inputClass}>
-                      {LEASE_STATUS_OPTIONS.map((o) => <option key={o}>{o}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className={labelClass}>Modification Date</label>
-                    <input type="date" value={form.modificationDate} onChange={(e) => { setForm((p) => ({ ...p, modificationDate: e.target.value })); markDirty('contract'); }} className={inputClass} />
-                  </div>
-                </div>
-              </section>
-              <section className="mb-6">
-                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Dates & Financial Terms</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div><label className={labelClass}>Start Date</label><input type="date" value={form.startDate} onChange={(e) => { setForm((p) => ({ ...p, startDate: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>End Date</label><input type="date" value={form.endDate} onChange={(e) => { setForm((p) => ({ ...p, endDate: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Effective Date</label><input type="date" value={form.effectiveDate} onChange={(e) => { setForm((p) => ({ ...p, effectiveDate: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Payment Date</label><input type="date" value={form.paymentDate} onChange={(e) => { setForm((p) => ({ ...p, paymentDate: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Renewal Date</label><input type="date" value={form.renewalDate} onChange={(e) => { setForm((p) => ({ ...p, renewalDate: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Early Termination Date</label><input type="date" value={form.earlyTerminationDate} onChange={(e) => { setForm((p) => ({ ...p, earlyTerminationDate: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Extended End Date</label><input type="date" value={form.extendedEndDate} onChange={(e) => { setForm((p) => ({ ...p, extendedEndDate: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Contract Sealing Date</label><input type="date" value={form.contractSealingDate} onChange={(e) => { setForm((p) => ({ ...p, contractSealingDate: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Residual Value (₹)</label><input type="number" value={form.residualValue} onChange={(e) => { setForm((p) => ({ ...p, residualValue: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Optional Purchase Price (₹)</label><input type="number" value={form.optionalPurchasePrice} onChange={(e) => { setForm((p) => ({ ...p, optionalPurchasePrice: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Contract Sealing Location</label><input type="text" value={form.contractSealingLocation} onChange={(e) => { setForm((p) => ({ ...p, contractSealingLocation: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
-                </div>
-                <label className="flex items-center gap-2 mt-3"><input type="checkbox" checked={form.enableContractReduction} onChange={(e) => { setForm((p) => ({ ...p, enableContractReduction: e.target.checked })); markDirty('contract'); }} /> Enable Contract Reduction</label>
-              </section>
+              </div>
+              {uploadError && !isNew && <p className="mb-3 text-sm text-red-600">{uploadError}</p>}
+              <ContractDetailsTab
+                form={form}
+                setForm={setForm}
+                markDirty={markDirty}
+                inputClass={inputClass}
+                labelClass={labelClass}
+                extractedConfidences={extractedConfidences}
+                onClearExtractedField={clearExtractedField}
+              />
               <section className="mb-6">
                 <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Description & Terms</h4>
-                <div className="space-y-4">
-                  <div><label className={labelClass}>Description</label><textarea value={form.description} onChange={(e) => { setForm((p) => ({ ...p, description: e.target.value })); markDirty('contract'); }} className={inputClass} rows={3} /></div>
-                  <div><label className={labelClass}>Termination Clauses</label><textarea value={form.terminationClauses} onChange={(e) => { setForm((p) => ({ ...p, terminationClauses: e.target.value })); markDirty('contract'); }} className={inputClass} rows={2} /></div>
-                  <div><label className={labelClass}>Renewal Options</label><textarea value={form.renewalOptions} onChange={(e) => { setForm((p) => ({ ...p, renewalOptions: e.target.value })); markDirty('contract'); }} className={inputClass} rows={2} /></div>
-                </div>
+                <DescriptionTermsTab
+                  form={form}
+                  setForm={setForm}
+                  markDirty={markDirty}
+                  inputClass={inputClass}
+                  labelClass={labelClass}
+                  extractedConfidences={extractedConfidences}
+                  onClearExtractedField={clearExtractedField}
+                />
               </section>
               <details className="mb-6 border border-[#e2e8f0] rounded-lg overflow-hidden">
                 <summary className="px-4 py-3 bg-[#f8fafc] text-sm font-medium cursor-pointer">Contact Details</summary>
@@ -1487,45 +1338,15 @@ function getReportingDateForFY(fy: string): Date {
           {activeTab === 'financial' && (
             <>
               <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2"><DollarSign className="w-5 h-5 text-[#f97316]" /> Financial Management</h3>
-              <section className="mb-6">
-                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Basic Financial Information</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div><label className={labelClass}>Base Rent Amount (₹)</label><input type="number" value={form.baseRentAmount} onChange={(e) => { setForm((p) => ({ ...p, baseRentAmount: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
-                  <div>
-                    <label className={labelClass}>Payment Frequency</label>
-                    <select value={form.paymentFrequency} onChange={(e) => { setForm((p) => ({ ...p, paymentFrequency: e.target.value })); markDirty('financial'); }} className={inputClass}>
-                      {PAYMENT_FREQ.map((f) => <option key={f}>{f}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className={labelClass}>Payment Type</label>
-                    <select value={form.paymentType} onChange={(e) => { setForm((p) => ({ ...p, paymentType: e.target.value })); markDirty('financial'); }} className={inputClass}>
-                      {PAYMENT_TYPES.map((p) => <option key={p}>{p}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className={labelClass}>Currency</label>
-                    <select value={form.currency} onChange={(e) => { setForm((p) => ({ ...p, currency: e.target.value })); markDirty('financial'); }} className={inputClass}>
-                      {CURRENCIES.map((c) => <option key={c}>{c}</option>)}
-                    </select>
-                  </div>
-                  <div><label className={labelClass}>Extended Base Rent (₹)</label><input type="number" value={form.extendedBaseRentAmount} onChange={(e) => { setForm((p) => ({ ...p, extendedBaseRentAmount: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Exchange Rate</label><input type="text" value={form.exchangeRate} onChange={(e) => { setForm((p) => ({ ...p, exchangeRate: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
-                  <div>
-                    <label className={labelClass} title="Incremental costs of obtaining a lease: ✅ Legal fees, agent commissions, costs to prepare asset. ❌ Internal staff time, general admin.">
-                      Legal Fees (₹) <Info className="inline w-3.5 h-3.5 text-[#64748b] cursor-help" />
-                    </label>
-                    <input type="number" min="0" value={form.legalFees ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, legalFees: e.target.value })); markDirty('financial'); }} className={inputClass} />
-                  </div>
-                  <div><label className={labelClass}>Brokerage / Agent Fees (₹)</label><input type="number" min="0" value={form.brokerageFees ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, brokerageFees: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Other Initial Direct Costs (₹)</label><input type="number" min="0" value={form.otherInitialDirectCosts ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, otherInitialDirectCosts: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
-                  <div className="md:col-span-2"><label className={labelClass}>IDC Description</label><input type="text" value={form.initialDirectCostsDescription ?? ''} onChange={(e) => { setForm((p) => ({ ...p, initialDirectCostsDescription: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="e.g. Legal fees for lease negotiation, agent commission" /></div>
-                  <div className="md:col-span-2 flex items-end"><p className="text-sm text-[#64748b]">Total initial direct costs: <span className="font-mono font-medium text-[#1e293b]">{fmt((parseFloat(form.legalFees ?? '0') || 0) + (parseFloat(form.brokerageFees ?? '0') || 0) + (parseFloat(form.otherInitialDirectCosts ?? '0') || 0))}</span></p></div>
-                  <div><label className={labelClass}>Rent-Free Period (months)</label><input type="number" min="0" value={form.rentFreeMonths ?? 0} onChange={(e) => { setForm((p) => ({ ...p, rentFreeMonths: parseInt(e.target.value, 10) || 0 })); markDirty('financial'); }} className={inputClass} placeholder="0" /></div>
-                  <div><label className={labelClass}>Cash Incentive Received (₹)</label><input type="number" min="0" value={form.cashIncentive ?? form.leaseIncentives ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, cashIncentive: e.target.value, leaseIncentives: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="0" /></div>
-                  <div className="md:col-span-2"><label className={labelClass}>Lease Incentive Description</label><input type="text" value={form.leaseIncentiveDescription ?? ''} onChange={(e) => { setForm((p) => ({ ...p, leaseIncentiveDescription: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="e.g. 2 months rent free" /></div>
-                </div>
-              </section>
+              <FinancialManagementTab
+                form={form}
+                setForm={setForm}
+                markDirty={markDirty}
+                inputClass={inputClass}
+                labelClass={labelClass}
+                extractedConfidences={extractedConfidences}
+                onClearExtractedField={clearExtractedField}
+              />
               <ComponentSplitWizard
                 isNew={isNew}
                 monthlyPayment={parseFloat(form.baseRentAmount) || 0}
@@ -1572,7 +1393,7 @@ function getReportingDateForFY(fy: string): Date {
               <section className="mb-6">
                 <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Residual Value Guarantee (IFRS 16 para 26(d))</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div><label className={labelClass}>RVG Amount (₹)</label><input type="number" min="0" value={form.rvgAmount ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, rvgAmount: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="Guaranteed amount" /></div>
+                  <div><label className={labelClass}>RVG amount{financialSym ? ` (${financialSym})` : ''}</label><input type="number" min="0" value={form.rvgAmount ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, rvgAmount: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="Guaranteed amount" /></div>
                   <div>
                     <label className={labelClass}>Guaranteed By</label>
                     <select value={form.rvgGuaranteedBy ?? 'None'} onChange={(e) => { setForm((p) => ({ ...p, rvgGuaranteedBy: e.target.value })); markDirty('financial'); }} className={inputClass}>
@@ -1582,19 +1403,26 @@ function getReportingDateForFY(fy: string): Date {
                     </select>
                     <p className="mt-1 text-xs text-[#64748b]">Only lessee guarantee included in liability</p>
                   </div>
-                  <div><label className={labelClass}>Expected Payment at End (₹)</label><input type="number" min="0" value={form.rvgExpectedPayment ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, rvgExpectedPayment: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="What lessee expects to pay" /></div>
+                  <div><label className={labelClass}>Expected payment at end{financialSym ? ` (${financialSym})` : ''}</label><input type="number" min="0" value={form.rvgExpectedPayment ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, rvgExpectedPayment: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="What lessee expects to pay" /></div>
                 </div>
               </section>
               <section className="mb-6">
                 <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Escalation & Terms</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                   <div>
-                    <label className={labelClass}>Escalation Type</label>
-                    <select value={form.escalationType} onChange={(e) => { setForm((p) => ({ ...p, escalationType: e.target.value })); markDirty('financial'); }} className={inputClass}>
+                    <FieldLabelWithExtraction field="escalationType" extractedConfidences={extractedConfidences}>
+                      Escalation Type
+                    </FieldLabelWithExtraction>
+                    <select value={form.escalationType} onChange={(e) => { setForm((p) => ({ ...p, escalationType: e.target.value })); markDirty('financial'); clearExtractedField('escalationType'); }} className={inputClass}>
                       {ESCALATION_TYPES.map((e) => <option key={e}>{e}</option>)}
                     </select>
                   </div>
-                  <div><label className={labelClass}>Escalation Value %</label><input type="number" value={form.escalationValue} onChange={(e) => { setForm((p) => ({ ...p, escalationValue: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
+                  <div>
+                    <FieldLabelWithExtraction field="escalationValue" extractedConfidences={extractedConfidences}>
+                      Escalation Value %
+                    </FieldLabelWithExtraction>
+                    <input type="number" value={form.escalationValue} onChange={(e) => { setForm((p) => ({ ...p, escalationValue: e.target.value })); markDirty('financial'); clearExtractedField('escalationValue'); }} className={inputClass} />
+                  </div>
                   <div><label className={labelClass}>Escalation Start Date</label><input type="date" value={form.escalationStartDate} onChange={(e) => { setForm((p) => ({ ...p, escalationStartDate: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
                   <div>
                     <label className={labelClass}>Escalation Frequency</label>
@@ -1603,7 +1431,9 @@ function getReportingDateForFY(fy: string): Date {
                     </select>
                   </div>
                   <div>
-                    <label className={labelClass}>IBR / Discount Rate % <span className="text-red-500">*</span></label>
+                    <FieldLabelWithExtraction field="discountRate" extractedConfidences={extractedConfidences} required>
+                      IBR / Discount Rate %
+                    </FieldLabelWithExtraction>
                     <input
                       ref={ibrInputRef}
                       type="number"
@@ -1611,7 +1441,13 @@ function getReportingDateForFY(fy: string): Date {
                       min="0"
                       placeholder="e.g. 8.5"
                       value={form.discountRate}
-                      onChange={(e) => { setForm((p) => ({ ...p, discountRate: e.target.value })); markDirty('financial'); setIbrError(null); }}
+                      onChange={(e) => {
+                        setForm((p) => ({ ...p, discountRate: e.target.value }));
+                        markDirty('financial');
+                        setIbrError(null);
+                        setLastCalcFingerprint(null);
+                        clearExtractedField('discountRate');
+                      }}
                       className={`${inputClass} ${ibrError ? 'border-red-500 ring-2 ring-red-200' : ''}`}
                     />
                     <button
@@ -1665,7 +1501,9 @@ function getReportingDateForFY(fy: string): Date {
                         </div>
                       </div>
                     )}
-                    <p className="mt-1 text-xs text-[#64748b]">Incremental Borrowing Rate — company&apos;s cost of borrowing. Typical: Corporate 6–10%, SME 8–12%</p>
+                    <p className="mt-1 text-xs text-[#64748b]">
+                      Incremental Borrowing Rate — company&apos;s cost of borrowing. {getIbrTypicalRangeHint(form.currency)}.
+                    </p>
                     {ibrError && <p className="mt-1 text-sm text-red-600">{ibrError}</p>}
                   </div>
                   <div><label className={labelClass}>Extended Escalation Value</label><input type="text" value={form.extendedEscalationValue} onChange={(e) => { setForm((p) => ({ ...p, extendedEscalationValue: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
@@ -1674,8 +1512,18 @@ function getReportingDateForFY(fy: string): Date {
               <section className="mb-6">
                 <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Business Unit & Cost Centers</h4>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-                  <div><label className={labelClass}>Lessor</label><input type="text" value={form.lessor} onChange={(e) => { setForm((p) => ({ ...p, lessor: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="Search or type" /></div>
-                  <div><label className={labelClass}>Lessee</label><input type="text" value={form.lessee} onChange={(e) => { setForm((p) => ({ ...p, lessee: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="Search or type" /></div>
+                  <div>
+                    <FieldLabelWithExtraction field="lessor" extractedConfidences={extractedConfidences}>
+                      Lessor
+                    </FieldLabelWithExtraction>
+                    <input type="text" value={form.lessor} onChange={(e) => { setForm((p) => ({ ...p, lessor: e.target.value })); markDirty('financial'); clearExtractedField('lessor'); }} className={inputClass} placeholder="Search or type" />
+                  </div>
+                  <div>
+                    <FieldLabelWithExtraction field="lessee" extractedConfidences={extractedConfidences}>
+                      Lessee
+                    </FieldLabelWithExtraction>
+                    <input type="text" value={form.lessee} onChange={(e) => { setForm((p) => ({ ...p, lessee: e.target.value })); markDirty('financial'); clearExtractedField('lessee'); }} className={inputClass} placeholder="Search or type" />
+                  </div>
                   <div><label className={labelClass}>Business Unit</label><input type="text" value={form.businessUnit} onChange={(e) => { setForm((p) => ({ ...p, businessUnit: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
                 </div>
                 <div className="mb-2">
@@ -1943,7 +1791,7 @@ function getReportingDateForFY(fy: string): Date {
                 {form.variablePayments && (
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div><label className={labelClass}>Description</label><input type="text" value={form.variableDescription} onChange={(e) => { setForm((p) => ({ ...p, variableDescription: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
-                    <div><label className={labelClass}>Estimated Annual Amount (₹)</label><input type="number" value={form.variableAnnualAmount} onChange={(e) => { setForm((p) => ({ ...p, variableAnnualAmount: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
+                    <div><label className={labelClass}>Estimated annual amount{financialSym ? ` (${financialSym})` : ''}</label><input type="number" value={form.variableAnnualAmount} onChange={(e) => { setForm((p) => ({ ...p, variableAnnualAmount: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
                     <div><label className={labelClass}>Basis</label><input type="text" value={form.variableBasis} onChange={(e) => { setForm((p) => ({ ...p, variableBasis: e.target.value })); markDirty('modifications'); }} className={inputClass} placeholder="Sales %, Usage-based, Index-linked" /></div>
                   </div>
                 )}
@@ -1983,40 +1831,15 @@ function getReportingDateForFY(fy: string): Date {
           {activeTab === 'assets' && (
             <>
               <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2"><MapPin className="w-5 h-5 text-[#f97316]" /> Assets & Locations</h3>
-              <section className="mb-6">
-                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Asset Details</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div>
-                    <label className={labelClass}>Lease Type</label>
-                    <select value={form.leaseType} onChange={(e) => { setForm((p) => ({ ...p, leaseType: e.target.value })); markDirty('assets'); }} className={inputClass}>
-                      {LEASE_TYPES.map((t) => <option key={t}>{t}</option>)}
-                    </select>
-                  </div>
-                  <div className="md:col-span-2"><label className={labelClass}>Asset Description</label><input type="text" value={form.assetDescription} onChange={(e) => { setForm((p) => ({ ...p, assetDescription: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Contract Reference</label><input type="text" value={form.contractReference} onChange={(e) => { setForm((p) => ({ ...p, contractReference: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Brand</label><input type="text" value={form.brand} onChange={(e) => { setForm((p) => ({ ...p, brand: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Country</label><select value={form.country} onChange={(e) => { setForm((p) => ({ ...p, country: e.target.value })); markDirty('assets'); }} className={inputClass}><option>India</option><option>UAE</option><option>USA</option><option>UK</option><option>Singapore</option></select></div>
-                  <div><label className={labelClass}>City</label><input type="text" value={form.city} onChange={(e) => { setForm((p) => ({ ...p, city: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Location / Address</label><input type="text" value={form.location} onChange={(e) => { setForm((p) => ({ ...p, location: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Floor / Unit No</label><input type="text" value={form.floorUnit} onChange={(e) => { setForm((p) => ({ ...p, floorUnit: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                </div>
-              </section>
-              <details className="mb-6 border border-[#e2e8f0] rounded-lg overflow-hidden">
-                <summary className="px-4 py-3 bg-[#f8fafc] text-sm font-medium cursor-pointer">Additional Details</summary>
-                <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div><label className={labelClass}>Useful Life (months)</label><input type="number" value={form.usefulLifeMonths} onChange={(e) => { setForm((p) => ({ ...p, usefulLifeMonths: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                  <div>
-                    <label className={labelClass}>Depreciation Method</label>
-                    <select value={form.depreciationMethod} onChange={(e) => { setForm((p) => ({ ...p, depreciationMethod: e.target.value })); markDirty('assets'); }} className={inputClass}>
-                      {DEPRECIATION_METHODS.map((m) => <option key={m}>{m}</option>)}
-                    </select>
-                  </div>
-                  <div><label className={labelClass}>ROU Asset GL Code</label><input type="text" value={form.rouGlCode} onChange={(e) => { setForm((p) => ({ ...p, rouGlCode: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Lease Liability GL Code</label><input type="text" value={form.liabilityGlCode} onChange={(e) => { setForm((p) => ({ ...p, liabilityGlCode: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Interest Expense GL Code</label><input type="text" value={form.interestGlCode} onChange={(e) => { setForm((p) => ({ ...p, interestGlCode: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                  <div><label className={labelClass}>Depreciation GL Code</label><input type="text" value={form.depreciationGlCode} onChange={(e) => { setForm((p) => ({ ...p, depreciationGlCode: e.target.value })); markDirty('assets'); }} className={inputClass} /></div>
-                </div>
-              </details>
+              <AssetsLocationsTab
+                form={form}
+                setForm={setForm}
+                markDirty={markDirty}
+                inputClass={inputClass}
+                labelClass={labelClass}
+                extractedConfidences={extractedConfidences}
+                onClearExtractedField={clearExtractedField}
+              />
               <div className="flex justify-end">
                 <Button onClick={() => { handleSaveToRepo(); setDirtyTabs((s) => { const n = new Set(s); n.delete('assets'); return n; }); }} className="bg-[#f97316] text-white">Save Tab</Button>
               </div>
@@ -2083,7 +1906,23 @@ function getReportingDateForFY(fy: string): Date {
                     </div>
                     {(() => {
                       const rb = calcResults?.rou_build_up ?? existingLease?.results?.rou_build_up;
-                      const incNote = calcResults?.incentive_disclosure_note ?? existingLease?.results?.incentive_disclosure_note;
+                      const incNoteRaw = calcResults?.incentive_disclosure_note ?? existingLease?.results?.incentive_disclosure_note;
+                      const rentFreeMonthsForm = Number(form.rentFreeMonths ?? 0) || 0;
+                      const cashIncentiveForm = parseFloat(String(form.cashIncentive ?? form.leaseIncentives ?? '0')) || 0;
+                      const incNoteParts: string[] = [];
+                      if (rentFreeMonthsForm > 0) {
+                        incNoteParts.push(
+                          `The lease includes a rent-free period of ${rentFreeMonthsForm} month(s) commencing ${form.startDate || 'commencement'}. The rent-free period is reflected as zero lease payments in those months.`
+                        );
+                      } else if (cashIncentiveForm <= 0) {
+                        incNoteParts.push('No rent-free period applies.');
+                      }
+                      if (cashIncentiveForm > 0) {
+                        incNoteParts.push(
+                          `Cash lease incentives of ${fmt(cashIncentiveForm)} have been deducted from the right-of-use asset at commencement in accordance with IFRS 16 paragraph 24.`
+                        );
+                      }
+                      const incNote = incNoteParts.length > 0 ? incNoteParts.join('\n') : incNoteRaw;
                       const lb = calcResults?.liability_breakdown ?? existingLease?.results?.liability_breakdown;
                       const rvgNote = calcResults?.rvg_disclosure_note ?? existingLease?.results?.rvg_disclosure_note;
                       const idcNote = calcResults?.idc_disclosure_note ?? existingLease?.results?.idc_disclosure_note;
@@ -2150,7 +1989,7 @@ function getReportingDateForFY(fy: string): Date {
                     <div className="flex flex-wrap items-center gap-4 mb-4 p-3 rounded-lg bg-[#f9fafb] border border-[#e2e8f0]">
                       <span className="text-xs font-medium text-[#64748b] uppercase">For schedules:</span>
                       <label className="flex items-center gap-2"><span className="text-sm text-[#64748b]">Functional currency</span><select value={form.functionalCurrency || 'INR'} onChange={(e) => setForm((p) => ({ ...p, functionalCurrency: e.target.value }))} className="px-3 py-1.5 border border-[#e2e8f0] rounded-lg text-sm">{CURRENCIES.map((c) => (<option key={c} value={c}>{c}</option>))}</select></label>
-                      <label className="flex items-center gap-2"><span className="text-sm text-[#64748b]">Restoration cost (₹)</span><input type="number" value={form.restorationCost || ''} onChange={(e) => setForm((p) => ({ ...p, restorationCost: e.target.value }))} className="w-28 px-3 py-1.5 border border-[#e2e8f0] rounded-lg text-sm font-mono" placeholder="0" /></label>
+                      <label className="flex items-center gap-2"><span className="text-sm text-[#64748b]">Restoration cost ({displayCurrency})</span><input type="number" value={form.restorationCost || ''} onChange={(e) => setForm((p) => ({ ...p, restorationCost: e.target.value }))} className="w-28 px-3 py-1.5 border border-[#e2e8f0] rounded-lg text-sm font-mono" placeholder="0" /></label>
                     </div>
                     <div className="flex flex-wrap gap-1 border-b border-[#e2e8f0] mb-4">
                       {scheduleSubTabs.map(({ id, label }) => (
@@ -2356,14 +2195,18 @@ function getReportingDateForFY(fy: string): Date {
               existingLease?.results?.notes ??
               '';
             const disclosureSections = extractDisclosureSections(disclosureNotesText);
-            const split = calcResults?.liability_split ?? existingLease?.results?.liability_split ?? {};
-            const currentPortion = Number(split.current_portion ?? 0);
-            const nonCurrentPortion = Number(split.non_current_portion ?? 0);
             const termMonths = form.lease_term_months ? parseInt(form.lease_term_months, 10) || schedule.length : schedule.length;
             const monthlyDepreciation = calcResults?.monthly_depreciation ?? (termMonths > 0 ? rou / termMonths : 0);
             const modifications = (form.modifications || []).slice().sort((a: any, b: any) => (a.date || '').localeCompare(b.date || ''));
             const reportingDate = getReportingDateForFY(disclosureFY);
             const reportingDateStr = reportingDate.toISOString().slice(0, 10);
+            const splitAtReporting = computeLiabilitySplitFromSchedule(
+              schedule as Record<string, unknown>[],
+              reportingDate
+            );
+            const currentPortion = splitAtReporting.current_portion;
+            const nonCurrentPortion = splitAtReporting.non_current_portion;
+            const closingLLAtReporting = splitAtReporting.total_liability;
             const fyStart = new Date(reportingDate.getFullYear() - 1, 3, 1);
             const fyEnd = new Date(reportingDate.getFullYear(), 2, 31);
             const leaseStart = form.startDate ? new Date(form.startDate) : null;
@@ -2385,35 +2228,29 @@ function getReportingDateForFY(fy: string): Date {
             });
             const showDataChangedBanner = disclosureLastRefreshedSignature !== '' && dataSignature !== disclosureLastRefreshedSignature;
 
-            const bucketLabels = ['Less than 1 year', '1 to 2 years', '2 to 3 years', '3 to 4 years', '4 to 5 years', 'More than 5 years'];
-            type BucketRow = { undiscounted: number; pv: number };
-            const buckets: BucketRow[] = bucketLabels.map(() => ({ undiscounted: 0, pv: 0 }));
-            let totalUndiscounted = 0;
-            let totalPV = 0;
-            schedule.forEach((row: any) => {
-              const r = scheduleRow(row);
-              const dateStr = r.date;
-              if (!dateStr) return;
-              const payDate = new Date(dateStr);
-              if (payDate <= reportingDate) return;
-              const yearsFromReport = (payDate.getTime() - reportingDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
-              const payment = Number(r.payment ?? 0);
-              const principal = Number(r.principal ?? 0);
-              let idx = 0;
-              if (yearsFromReport < 1) idx = 0;
-              else if (yearsFromReport < 2) idx = 1;
-              else if (yearsFromReport < 3) idx = 2;
-              else if (yearsFromReport < 4) idx = 3;
-              else if (yearsFromReport < 5) idx = 4;
-              else idx = 5;
-              buckets[idx].undiscounted += payment;
-              buckets[idx].pv += principal;
-              totalUndiscounted += payment;
-              totalPV += principal;
-            });
-            const futureFinanceCharges = totalUndiscounted - totalPV;
-            const currentFromBuckets = buckets[0]?.pv ?? 0;
-            const nonCurrentFromBuckets = totalPV - currentFromBuckets;
+            const bucketLabels = [...MATURITY_BUCKET_LABELS];
+            const maturity = buildMaturityBuckets(
+              schedule as Record<string, unknown>[],
+              reportingDate
+            );
+            const buckets = maturity.buckets;
+            let totalUndiscounted = maturity.totalUndiscounted;
+            let totalPV = maturity.totalPV;
+            const totalPaymentsAll = schedule.reduce((s: number, row: any) => s + (scheduleRow(row).payment ?? 0), 0);
+            const totalInterestAll = schedule.reduce((s: number, row: any) => s + (scheduleRow(row).interest ?? 0), 0);
+            if (totalUndiscounted === 0 && totalPaymentsAll > 0) totalUndiscounted = totalPaymentsAll;
+            if (totalPV === 0 && liability > 0) totalPV = liability;
+            if (totalUndiscounted === 0 && currentPortion + nonCurrentPortion > 0) {
+              totalUndiscounted = currentPortion + nonCurrentPortion;
+            }
+            const bucketUndiscountedSum = buckets.reduce((s, b) => s + b.undiscounted, 0);
+            if (bucketUndiscountedSum === 0 && totalUndiscounted > 0) {
+              buckets[0].undiscounted = totalUndiscounted;
+              buckets[0].pv = totalPV > 0 ? totalPV : totalUndiscounted;
+            }
+            const futureFinanceCharges = Math.max(0, totalUndiscounted - totalPV);
+            const currentFromBuckets = currentPortion;
+            const nonCurrentFromBuckets = nonCurrentPortion;
 
             const depFY = monthlyDepreciation * 12;
             const interestFY = schedule
@@ -2440,6 +2277,12 @@ function getReportingDateForFY(fy: string): Date {
                 return dt >= fyStart && dt <= fyEnd;
               })
               .reduce((s: number, row: any) => s + (scheduleRow(row).payment ?? 0), 0);
+            const noFyRows = interestFY === 0 && paymentsMadeFY === 0 && schedule.length > 0;
+            const interestDisplay = noFyRows ? totalInterestAll : interestFY;
+            const paymentsMadeDisplay = noFyRows ? totalPaymentsAll : paymentsMadeFY;
+            const principalPaymentsDisplay = noFyRows
+              ? Math.max(0, totalPaymentsAll - totalInterestAll)
+              : principalPaymentsFY;
             const modsInFY = modifications.filter((m: any) => {
               const md = m.date || '';
               if (!md) return false;
@@ -2449,12 +2292,15 @@ function getReportingDateForFY(fy: string): Date {
             const llModificationsFY = modsInFY.reduce((s: number, m: any) => s + Number(m.llAdjustment ?? 0), 0);
             const rouModificationsFY = modsInFY.reduce((s: number, m: any) => s + Number(m.rouAdjustment ?? 0), 0);
             const gainLossModFY = modsInFY.reduce((s: number, m: any) => s + Number(m.gainLoss ?? 0), 0);
-            const openingROU = 0;
-            const openingLL = 0;
-            const newLeasesROU = leaseStart && leaseStart <= fyEnd && (!leaseEnd || leaseEnd >= fyStart) ? rou : 0;
-            const newLeasesLL = leaseStart && leaseStart <= fyEnd && (!leaseEnd || leaseEnd >= fyStart) ? liability : 0;
-            const closingROU = openingROU + newLeasesROU + rouModificationsFY - depFY - 0 - 0;
-            const closingLL = openingLL + newLeasesLL + llModificationsFY + interestFY - paymentsMadeFY - 0 + 0;
+            const openingROU = rou;
+            const openingLL = liability;
+            const newLeasesROU = 0;
+            const newLeasesLL = 0;
+            const closingROU = Math.max(0, openingROU + newLeasesROU + rouModificationsFY - depFY);
+            const closingLL = Math.max(
+              0,
+              closingLLAtReporting || openingLL + newLeasesLL + llModificationsFY + interestDisplay - paymentsMadeDisplay
+            );
 
             const variableAnnual = parseFloat(String(form.variableAnnualAmount || '0')) || 0;
             const hasVariable = form.variablePayments === true || form.variablePayments === 'true' || variableAnnual > 0;
@@ -2467,7 +2313,7 @@ The Company has determined the lease term as ${termMonths} months, including opt
 The Company has applied an IBR of ${parseFloat(String(form.discountRate || '0')) || 0}% per annum as at ${form.startDate || 'commencement date'} to discount lease payments. The IBR reflects the rate the Company would pay to borrow funds over a similar term with similar security.
 
 (c) Lease vs Non-Lease Components
-The Company has elected not to separate non-lease components for this lease.
+${parseFloat(String(form.nonLeaseComponent || '0')) > 0 ? `Non-lease component identified: ${fmt(parseFloat(String(form.nonLeaseComponent || '0')))} per month. The Company has elected not to separate non-lease components for this lease.` : 'The Company has elected not to separate non-lease components for this lease.'}
 
 (d) Restoration Obligations
 ${parseFloat(String(form.restorationCost || '0')) > 0 ? `The Company has recognised a provision for estimated restoration costs at the end of the lease term.` : 'Not applicable for this lease.'}
@@ -2480,14 +2326,14 @@ The Company has not applied the short-term or low-value exemptions to this lease
               const sections: string[] = [];
               sections.push(`Note X: Maturity Analysis of Lease Liabilities (IFRS 16 para 58(b))\n${bucketLabels.map((l, i) => `${l}\t${fmt(buckets[i].undiscounted)}\t${fmt(buckets[i].pv)}`).join('\n')}\nTotal\t${fmt(totalUndiscounted)}\t${fmt(totalPV)}\nLess: Future Finance Charges\t(${fmt(futureFinanceCharges)})\nPresent Value of Lease Liabilities\t—\t${fmt(totalPV)}\nCurrent (within 12 months): ${fmt(currentFromBuckets)}\nNon-current: ${fmt(nonCurrentFromBuckets)}`);
               sections.push(`Note X: Right-of-Use Assets (IFRS 16 para 53(j))\nOpening: ${fmt(openingROU)}\nAdditions: ${fmt(newLeasesROU)}\nModifications: ${fmt(rouModificationsFY)}\nDepreciation: (${fmt(depFY)})\nClosing: ${fmt(closingROU)}`);
-              sections.push(`Note X: Lease Liabilities (IFRS 16 para 53(j))\nOpening: ${fmt(openingLL)}\nNew Leases: ${fmt(newLeasesLL)}\nModifications: ${fmt(llModificationsFY)}\nInterest: ${fmt(interestFY)}\nPayments: (${fmt(paymentsMadeFY)})\nClosing: ${fmt(closingLL)}\nCurrent: ${fmt(currentPortion)}\nNon-current: ${fmt(nonCurrentPortion)}`);
-              sections.push(`Note X: P&L Impact (IFRS 16 para 53(a)(b)(c))\nDepreciation ROU: ${fmt(depFY)}\nInterest: ${fmt(interestFY)}\nVariable: ${fmt(variableAnnual)}\nGain/(Loss) on Modification: ${fmt(gainLossModFY)}\nTotal Lease Expense: ${fmt(depFY + interestFY + variableAnnual + gainLossModFY)}`);
-              sections.push(`Note X: Cash Flow Impact (IFRS 16 para 53(g)(h))\nPrincipal (financing): (${fmt(principalPaymentsFY)})\nInterest (financing): (${fmt(interestFY)})\nTotal cash outflow: (${fmt(principalPaymentsFY + interestFY)})`);
+              sections.push(`Note X: Lease Liabilities (IFRS 16 para 53(j))\nOpening: ${fmt(openingLL)}\nNew Leases: ${fmt(newLeasesLL)}\nModifications: ${fmt(llModificationsFY)}\nInterest: ${fmt(interestDisplay)}\nPayments: (${fmt(paymentsMadeDisplay)})\nClosing: ${fmt(closingLL)}\nCurrent: ${fmt(currentPortion)}\nNon-current: ${fmt(nonCurrentPortion)}`);
+              sections.push(`Note X: P&L Impact (IFRS 16 para 53(a)(b)(c))\nDepreciation ROU: ${fmt(depFY)}\nInterest: ${fmt(interestDisplay)}\nVariable: ${fmt(variableAnnual)}\nGain/(Loss) on Modification: ${fmt(gainLossModFY)}\nTotal Lease Expense: ${fmt(depFY + interestDisplay + variableAnnual + gainLossModFY)}`);
+              sections.push(`Note X: Cash Flow Impact (IFRS 16 para 53(g)(h))\nPrincipal (financing): (${fmt(principalPaymentsDisplay)})\nInterest (financing): (${fmt(interestDisplay)})\nTotal cash outflow: (${fmt(principalPaymentsDisplay + interestDisplay)})`);
               navigator.clipboard.writeText(sections.join('\n\n'));
               toast.success('All disclosures copied');
             };
             const downloadWord = () => {
-              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>IFRS 16 Disclosures - ${form.leaseId || 'Lease'}</title></head><body><h1>IFRS 16 Disclosure Notes</h1><p>Auto-generated from lease data — para 52-60 compliant. Reporting period: FY ${disclosureFY}</p><hr/>${bucketLabels.map((l, i) => `<p><strong>${l}</strong>: Undiscounted ${fmt(buckets[i].undiscounted)} | PV ${fmt(buckets[i].pv)}</p>`).join('')}<p><strong>Total</strong>: ${fmt(totalUndiscounted)} | PV ${fmt(totalPV)}</p><p>Less: Future Finance Charges (${fmt(futureFinanceCharges)})</p><p>Current: ${fmt(currentFromBuckets)} | Non-current: ${fmt(nonCurrentFromBuckets)}</p><hr/><p>ROU: Opening ${fmt(openingROU)} + Additions ${fmt(newLeasesROU)} + Modifications ${fmt(rouModificationsFY)} - Depreciation (${fmt(depFY)}) = Closing ${fmt(closingROU)}</p><hr/><p>Lease Liabilities: Closing ${fmt(closingLL)}; Current ${fmt(currentPortion)}; Non-current ${fmt(nonCurrentPortion)}</p><hr/><p>P&L: Depreciation ${fmt(depFY)}; Interest ${fmt(interestFY)}; Total expense ${fmt(depFY + interestFY + variableAnnual + gainLossModFY)}</p><hr/><p>Cash flow: Principal (${fmt(principalPaymentsFY)}); Interest (${fmt(interestFY)})</p><hr/><pre>${assumptionTextToShow.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre></body></html>`;
+              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>IFRS 16 Disclosures - ${form.leaseId || 'Lease'}</title></head><body><h1>IFRS 16 Disclosure Notes</h1><p>Auto-generated from lease data — para 52-60 compliant. Reporting period: FY ${disclosureFY}</p><hr/>${bucketLabels.map((l, i) => `<p><strong>${l}</strong>: Undiscounted ${fmt(buckets[i].undiscounted)} | PV ${fmt(buckets[i].pv)}</p>`).join('')}<p><strong>Total</strong>: ${fmt(totalUndiscounted)} | PV ${fmt(totalPV)}</p><p>Less: Future Finance Charges (${fmt(futureFinanceCharges)})</p><p>Current: ${fmt(currentFromBuckets)} | Non-current: ${fmt(nonCurrentFromBuckets)}</p><hr/><p>ROU: Opening ${fmt(openingROU)} + Additions ${fmt(newLeasesROU)} + Modifications ${fmt(rouModificationsFY)} - Depreciation (${fmt(depFY)}) = Closing ${fmt(closingROU)}</p><hr/><p>Lease Liabilities: Closing ${fmt(closingLL)}; Current ${fmt(currentPortion)}; Non-current ${fmt(nonCurrentPortion)}</p><hr/><p>P&L: Depreciation ${fmt(depFY)}; Interest ${fmt(interestDisplay)}; Total expense ${fmt(depFY + interestDisplay + variableAnnual + gainLossModFY)}</p><hr/><p>Cash flow: Principal (${fmt(principalPaymentsDisplay)}); Interest (${fmt(interestDisplay)})</p><hr/><pre>${assumptionTextToShow.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre></body></html>`;
               const blob = new Blob(['\ufeff' + html], { type: 'application/vnd.ms-word' });
               const a = document.createElement('a');
               a.href = URL.createObjectURL(blob);
@@ -2625,8 +2471,8 @@ The Company has not applied the short-term or low-value exemptions to this lease
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Opening Balance</td><td className="py-2 px-3 text-right font-mono">{fmt(openingLL)}</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">New Leases</td><td className="py-2 px-3 text-right font-mono">{fmt(newLeasesLL)}</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Modifications</td><td className="py-2 px-3 text-right font-mono">{fmt(llModificationsFY)}</td></tr>
-                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Interest Accrued</td><td className="py-2 px-3 text-right font-mono">{fmt(interestFY)}</td></tr>
-                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Payments Made</td><td className="py-2 px-3 text-right font-mono">({fmt(paymentsMadeFY)})</td></tr>
+                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Interest Accrued</td><td className="py-2 px-3 text-right font-mono">{fmt(interestDisplay)}</td></tr>
+                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Payments Made</td><td className="py-2 px-3 text-right font-mono">({fmt(paymentsMadeDisplay)})</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Terminations</td><td className="py-2 px-3 text-right font-mono">({fmt(0)})</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">FX Movement</td><td className="py-2 px-3 text-right font-mono">{fmt(0)}</td></tr>
                           <tr className="border-t-2 border-[#e2e8f0] font-medium"><td className="py-2 px-3">Closing Balance</td><td className="py-2 px-3 text-right font-mono">{fmt(closingLL)}</td></tr>
@@ -2646,13 +2492,13 @@ The Company has not applied the short-term or low-value exemptions to this lease
                         <thead><tr className="border-b border-[#e2e8f0]"><th className="text-left py-2 px-3 font-medium text-[#64748b]"> </th><th className="text-right py-2 px-3 font-medium text-[#64748b]">FY {disclosureFY}</th></tr></thead>
                         <tbody>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Depreciation of ROU Assets</td><td className="py-2 px-3 text-right font-mono">{fmt(depFY)}</td></tr>
-                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Interest on Lease Liabilities</td><td className="py-2 px-3 text-right font-mono">{fmt(interestFY)}</td></tr>
+                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Interest on Lease Liabilities</td><td className="py-2 px-3 text-right font-mono">{fmt(interestDisplay)}</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Short-term Lease Expense</td><td className="py-2 px-3 text-right font-mono">{fmt(0)}</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Low-value Asset Lease Expense</td><td className="py-2 px-3 text-right font-mono">{fmt(0)}</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Variable Lease Expense</td><td className="py-2 px-3 text-right font-mono">{fmt(variableAnnual)}</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Gain/(Loss) on Lease Modification</td><td className="py-2 px-3 text-right font-mono">{formatNeg(gainLossModFY)}</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Gain/(Loss) on Lease Termination</td><td className="py-2 px-3 text-right font-mono">{fmt(0)}</td></tr>
-                          <tr className="border-t-2 border-[#e2e8f0] font-medium"><td className="py-2 px-3">Total Lease Expense</td><td className="py-2 px-3 text-right font-mono">{fmt(depFY + interestFY + variableAnnual + gainLossModFY)}</td></tr>
+                          <tr className="border-t-2 border-[#e2e8f0] font-medium"><td className="py-2 px-3">Total Lease Expense</td><td className="py-2 px-3 text-right font-mono">{fmt(depFY + interestDisplay + variableAnnual + gainLossModFY)}</td></tr>
                         </tbody>
                       </table>
                     </div>
@@ -2667,11 +2513,11 @@ The Company has not applied the short-term or low-value exemptions to this lease
                       <table className="w-full border-collapse text-sm">
                         <thead><tr className="border-b border-[#e2e8f0]"><th className="text-left py-2 px-3 font-medium text-[#64748b]"> </th><th className="text-right py-2 px-3 font-medium text-[#64748b]">FY {disclosureFY}</th></tr></thead>
                         <tbody>
-                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Principal repayments (financing)</td><td className="py-2 px-3 text-right font-mono">({fmt(principalPaymentsFY)})</td></tr>
-                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Interest payments (financing)</td><td className="py-2 px-3 text-right font-mono">({fmt(interestFY)})</td></tr>
+                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Principal repayments (financing)</td><td className="py-2 px-3 text-right font-mono">({fmt(principalPaymentsDisplay)})</td></tr>
+                          <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Interest payments (financing)</td><td className="py-2 px-3 text-right font-mono">({fmt(interestDisplay)})</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Short-term lease payments (ops)</td><td className="py-2 px-3 text-right font-mono">{fmt(0)}</td></tr>
                           <tr className="border-t border-[#e2e8f0]"><td className="py-2 px-3">Low-value lease payments (ops)</td><td className="py-2 px-3 text-right font-mono">{fmt(0)}</td></tr>
-                          <tr className="border-t-2 border-[#e2e8f0] font-medium"><td className="py-2 px-3">Total cash outflow for leases</td><td className="py-2 px-3 text-right font-mono">({fmt(principalPaymentsFY + interestFY)})</td></tr>
+                          <tr className="border-t-2 border-[#e2e8f0] font-medium"><td className="py-2 px-3">Total cash outflow for leases</td><td className="py-2 px-3 text-right font-mono">({fmt(principalPaymentsDisplay + interestDisplay)})</td></tr>
                         </tbody>
                       </table>
                     </div>
@@ -2726,7 +2572,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                             <BarChart data={commitmentChartData} margin={{ top: 8, right: 8, left: 8, bottom: 24 }}>
                               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                               <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-20} textAnchor="end" height={48} />
-                              <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `₹${(v / 100000).toFixed(0)}L`} />
+                              <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => fmt(Number(v || 0))} />
                               <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? fmt(Number(value)) : '')} />
                               <Bar dataKey="amount" fill="#f97316" radius={[4, 4, 0, 0]} />
                             </BarChart>
@@ -2765,12 +2611,12 @@ The Company has not applied the short-term or low-value exemptions to this lease
                         <button type="button" className="p-2 text-[#64748b] hover:bg-[#f1f5f9] rounded" onClick={() => setDisclosureCompleteNoteOpen(false)}><X className="w-5 h-5" /></button>
                       </div>
                       <div className="p-4 overflow-y-auto flex-1 text-sm text-[#1e293b] whitespace-pre-wrap font-sans">
-                        {`NOTE X: LEASES (IFRS 16)\n\n[Company] as Lessee\n\nThe Company leases ${form.leaseType || 'assets'}. Lease terms range from ${termMonths} months.\n\n--- Maturity Analysis (para 58(b)) ---\nUndiscounted cash flows as at ${reportingDateStr}:\n${bucketLabels.map((l, i) => `${l}: ${fmt(buckets[i].undiscounted)} (PV ${fmt(buckets[i].pv)})`).join('\n')}\nTotal: ${fmt(totalUndiscounted)}. Less: Future finance charges (${fmt(futureFinanceCharges)}). Present value of lease liabilities: ${fmt(totalPV)}. Current: ${fmt(currentFromBuckets)}; Non-current: ${fmt(nonCurrentFromBuckets)}.\n\n--- ROU Assets (para 53(j)) ---\nOpening ${fmt(openingROU)} + Additions ${fmt(newLeasesROU)} + Modifications ${fmt(rouModificationsFY)} - Depreciation (${fmt(depFY)}) = Closing ${fmt(Math.max(0, closingROU))}.\n\n--- Lease Liabilities (para 53(j)) ---\nClosing balance ${fmt(closingLL)}. Current: ${fmt(currentPortion)}; Non-current: ${fmt(nonCurrentPortion)}.\n\n--- P&L (para 53(a)(b)(c)) ---\nDepreciation ${fmt(depFY)}; Interest ${fmt(interestFY)}; Variable ${fmt(variableAnnual)}; Gain/(Loss) on modification ${formatNeg(gainLossModFY)}. Total lease expense: ${fmt(depFY + interestFY + variableAnnual + gainLossModFY)}.\n\n--- Cash flow (para 53(g)(h)) ---\nPrincipal (${fmt(principalPaymentsFY)}); Interest (${fmt(interestFY)}). Total cash outflow: (${fmt(principalPaymentsFY + interestFY)}).\n\n--- Significant judgements (para 59) ---\n${assumptionTextToShow}\n\n--- Future commitments (para 58) ---\nWithin 1 year: ${fmt(buckets[0]?.undiscounted ?? 0)}; 1-5 years: ${fmt(buckets.slice(1, 5).reduce((s, b) => s + b.undiscounted, 0))}; After 5 years: ${fmt(buckets[5]?.undiscounted ?? 0)}. Total: ${fmt(totalUndiscounted)}. Present value: ${fmt(totalPV)}.`}
+                        {`NOTE X: LEASES (IFRS 16)\n\n[Company] as Lessee\n\nThe Company leases ${form.leaseType || 'assets'}. Lease terms range from ${termMonths} months.\n\n--- Maturity Analysis (para 58(b)) ---\nUndiscounted cash flows as at ${reportingDateStr}:\n${bucketLabels.map((l, i) => `${l}: ${fmt(buckets[i].undiscounted)} (PV ${fmt(buckets[i].pv)})`).join('\n')}\nTotal: ${fmt(totalUndiscounted)}. Less: Future finance charges (${fmt(futureFinanceCharges)}). Present value of lease liabilities: ${fmt(totalPV)}. Current: ${fmt(currentFromBuckets)}; Non-current: ${fmt(nonCurrentFromBuckets)}.\n\n--- ROU Assets (para 53(j)) ---\nOpening ${fmt(openingROU)} + Additions ${fmt(newLeasesROU)} + Modifications ${fmt(rouModificationsFY)} - Depreciation (${fmt(depFY)}) = Closing ${fmt(Math.max(0, closingROU))}.\n\n--- Lease Liabilities (para 53(j)) ---\nClosing balance ${fmt(closingLL)}. Current: ${fmt(currentPortion)}; Non-current: ${fmt(nonCurrentPortion)}.\n\n--- P&L (para 53(a)(b)(c)) ---\nDepreciation ${fmt(depFY)}; Interest ${fmt(interestDisplay)}; Variable ${fmt(variableAnnual)}; Gain/(Loss) on modification ${formatNeg(gainLossModFY)}. Total lease expense: ${fmt(depFY + interestDisplay + variableAnnual + gainLossModFY)}.\n\n--- Cash flow (para 53(g)(h)) ---\nPrincipal (${fmt(principalPaymentsDisplay)}); Interest (${fmt(interestDisplay)}). Total cash outflow: (${fmt(principalPaymentsDisplay + interestDisplay)}).\n\n--- Significant judgements (para 59) ---\n${assumptionTextToShow}\n\n--- Future commitments (para 58) ---\nWithin 1 year: ${fmt(buckets[0]?.undiscounted ?? 0)}; 1-5 years: ${fmt(buckets.slice(1, 5).reduce((s, b) => s + b.undiscounted, 0))}; After 5 years: ${fmt(buckets[5]?.undiscounted ?? 0)}. Total: ${fmt(totalUndiscounted)}. Present value: ${fmt(totalPV)}.`}
                       </div>
                       <div className="px-4 py-3 border-t border-[#e2e8f0] flex flex-wrap gap-2">
-                        <Button size="sm" className="bg-[#f97316] text-white" onClick={() => { const t = `NOTE X: LEASES (IFRS 16)\n\n[Company] as Lessee\n\nThe Company leases ${form.leaseType || 'assets'}. Lease terms range from ${termMonths} months.\n\n--- Maturity Analysis (para 58(b)) ---\nUndiscounted cash flows as at ${reportingDateStr}:\n${bucketLabels.map((l, i) => `${l}: ${fmt(buckets[i].undiscounted)} (PV ${fmt(buckets[i].pv)})`).join('\n')}\nTotal: ${fmt(totalUndiscounted)}. Less: Future finance charges (${fmt(futureFinanceCharges)}). Present value of lease liabilities: ${fmt(totalPV)}. Current: ${fmt(currentFromBuckets)}; Non-current: ${fmt(nonCurrentFromBuckets)}.\n\n--- ROU Assets (para 53(j)) ---\nOpening ${fmt(openingROU)} + Additions ${fmt(newLeasesROU)} + Modifications ${fmt(rouModificationsFY)} - Depreciation (${fmt(depFY)}) = Closing ${fmt(Math.max(0, closingROU))}.\n\n--- Lease Liabilities (para 53(j)) ---\nClosing balance ${fmt(closingLL)}. Current: ${fmt(currentPortion)}; Non-current: ${fmt(nonCurrentPortion)}.\n\n--- P&L (para 53(a)(b)(c)) ---\nDepreciation ${fmt(depFY)}; Interest ${fmt(interestFY)}; Variable ${fmt(variableAnnual)}; Gain/(Loss) on modification ${formatNeg(gainLossModFY)}. Total lease expense: ${fmt(depFY + interestFY + variableAnnual + gainLossModFY)}.\n\n--- Cash flow (para 53(g)(h)) ---\nPrincipal (${fmt(principalPaymentsFY)}); Interest (${fmt(interestFY)}). Total cash outflow: (${fmt(principalPaymentsFY + interestFY)}).\n\n--- Significant judgements (para 59) ---\n${assumptionTextToShow}\n\n--- Future commitments (para 58) ---\nWithin 1 year: ${fmt(buckets[0]?.undiscounted ?? 0)}; 1-5 years: ${fmt(buckets.slice(1, 5).reduce((s, b) => s + b.undiscounted, 0))}; After 5 years: ${fmt(buckets[5]?.undiscounted ?? 0)}. Total: ${fmt(totalUndiscounted)}. Present value: ${fmt(totalPV)}.`; navigator.clipboard.writeText(t); toast.success('Copied to clipboard'); }}>Copy to Clipboard</Button>
-                        <Button size="sm" variant="secondary" className="border border-[#e2e8f0]" onClick={() => { const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Note X - Leases IFRS 16</title></head><body style="font-family: sans-serif; padding: 24px;"><pre style="white-space: pre-wrap;">${`NOTE X: LEASES (IFRS 16)\n\n[Company] as Lessee\n\nThe Company leases ${form.leaseType || 'assets'}. Lease terms: ${termMonths} months.\n\nMaturity Analysis (para 58(b))\n${bucketLabels.map((l, i) => `${l}: ${fmt(buckets[i].undiscounted)} (PV ${fmt(buckets[i].pv)})`).join('\n')}\nTotal: ${fmt(totalUndiscounted)}. PV: ${fmt(totalPV)}. Current: ${fmt(currentFromBuckets)}; Non-current: ${fmt(nonCurrentFromBuckets)}.\n\nROU: Closing ${fmt(Math.max(0, closingROU))}. Lease liabilities: ${fmt(closingLL)}. P&L: Depreciation ${fmt(depFY)}; Interest ${fmt(interestFY)}; Total expense ${fmt(depFY + interestFY + variableAnnual + gainLossModFY)}. Cash outflow: (${fmt(principalPaymentsFY + interestFY)}).\n\n${assumptionTextToShow.replace(/</g, '&lt;').replace(/>/g, '&gt;')}`}</pre></body></html>`; const blob = new Blob(['\ufeff' + html], { type: 'application/vnd.ms-word' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `Note_X_Leases_IFRS16_${form.leaseId || 'lease'}.doc`; a.click(); URL.revokeObjectURL(a.href); toast.success('Downloaded as Word'); }}>Download as Word .docx</Button>
-                        <Button size="sm" variant="secondary" className="border border-[#e2e8f0]" onClick={() => { const w = window.open('', '_blank'); if (w) { w.document.write(`<pre style="font-family: sans-serif; padding: 24px; white-space: pre-wrap;">${`NOTE X: LEASES (IFRS 16)\n\n[Company] as Lessee\n\nThe Company leases ${form.leaseType || 'assets'}. Lease terms: ${termMonths} months.\n\n${bucketLabels.map((l, i) => `${l}: ${fmt(buckets[i].undiscounted)} (PV ${fmt(buckets[i].pv)})`).join('\n')}\nTotal: ${fmt(totalUndiscounted)}. PV: ${fmt(totalPV)}.\n\nROU: ${fmt(Math.max(0, closingROU))}. LL: ${fmt(closingLL)}. P&L: Dep ${fmt(depFY)}; Int ${fmt(interestFY)}. Cash: (${fmt(principalPaymentsFY + interestFY)}).\n\n${assumptionTextToShow}`.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`); w.document.title = 'Note X - Leases IFRS 16'; w.print(); w.close(); } toast.success('Open print dialog to save as PDF'); }}>Download as PDF</Button>
+                        <Button size="sm" className="bg-[#f97316] text-white" onClick={() => { const t = `NOTE X: LEASES (IFRS 16)\n\n[Company] as Lessee\n\nThe Company leases ${form.leaseType || 'assets'}. Lease terms range from ${termMonths} months.\n\n--- Maturity Analysis (para 58(b)) ---\nUndiscounted cash flows as at ${reportingDateStr}:\n${bucketLabels.map((l, i) => `${l}: ${fmt(buckets[i].undiscounted)} (PV ${fmt(buckets[i].pv)})`).join('\n')}\nTotal: ${fmt(totalUndiscounted)}. Less: Future finance charges (${fmt(futureFinanceCharges)}). Present value of lease liabilities: ${fmt(totalPV)}. Current: ${fmt(currentFromBuckets)}; Non-current: ${fmt(nonCurrentFromBuckets)}.\n\n--- ROU Assets (para 53(j)) ---\nOpening ${fmt(openingROU)} + Additions ${fmt(newLeasesROU)} + Modifications ${fmt(rouModificationsFY)} - Depreciation (${fmt(depFY)}) = Closing ${fmt(Math.max(0, closingROU))}.\n\n--- Lease Liabilities (para 53(j)) ---\nClosing balance ${fmt(closingLL)}. Current: ${fmt(currentPortion)}; Non-current: ${fmt(nonCurrentPortion)}.\n\n--- P&L (para 53(a)(b)(c)) ---\nDepreciation ${fmt(depFY)}; Interest ${fmt(interestDisplay)}; Variable ${fmt(variableAnnual)}; Gain/(Loss) on modification ${formatNeg(gainLossModFY)}. Total lease expense: ${fmt(depFY + interestDisplay + variableAnnual + gainLossModFY)}.\n\n--- Cash flow (para 53(g)(h)) ---\nPrincipal (${fmt(principalPaymentsDisplay)}); Interest (${fmt(interestDisplay)}). Total cash outflow: (${fmt(principalPaymentsDisplay + interestDisplay)}).\n\n--- Significant judgements (para 59) ---\n${assumptionTextToShow}\n\n--- Future commitments (para 58) ---\nWithin 1 year: ${fmt(buckets[0]?.undiscounted ?? 0)}; 1-5 years: ${fmt(buckets.slice(1, 5).reduce((s, b) => s + b.undiscounted, 0))}; After 5 years: ${fmt(buckets[5]?.undiscounted ?? 0)}. Total: ${fmt(totalUndiscounted)}. Present value: ${fmt(totalPV)}.`; navigator.clipboard.writeText(t); toast.success('Copied to clipboard'); }}>Copy to Clipboard</Button>
+                        <Button size="sm" variant="secondary" className="border border-[#e2e8f0]" onClick={() => { const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Note X - Leases IFRS 16</title></head><body style="font-family: sans-serif; padding: 24px;"><pre style="white-space: pre-wrap;">${`NOTE X: LEASES (IFRS 16)\n\n[Company] as Lessee\n\nThe Company leases ${form.leaseType || 'assets'}. Lease terms: ${termMonths} months.\n\nMaturity Analysis (para 58(b))\n${bucketLabels.map((l, i) => `${l}: ${fmt(buckets[i].undiscounted)} (PV ${fmt(buckets[i].pv)})`).join('\n')}\nTotal: ${fmt(totalUndiscounted)}. PV: ${fmt(totalPV)}. Current: ${fmt(currentFromBuckets)}; Non-current: ${fmt(nonCurrentFromBuckets)}.\n\nROU: Closing ${fmt(Math.max(0, closingROU))}. Lease liabilities: ${fmt(closingLL)}. P&L: Depreciation ${fmt(depFY)}; Interest ${fmt(interestDisplay)}; Total expense ${fmt(depFY + interestDisplay + variableAnnual + gainLossModFY)}. Cash outflow: (${fmt(principalPaymentsDisplay + interestDisplay)}).\n\n${assumptionTextToShow.replace(/</g, '&lt;').replace(/>/g, '&gt;')}`}</pre></body></html>`; const blob = new Blob(['\ufeff' + html], { type: 'application/vnd.ms-word' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `Note_X_Leases_IFRS16_${form.leaseId || 'lease'}.doc`; a.click(); URL.revokeObjectURL(a.href); toast.success('Downloaded as Word'); }}>Download as Word .docx</Button>
+                        <Button size="sm" variant="secondary" className="border border-[#e2e8f0]" onClick={() => { const w = window.open('', '_blank'); if (w) { w.document.write(`<pre style="font-family: sans-serif; padding: 24px; white-space: pre-wrap;">${`NOTE X: LEASES (IFRS 16)\n\n[Company] as Lessee\n\nThe Company leases ${form.leaseType || 'assets'}. Lease terms: ${termMonths} months.\n\n${bucketLabels.map((l, i) => `${l}: ${fmt(buckets[i].undiscounted)} (PV ${fmt(buckets[i].pv)})`).join('\n')}\nTotal: ${fmt(totalUndiscounted)}. PV: ${fmt(totalPV)}.\n\nROU: ${fmt(Math.max(0, closingROU))}. LL: ${fmt(closingLL)}. P&L: Dep ${fmt(depFY)}; Int ${fmt(interestDisplay)}. Cash: (${fmt(principalPaymentsDisplay + interestDisplay)}).\n\n${assumptionTextToShow}`.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`); w.document.title = 'Note X - Leases IFRS 16'; w.print(); w.close(); } toast.success('Open print dialog to save as PDF'); }}>Download as PDF</Button>
                       </div>
                     </div>
                   </div>
@@ -2790,6 +2636,19 @@ The Company has not applied the short-term or low-value exemptions to this lease
             const totalInterest = schedule.reduce((s: number, row: any) => s + (scheduleRow(row).interest ?? 0), 0);
             const totalPayments = schedule.reduce((s: number, row: any) => s + (scheduleRow(row).payment ?? 0), 0);
             const restorationNum = parseFloat(String(form.restorationCost || '0')) || 0;
+            const idcAmount =
+              (parseFloat(String(form.legalFees ?? '0')) || 0) +
+              (parseFloat(String(form.brokerageFees ?? '0')) || 0) +
+              (parseFloat(String(form.otherInitialDirectCosts ?? '0')) || 0) ||
+              parseFloat(String(form.initialDirectCosts ?? '0')) ||
+              0;
+            const cashIncentive =
+              parseFloat(String(form.cashIncentive ?? form.leaseIncentives ?? '0')) || 0;
+            const initialJeNote =
+              calcResults?.journal_entries?.initial_recognition?.idc_note ??
+              (idcAmount > 0
+                ? `Initial direct costs of ${fmt(idcAmount)} paid separately and capitalized to ROU asset per IFRS 16 para 24.`
+                : null);
             const ibrPct = parseFloat(String(form.discountRate || '0')) || 0;
             const restorationPV = restorationNum;
 
@@ -2982,7 +2841,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                     <p className={vAsset ? 'text-green-600 text-sm' : 'text-red-600 text-sm'}>{vAsset ? '✅' : '❌'} Asset class selected</p>
                     <p className="text-amber-600 text-sm">⚠️ Restoration cost not entered (optional)</p>
                     <p className={vCurrency ? 'text-green-600 text-sm' : 'text-red-600 text-sm'}>
-                      {vCurrency ? '✅' : '❌'} Currency not selected
+                      {vCurrency ? `✅ Currency: ${form.currency}` : '❌ Currency not selected (required)'}
                       {!vCurrency && <Button size="sm" variant="secondary" className="ml-2 border border-[#e2e8f0]" onClick={() => setActiveTab('financial')}>Fix</Button>}
                     </p>
                     <Button variant="secondary" size="sm" className="border border-[#e2e8f0] mt-2" onClick={() => {}}>Run Health Check</Button>
@@ -3078,7 +2937,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                               <div className="flex justify-between col-span-2 gap-2">
                                 <span className="text-gray-500">Non-lease component</span>
                                 <span className="font-medium text-gray-800 text-right">
-                                  ₹{nonLease.toLocaleString('en-IN')} /month excluded from PV
+                                  {fmt(nonLease)} /month excluded from PV
                                 </span>
                               </div>
                             )}
@@ -3165,8 +3024,12 @@ The Company has not applied the short-term or low-value exemptions to this lease
                           <p><span className="text-[#64748b]">Payment Timing:</span> {form.paymentTiming || 'End of month'}</p>
                           <p><span className="text-[#64748b]">Currency:</span> {form.currency || '—'}</p>
                           <p><span className="text-[#64748b]">Restoration Cost:</span> {restorationNum > 0 ? fmt(restorationNum) : 'Nil'}</p>
-                          <p><span className="text-[#64748b]">Initial Direct Costs:</span> Nil</p>
-                          <p><span className="text-[#64748b]">Lease Incentives:</span> Nil</p>
+                          <p><span className="text-[#64748b]">Initial Direct Costs:</span> {formatIdcReviewLine(form, fmt)}</p>
+                          <p><span className="text-[#64748b]">Lease Incentives:</span>{' '}
+                            {(parseFloat(String(form.cashIncentive ?? form.leaseIncentives ?? '0')) || 0) > 0
+                              ? fmt(parseFloat(String(form.cashIncentive ?? form.leaseIncentives ?? '0')) || 0)
+                              : 'Nil'}
+                          </p>
                           <p><span className="text-[#64748b]">Modifications:</span> {modifications.length} modification(s) applied</p>
                           <p><span className="text-[#64748b]">Last Recalculated:</span> {lastCalculatedAt ? new Date(lastCalculatedAt).toLocaleString() : '—'}</p>
                           <Button variant="secondary" size="sm" className="border border-[#e2e8f0] mt-2" onClick={() => setActiveTab('contract')}>✏️ Edit Parameters</Button>
@@ -3194,6 +3057,15 @@ The Company has not applied the short-term or low-value exemptions to this lease
                               <p>Dr  {reviewAccountNames.rou_asset.padEnd(32)} {fmt(rou)}</p>
                               <p>    Cr  {reviewAccountNames.lease_liability_current.padEnd(28)} {fmt(currentLL)}</p>
                               <p>    Cr  {reviewAccountNames.lease_liability_non_current.padEnd(26)} {fmt(nonCurrentLL)}</p>
+                              {idcAmount > 0 && (
+                                <p>    Cr  {reviewAccountNames.idc_cash_ap.padEnd(28)} {fmt(idcAmount)}</p>
+                              )}
+                              {cashIncentive > 0 && (
+                                <p>Dr  {reviewAccountNames.cash.padEnd(32)} {fmt(cashIncentive)}</p>
+                              )}
+                              {initialJeNote && (
+                                <p className="text-[#64748b] italic text-xs mt-1">{initialJeNote}</p>
+                              )}
                               <p className="text-[#64748b] italic text-xs mt-1">Initial recognition at commencement</p>
                             </div>
                             {restorationNum > 0 && (
@@ -3204,7 +3076,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                               </div>
                             )}
                             <div className="flex gap-2">
-                              <Button size="sm" variant="secondary" className="border border-[#e2e8f0]" onClick={() => { navigator.clipboard.writeText(`Dr ${reviewAccountNames.rou_asset} ${fmt(rou)}\nCr ${reviewAccountNames.lease_liability_current} ${fmt(currentLL)}\nCr ${reviewAccountNames.lease_liability_non_current} ${fmt(nonCurrentLL)}`); toast.success('Copied'); }}>📋 Copy</Button>
+                              <Button size="sm" variant="secondary" className="border border-[#e2e8f0]" onClick={() => { const lines = [`Dr ${reviewAccountNames.rou_asset} ${fmt(rou)}`, `Cr ${reviewAccountNames.lease_liability_current} ${fmt(currentLL)}`, `Cr ${reviewAccountNames.lease_liability_non_current} ${fmt(nonCurrentLL)}`]; if (idcAmount > 0) lines.push(`Cr ${reviewAccountNames.idc_cash_ap} ${fmt(idcAmount)}`); if (cashIncentive > 0) lines.push(`Dr ${reviewAccountNames.cash} ${fmt(cashIncentive)}`); navigator.clipboard.writeText(lines.join('\n')); toast.success('Copied'); }}>📋 Copy</Button>
                               <Button size="sm" variant="secondary" className="border border-[#e2e8f0]" onClick={() => { const key = 'rou_asset'; const newName = prompt('Account name', reviewAccountNames[key]); if (newName != null) setReviewAccountNames((a) => ({ ...a, [key]: newName || a[key] })); }}>✏️ Edit Account Names</Button>
                             </div>
                           </div>
@@ -3303,6 +3175,18 @@ The Company has not applied the short-term or low-value exemptions to this lease
                         )}
                       </div>
                     </div>
+
+                    {hasResults && (calcResults?.journal_entries ?? existingLease?.results?.journal_entries) && (
+                      <FinReportAIPostButton
+                        journalEntries={calcResults?.journal_entries ?? existingLease?.results?.journal_entries}
+                        module="lessee"
+                        leaseName={form.title || form.leaseId || 'Lease'}
+                        company={form.lessee || ''}
+                        period={(form.startDate || '').slice(0, 7)}
+                        firmId={getLeaseRepositoryFirmId()}
+                        onPosted={() => toast.success('Posted to FinReportAI')}
+                      />
+                    )}
 
                     {/* Section 5 — Download Reports */}
                     <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden mb-6">

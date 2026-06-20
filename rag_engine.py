@@ -14,6 +14,8 @@ from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 from anthropic import Anthropic
 
+from claude_model_config import CLAUDE_MODEL
+
 
 class IFRSRagEngine:
     """
@@ -328,7 +330,7 @@ Answer:"""
 
             # Call Claude API
             response = self.anthropic_client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=CLAUDE_MODEL,
                 max_tokens=2000,
                 temperature=0.3,
                 messages=[{

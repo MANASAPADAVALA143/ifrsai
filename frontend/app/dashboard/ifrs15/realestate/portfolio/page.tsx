@@ -4,6 +4,7 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useState } from 'r
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { SidebarLayout } from '@/components/SidebarLayout';
+import { Ifrs15WorkspaceShell } from '@/components/ifrs15/Ifrs15WorkspaceShell';
 import { Button } from '@/components/Button';
 import { ifrs15Api } from '@/lib/api';
 import { formatRealEstateMoney, type DisplayCurrency } from '@/lib/realestate-format';
@@ -177,7 +178,7 @@ function PortfolioPageInner() {
 
   if (loading && !data) {
     return (
-      <SidebarLayout>
+      <SidebarLayout pageTitle="IFRS 15 — Real Estate Portfolio" pageSubtitle="Loading portfolio analytics…">
         <div className="max-w-7xl mx-auto p-8 space-y-4 animate-pulse">
           <div className="h-8 bg-slate-200 rounded w-1/3" />
           <div className="grid grid-cols-6 gap-3">
@@ -193,7 +194,7 @@ function PortfolioPageInner() {
 
   if (error) {
     return (
-      <SidebarLayout>
+      <SidebarLayout pageTitle="IFRS 15 — Real Estate Portfolio" pageSubtitle="Portfolio analytics unavailable">
         <div className="max-w-lg mx-auto mt-20 text-center p-8">
           <p className="text-red-700 mb-4">Could not load portfolio data. Check your connection and try again.</p>
           <Button onClick={() => void load()}>Retry</Button>
@@ -206,7 +207,7 @@ function PortfolioPageInner() {
 
   if (!loading && totalProjects === 0) {
     return (
-      <SidebarLayout>
+      <SidebarLayout pageTitle="IFRS 15 — Real Estate Portfolio" pageSubtitle="No projects in portfolio yet">
         <div className="max-w-lg mx-auto mt-24 text-center p-8">
           <div className="text-6xl mb-4">🏢</div>
           <h1 className="text-xl font-bold mb-2">No real estate contracts in portfolio yet.</h1>
@@ -229,7 +230,11 @@ function PortfolioPageInner() {
   const portfolioDeadlinesOverdue = Number(data?.portfolio_deadlines_overdue) || 0;
 
   return (
-    <SidebarLayout>
+    <SidebarLayout
+      pageTitle="IFRS 15 — Real Estate Portfolio"
+      pageSubtitle="Cross-project UAE off-plan analytics"
+    >
+      <Ifrs15WorkspaceShell activeNavId="realestate-uae">
       <div className="max-w-7xl mx-auto space-y-6 pb-16 p-4 md:p-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -605,6 +610,7 @@ function PortfolioPageInner() {
           </div>
         )}
       </div>
+      </Ifrs15WorkspaceShell>
     </SidebarLayout>
   );
 }
@@ -613,7 +619,7 @@ export default function RealEstatePortfolioPage() {
   return (
     <Suspense
       fallback={
-        <SidebarLayout>
+        <SidebarLayout pageTitle="IFRS 15 — Real Estate Portfolio" pageSubtitle="Loading portfolio analytics…">
           <div className="p-8 text-center text-text-muted">Loading portfolio…</div>
         </SidebarLayout>
       }

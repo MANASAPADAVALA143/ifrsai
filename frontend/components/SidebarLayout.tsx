@@ -1,8 +1,8 @@
-'use client';
+﻿'use client';
 
 import { useAuth } from '@/hooks/useAuth';
 import { useRouter, usePathname } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ComponentType } from 'react';
 import Link from 'next/link';
 import { 
   LayoutDashboard, 
@@ -27,6 +27,7 @@ import {
   Settings,
   Upload,
   Zap,
+  ChevronDown,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { healthCheck } from '@/lib/api';
@@ -43,13 +44,14 @@ interface SidebarLayoutProps {
 }
 
 export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayoutProps) {
-  const { user, loading, signOut, getCompanyName } = useAuth();
+  const { user, loading, signOut, getCompanyName, isAdmin } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [alertCount, setAlertCount] = useState(0);
   const [repoCount, setRepoCount] = useState(0);
   const [eclPortfolioCount, setEclPortfolioCount] = useState(0);
   const [backendLive, setBackendLive] = useState<boolean | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,20 +145,26 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
   if (!user) {
     return (
       <div className="min-h-screen bg-bg-light flex items-center justify-center">
-        <p className="text-[#64748b]">Redirecting to login…</p>
+        <p className="text-[#64748b]">Redirecting to login...</p>
       </div>
     );
   }
 
   const mainNav = [
-    { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { name: 'IFRS 16 Dashboard', href: '/dashboard/ifrs16', icon: LayoutDashboard },
   ];
 
-  const ifrsNav = [
-    { name: 'IFRS 16 Overview', href: '/dashboard/ifrs16', icon: LayoutDashboard },
+  const moduleSwitch = [
+    { name: 'IFRS 15 — Revenue', href: '/dashboard/ifrs15', module: 'ifrs15' as const, icon: DollarSign },
+    { name: 'IFRS 16 — Leases', href: '/dashboard/ifrs16', module: 'ifrs16' as const, icon: FileText },
+    { name: 'IFRS 9 — ECL', href: '/dashboard/ifrs9', module: 'ifrs9' as const, icon: TrendingUp },
+  ];
+
+  const ifrs16Nav = [
+    { name: 'Dashboard', href: '/dashboard/ifrs16', icon: LayoutDashboard },
     { name: 'AI Search', href: '/dashboard/assistant?mode=lease', icon: MessageSquare },
     {
-      name: '⚡ Quick Analysis',
+      name: 'Quick Analysis',
       href: '/dashboard/ifrs16/quick-analysis',
       icon: Zap,
       highlight: true,
@@ -182,11 +190,17 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
     { name: 'Restoration Schedule Report', href: '/dashboard/ifrs16/reports/restoration', icon: FileText },
     { name: 'FX Schedule Report', href: '/dashboard/ifrs16/reports/fx', icon: FileText },
     { name: 'Liability Maturity Report', href: '/dashboard/ifrs16/reports/maturity', icon: FileText },
-    { name: 'IFRS 15 Revenue Recognition', href: '/dashboard/ifrs15', icon: DollarSign },
-    { name: 'Real Estate UAE (IFRS 15)', href: '/dashboard/ifrs15/realestate', icon: Building2 },
-    { name: '  └ Portfolio Analytics', href: '/dashboard/ifrs15/realestate/portfolio', icon: Building2 },
+  ];
+
+  const ifrs15Nav = [
+    { name: 'Revenue Recognition', href: '/dashboard/ifrs15', icon: DollarSign },
+    { name: 'Real Estate UAE', href: '/dashboard/ifrs15/realestate', icon: Building2 },
+    { name: 'Portfolio Analytics', href: '/dashboard/ifrs15/realestate/portfolio', icon: PieChart },
     { name: 'Rev Rec Reconciliation', href: '/dashboard/r2r/rev-rec', icon: FileCheck },
-    { name: 'IFRS 9 Overview', href: '/dashboard/ifrs9', icon: TrendingUp },
+  ];
+
+  const ifrs9Nav = [
+    { name: 'Overview', href: '/dashboard/ifrs9', icon: LayoutDashboard },
     { name: 'ECL Portfolios', href: '/dashboard/ifrs9/portfolios', icon: FolderOpen, badge: eclPortfolioCount, badgeStyle: 'count' },
     { name: 'New Portfolio', href: '/dashboard/ifrs9/portfolios/new', icon: Plus },
     { name: 'Provision Matrix', href: '/dashboard/ifrs9/portfolios', icon: BarChart2 },
@@ -194,22 +208,122 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
     { name: 'Disclosure Notes', href: '/dashboard/ifrs9/portfolios', icon: FileEdit },
   ];
 
+  type IfrsModule = 'ifrs15' | 'ifrs16' | 'ifrs9';
+
+  const activeModule: IfrsModule | null = pathname.startsWith('/dashboard/ifrs15')
+    ? 'ifrs15'
+    : pathname.startsWith('/dashboard/ifrs16')
+      ? 'ifrs16'
+      : pathname.startsWith('/dashboard/ifrs9')
+        ? 'ifrs9'
+        : null;
+
+  /** IFRS 15/9 pages use ModuleWorkspaceLayout for detailed in-page nav — avoid duplicating links here. */
+  const usesInnerModuleNav = activeModule === 'ifrs15' || activeModule === 'ifrs9';
+
+  const moduleDetailNav =
+    activeModule === 'ifrs16'
+      ? ifrs16Nav
+      : activeModule === 'ifrs15' && !usesInnerModuleNav
+        ? ifrs15Nav
+        : activeModule === 'ifrs9' && !usesInnerModuleNav
+          ? ifrs9Nav
+          : [];
+
+  const isActive = (href: string) => {
+    const base = href.split('?')[0];
+    if (base === '/dashboard') return pathname === '/dashboard';
+    return pathname === base || pathname.startsWith(`${base}/`);
+  };
+
+  const isModuleActive = (module: IfrsModule) => activeModule === module;
+
+  const renderNavLink = (
+    item: {
+      name: string;
+      href: string;
+      icon: ComponentType<{ className?: string }>;
+      highlight?: boolean;
+      badge?: number;
+      badgeStyle?: string;
+    },
+    key?: string
+  ) => {
+    const Icon = item.icon;
+    const active = isActive(item.href);
+    const highlight = item.highlight;
+    const badge = item.badge;
+    const badgeStyle = item.badgeStyle;
+    const showBadge = badge != null && (badgeStyle === 'alert' ? badge > 0 : true);
+    const badgeClass =
+      badgeStyle === 'alert'
+        ? 'px-2 py-0.5 bg-red-500 text-white text-xs rounded-full'
+        : 'px-2 py-0.5 bg-[#e2e8f0] text-[#64748b] text-xs rounded-full';
+    return (
+      <Link
+        key={key ?? item.href}
+        href={item.href}
+        className={cn(
+          'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors mb-1',
+          highlight &&
+            'rounded-full bg-gradient-to-r from-amber-100/95 to-orange-50 border border-amber-200/90 text-amber-950 shadow-[0_1px_5px_rgba(251,191,36,0.35)]',
+          active && highlight && 'ring-2 ring-amber-300/80 ring-offset-1',
+          active && !highlight && 'bg-orange-light text-orange-primary',
+          !active && !highlight && 'text-text-secondary hover:bg-bg-light hover:text-text-primary',
+          !active && highlight && 'hover:from-amber-100 hover:to-orange-100/90 hover:border-amber-300'
+        )}
+      >
+        <Icon className="w-4 h-4" />
+        <span className="flex-1">{item.name}</span>
+        {showBadge && <span className={badgeClass}>{badge}</span>}
+      </Link>
+    );
+  };
+
   const moreNav = [
+    ...(isAdmin ? [{ name: 'Client Workspaces', href: '/dashboard/admin/firms', icon: Building2 }] : []),
     { name: 'Settings', href: '/dashboard/admin/macro-sensitivity', icon: Settings },
     { name: 'Reports', href: '/dashboard/reports', icon: FileCheck },
     { name: 'AI Assistant', href: '/dashboard/assistant', icon: MessageSquare },
     { name: 'Health Check', href: '/dashboard/health', icon: Activity },
   ];
 
-  const isActive = (href: string) => pathname === href;
+  /** IFRS 15/9 use in-page module sidebar — hide the global left nav to avoid double sidebars. */
+  const hideMainSidebar = usesInnerModuleNav;
+
+  const apiStatusBadge = (
+    <>
+      {backendLive === null ? (
+        <div className="flex items-center gap-2 px-3 py-1 bg-slate-50 border border-slate-200 rounded-full">
+          <Circle className="w-2 h-2 fill-slate-400 text-slate-400 animate-pulse" />
+          <span className="text-xs font-medium text-slate-600">Checking API…</span>
+        </div>
+      ) : backendLive === false ? (
+        <div className="flex items-center gap-2 max-w-[min(320px,40vw)]" title={getBackendConnectivityMessage()}>
+          <div className="flex items-center gap-2 px-3 py-1 bg-amber-50 border border-amber-200 rounded-full cursor-help">
+            <Circle className="w-2 h-2 shrink-0 fill-amber-500 text-amber-500" />
+            <span className="text-xs font-medium text-amber-900 leading-snug truncate">
+              {isCustomerFacingBuild() ? getBackendConnectivityShortLabel() : 'API offline'}
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 px-3 py-1 bg-green-50 border border-green-200 rounded-full">
+          <Circle className="w-2 h-2 fill-green-500 text-green-500" />
+          <span className="text-xs font-medium text-green-700">API connected</span>
+        </div>
+      )}
+    </>
+  );
 
   return (
     <div className="min-h-screen bg-bg-light flex">
-      {/* Left Sidebar - Fixed 220px */}
+      {/* Global left sidebar — hidden on IFRS 15/9 module pages (single in-page nav only) */}
+      {!hideMainSidebar ? (
       <aside className="w-[220px] bg-white border-r border-border-default fixed left-0 top-0 bottom-0 flex flex-col z-50">
         {/* Logo */}
         <div className="p-6 border-b border-border-default">
-          <Link href="/dashboard" className="flex items-center">
+          <Link href="/dashboard/ifrs16" className="flex items-center">
             <span className="text-xl font-bold text-text-primary">
               IFRS<span className="text-gradient-orange">.ai</span>
             </span>
@@ -245,42 +359,36 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
 
           {/* IFRS Section */}
           <div className="px-4 mb-6">
-            <p className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2 px-3">IFRS</p>
-            {ifrsNav.map((item) => {
+            <p className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2 px-3">IFRS Modules</p>
+            {moduleSwitch.map((item) => {
               const Icon = item.icon;
-              const active = isActive(item.href);
-              const highlight = (item as { highlight?: boolean }).highlight;
-              const badge = (item as { badge?: number; badgeStyle?: string }).badge;
-              const badgeStyle = (item as { badgeStyle?: string }).badgeStyle;
-              const showBadge = badge != null && (badgeStyle === 'alert' ? badge > 0 : true);
-              const badgeClass = badgeStyle === 'alert'
-                ? 'px-2 py-0.5 bg-red-500 text-white text-xs rounded-full'
-                : 'px-2 py-0.5 bg-[#e2e8f0] text-[#64748b] text-xs rounded-full';
+              const active = isModuleActive(item.module);
               return (
                 <Link
-                  key={`${item.href}-${item.name}`}
+                  key={item.module}
                   href={item.href}
                   className={cn(
                     'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors mb-1',
-                    highlight &&
-                      'rounded-full bg-gradient-to-r from-amber-100/95 to-orange-50 border border-amber-200/90 text-amber-950 shadow-[0_1px_5px_rgba(251,191,36,0.35)]',
-                    active && highlight && 'ring-2 ring-amber-300/80 ring-offset-1',
-                    active && !highlight && 'bg-orange-light text-orange-primary',
-                    !active && !highlight && 'text-text-secondary hover:bg-bg-light hover:text-text-primary',
-                    !active &&
-                      highlight &&
-                      'hover:from-amber-100 hover:to-orange-100/90 hover:border-amber-300'
+                    active
+                      ? 'bg-orange-light text-orange-primary border-l-[3px] border-orange-primary'
+                      : 'text-text-secondary hover:bg-bg-light hover:text-text-primary border-l-[3px] border-transparent'
                   )}
                 >
                   <Icon className="w-4 h-4" />
-                  <span className="flex-1">{item.name}</span>
-                  {showBadge && (
-                    <span className={badgeClass}>{badge}</span>
-                  )}
+                  {item.name}
                 </Link>
               );
             })}
           </div>
+
+          {moduleDetailNav.length > 0 ? (
+            <div className="px-4 mb-6">
+              <p className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2 px-3">
+                {activeModule === 'ifrs16' ? 'IFRS 16' : activeModule === 'ifrs15' ? 'IFRS 15' : 'IFRS 9'}
+              </p>
+              {moduleDetailNav.map((item) => renderNavLink(item, `${item.href}-${item.name}`))}
+            </div>
+          ) : null}
 
           {/* More Section */}
           <div className="px-4">
@@ -320,53 +428,88 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
           </div>
         </div>
       </aside>
+      ) : null}
 
       {/* Main Content Area */}
-      <div className="flex-1 ml-[220px] flex flex-col">
-        {/* Top Bar - Sticky 56px */}
-        <header className="h-14 bg-white border-b border-border-default sticky top-0 z-40 flex items-center justify-between px-7">
-          <div className="flex items-center gap-2 text-sm text-text-secondary">
-            <span>IFRS</span>
-            <ChevronRight className="w-4 h-4" />
-            <span className="text-text-primary font-medium">{pageTitle}</span>
-          </div>
-          <div className="flex items-center gap-3">
-            {backendLive === null ? (
-              <div className="flex items-center gap-2 px-3 py-1 bg-slate-50 border border-slate-200 rounded-full">
-                <Circle className="w-2 h-2 fill-slate-400 text-slate-400 animate-pulse" />
-                <span className="text-xs font-medium text-slate-600">Checking API…</span>
-              </div>
-            ) : backendLive === false ? (
-              <div
-                className="flex items-center gap-2 max-w-[min(420px,50vw)]"
-                title={getBackendConnectivityMessage()}
-              >
-                <div className="flex items-center gap-2 px-3 py-1 bg-amber-50 border border-amber-200 rounded-full cursor-help">
-                  <Circle className="w-2 h-2 shrink-0 fill-amber-500 text-amber-500" />
-                  <span className="text-xs font-medium text-amber-900 leading-snug">
-                    {isCustomerFacingBuild() ? (
-                      getBackendConnectivityShortLabel()
-                    ) : (
-                      <>
-                        API offline — run{' '}
-                        <code className="text-[10px] bg-amber-100 px-1 rounded">python app.py</code>
-                        {' '}or{' '}
-                        <code className="text-[10px] bg-amber-100 px-1 rounded">START_LOCALHOST.bat</code>
-                        <span className="hidden sm:inline"> · hover for details</span>
-                      </>
+      <div className={cn('flex-1 flex flex-col', hideMainSidebar ? '' : 'ml-[220px]')}>
+        <header className="min-h-14 bg-white border-b border-border-default sticky top-0 z-40 flex items-center justify-between gap-4 px-4 lg:px-7 py-2">
+          {hideMainSidebar ? (
+            <div className="flex items-center gap-3 min-w-0 flex-1 overflow-x-auto">
+              <Link href="/dashboard/ifrs16" className="shrink-0 flex items-center">
+                <span className="text-lg font-bold text-text-primary">
+                  IFRS<span className="text-gradient-orange">.ai</span>
+                </span>
+              </Link>
+              <div className="hidden sm:flex items-center gap-1 shrink-0 border-l border-border-default pl-3">
+                {moduleSwitch.map((item) => (
+                  <Link
+                    key={item.module}
+                    href={item.href}
+                    className={cn(
+                      'px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition-colors',
+                      isModuleActive(item.module)
+                        ? 'bg-orange-light text-orange-primary'
+                        : 'text-text-secondary hover:bg-bg-light hover:text-text-primary'
                     )}
-                  </span>
+                  >
+                    {item.name.replace(' — ', ' ')}
+                  </Link>
+                ))}
+              </div>
+              <div className="relative shrink-0 sm:ml-1">
+                <button
+                  type="button"
+                  onClick={() => setMoreOpen((o) => !o)}
+                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-medium text-text-secondary hover:bg-bg-light"
+                >
+                  More <ChevronDown className="w-4 h-4" />
+                </button>
+                {moreOpen ? (
+                  <>
+                    <button
+                      type="button"
+                      className="fixed inset-0 z-40"
+                      aria-label="Close menu"
+                      onClick={() => setMoreOpen(false)}
+                    />
+                    <div className="absolute left-0 top-full mt-1 z-50 min-w-[200px] bg-white border border-border-default rounded-lg shadow-lg py-1">
+                      {moreNav.map((item) => {
+                        const Icon = item.icon;
+                        return (
+                          <Link
+                            key={item.href}
+                            href={item.href}
+                            onClick={() => setMoreOpen(false)}
+                            className="flex items-center gap-2 px-4 py-2 text-sm text-text-secondary hover:bg-bg-light hover:text-text-primary"
+                          >
+                            <Icon className="w-4 h-4" />
+                            {item.name}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-sm text-text-secondary min-w-0">
+              <span>IFRS</span>
+              <ChevronRight className="w-4 h-4 shrink-0" />
+              <span className="text-text-primary font-medium truncate">{pageTitle}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-3 shrink-0">
+            {apiStatusBadge}
+            {hideMainSidebar ? (
+              <div className="hidden md:flex items-center gap-2 pl-2 border-l border-border-default">
+                <div className="w-8 h-8 rounded-full bg-orange-light flex items-center justify-center">
+                  <User className="w-4 h-4 text-orange-primary" />
                 </div>
               </div>
-            ) : (
-              <div className="flex items-center gap-2 px-3 py-1 bg-green-50 border border-green-200 rounded-full">
-                <Circle className="w-2 h-2 fill-green-500 text-green-500" />
-                <span className="text-xs font-medium text-green-700">API connected</span>
-              </div>
-            )}
+            ) : null}
           </div>
         </header>
-
         {/* Page Content */}
         <main className="flex-1 p-6 px-7">
           {/* Page Header */}
