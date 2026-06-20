@@ -1007,9 +1007,14 @@ def consolidate_leases(entities: list[dict]) -> dict:
             "fx_translation_adjustment": 0,
         },
         "intercompany_eliminations": [],
+        "intercompany_eliminated_count": 0,
         "consolidation_journal": [],
         "currency": "GROUP_CCY",
     }
+
+    entity_names = {e["entity_name"] for e in entities}
+    intercompany_eliminations: list[dict] = []
+    intercompany_eliminated_count = 0
 
     for entity in entities:
         fx = entity.get("fx_rate_to_group", 1.0)
@@ -1024,6 +1029,7 @@ def consolidate_leases(entities: list[dict]) -> dict:
             "interest_expense": 0,
             "rou_asset_group_ccy": 0,
             "lease_liability_group_ccy": 0,
+            "intercompany_leases": [],
         }
 
         for lease in entity.get("leases", []):
@@ -1033,6 +1039,34 @@ def consolidate_leases(entities: list[dict]) -> dict:
             non_current = liab - current
             dep = lease.get("depreciation_year1", rou / max(lease.get("lease_term_years", 1), 1))
             interest = lease.get("interest_expense_year1", 0)
+
+            is_ic = bool(lease.get("is_intercompany")) and lease.get("intercompany_with") in entity_names
+
+            if is_ic:
+                # TODO: P&L-side elimination (depreciation/interest netting between lessee
+                # and lessor) and formal intercompany elimination journal entries are not
+                # implemented yet — balance-sheet amounts only are excluded from group totals.
+                rou_group = rou * fx
+                liab_group = liab * fx
+                intercompany_eliminations.append(
+                    {
+                        "lease_id": lease.get("lease_id"),
+                        "lessee_entity": entity["entity_name"],
+                        "lessor_entity": lease.get("intercompany_with"),
+                        "rou_asset": rou_group,
+                        "lease_liability": liab_group,
+                    }
+                )
+                intercompany_eliminated_count += 1
+                entity_totals["intercompany_leases"].append(
+                    {
+                        "lease_id": lease.get("lease_id"),
+                        "lessor_entity": lease.get("intercompany_with"),
+                        "rou_asset": rou,
+                        "lease_liability": liab,
+                    }
+                )
+                continue
 
             entity_totals["rou_asset"] += rou
             entity_totals["lease_liability_current"] += current
@@ -1057,6 +1091,9 @@ def consolidate_leases(entities: list[dict]) -> dict:
         group_summary["group_totals"]["fx_translation_adjustment"] += fx_adj
 
         group_summary["entities"].append(entity_totals)
+
+    group_summary["intercompany_eliminations"] = intercompany_eliminations
+    group_summary["intercompany_eliminated_count"] = intercompany_eliminated_count
 
     # Consolidation journal entries
     g = group_summary["group_totals"]

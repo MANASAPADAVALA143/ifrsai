@@ -262,5 +262,83 @@ class IFRS16CalculatorTests(unittest.TestCase):
             self.assertLess(len(schedule), 120)
 
 
+class ConsolidateLeasesTests(unittest.TestCase):
+    def test_intercompany_lease_excluded_from_group_totals(self):
+        from ifrs16_calculator import consolidate_leases
+
+        entities = [
+            {
+                "entity_name": "UAE HoldCo",
+                "entity_currency": "AED",
+                "fx_rate_to_group": 1.0,
+                "leases": [],
+            },
+            {
+                "entity_name": "UAE PropCo",
+                "entity_currency": "AED",
+                "fx_rate_to_group": 1.0,
+                "leases": [
+                    {
+                        "lease_id": "normal-1",
+                        "rou_asset": 100_000,
+                        "lease_liability": 100_000,
+                        "lease_term_years": 5,
+                        "interest_expense_year1": 5_000,
+                    },
+                    {
+                        "lease_id": "ic-1",
+                        "rou_asset": 50_000,
+                        "lease_liability": 50_000,
+                        "lease_term_years": 5,
+                        "interest_expense_year1": 2_500,
+                        "is_intercompany": True,
+                        "intercompany_with": "UAE HoldCo",
+                    },
+                ],
+            },
+        ]
+
+        result = consolidate_leases(entities)
+        g = result["group_totals"]
+
+        self.assertEqual(result["intercompany_eliminated_count"], 1)
+        self.assertEqual(len(result["intercompany_eliminations"]), 1)
+        ic = result["intercompany_eliminations"][0]
+        self.assertEqual(ic["lessee_entity"], "UAE PropCo")
+        self.assertEqual(ic["lessor_entity"], "UAE HoldCo")
+        self.assertEqual(ic["rou_asset"], 50_000)
+        self.assertEqual(ic["lease_liability"], 50_000)
+
+        self.assertEqual(g["rou_asset"], 100_000)
+        self.assertEqual(g["lease_liability_current"], 30_000)
+        self.assertEqual(g["lease_liability_non_current"], 70_000)
+
+        propco = next(e for e in result["entities"] if e["entity_name"] == "UAE PropCo")
+        self.assertEqual(propco["rou_asset"], 100_000)
+        self.assertEqual(len(propco["intercompany_leases"]), 1)
+
+    def test_non_intercompany_leases_unchanged(self):
+        from ifrs16_calculator import consolidate_leases
+
+        entities = [
+            {
+                "entity_name": "Entity A",
+                "entity_currency": "AED",
+                "fx_rate_to_group": 1.0,
+                "leases": [
+                    {
+                        "rou_asset": 200_000,
+                        "lease_liability": 200_000,
+                        "lease_term_years": 10,
+                    },
+                ],
+            },
+        ]
+
+        result = consolidate_leases(entities)
+        self.assertEqual(result["intercompany_eliminated_count"], 0)
+        self.assertEqual(result["group_totals"]["rou_asset"], 200_000)
+
+
 if __name__ == "__main__":
     unittest.main()

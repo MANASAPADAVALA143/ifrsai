@@ -20,6 +20,9 @@ type LeaseInput = {
   lease_liability: number;
   lease_term_years: number;
   interest_expense_year1: number;
+  lease_id?: string;
+  is_intercompany?: boolean;
+  intercompany_with?: string;
 };
 
 type EntityInput = {
@@ -81,6 +84,7 @@ function mapLeaseToInput(l: LeaseRepositoryEntry): LeaseInput {
     lease_liability: Number(l.liability ?? res.lease_liability ?? 0),
     lease_term_years: Math.max(1, Math.round((termMonths > 0 ? termMonths : 12) / 12 * 10) / 10),
     interest_expense_year1: year1Interest(l),
+    lease_id: l.lease_id || l.id,
   };
 }
 
@@ -99,6 +103,18 @@ export default function ConsolidationPage() {
   const updateEntity = (idx: number, patch: Partial<EntityInput>) =>
     setEntities((p) => p.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
 
+  const updateLease = (entityIdx: number, leaseIdx: number, patch: Partial<LeaseInput>) =>
+    setEntities((p) =>
+      p.map((e, i) =>
+        i === entityIdx
+          ? {
+              ...e,
+              leases: e.leases.map((lease, j) => (j === leaseIdx ? { ...lease, ...patch } : lease)),
+            }
+          : e
+      )
+    );
+
   const addManualLease = (idx: number) =>
     setEntities((p) =>
       p.map((e, i) =>
@@ -108,6 +124,7 @@ export default function ConsolidationPage() {
               leases: [
                 ...e.leases,
                 {
+                  lease_id: crypto.randomUUID(),
                   rou_asset: Number(e.manual.rou_asset || 0),
                   lease_liability: Number(e.manual.lease_liability || 0),
                   lease_term_years: Number(e.manual.lease_term_years || 1),
@@ -162,7 +179,15 @@ export default function ConsolidationPage() {
           entity_name: e.entity_name,
           entity_currency: e.entity_currency,
           fx_rate_to_group: Number(e.fx_rate_to_group || 1),
-          leases: e.leases,
+          leases: e.leases.map((lease) => ({
+            rou_asset: lease.rou_asset,
+            lease_liability: lease.lease_liability,
+            lease_term_years: lease.lease_term_years,
+            interest_expense_year1: lease.interest_expense_year1,
+            ...(lease.lease_id ? { lease_id: lease.lease_id } : {}),
+            ...(lease.is_intercompany ? { is_intercompany: true } : {}),
+            ...(lease.intercompany_with ? { intercompany_with: lease.intercompany_with } : {}),
+          })),
         })),
     };
     if (!payload.entities.length) {
@@ -293,7 +318,72 @@ export default function ConsolidationPage() {
               <p className="mt-3 text-xs text-[#64748b]">
                 Tip: Save leases in IFRS 16, then click &apos;Load from saved leases&apos; to import automatically.
               </p>
-              <p className="mt-2 text-xs text-[#64748b]">Leases loaded: {entity.leases.length}</p>
+
+              {entity.leases.length > 0 && (
+                <div className="mt-4 space-y-3">
+                  <p className="text-sm font-medium text-[#334155]">Leases ({entity.leases.length})</p>
+                  {entity.leases.map((lease, leaseIdx) => {
+                    const counterpartyOptions = entities
+                      .filter((e, i) => i !== idx && e.entity_name.trim())
+                      .map((e) => e.entity_name);
+                    return (
+                      <div
+                        key={lease.lease_id || leaseIdx}
+                        className="rounded-lg border border-[#e2e8f0] bg-[#f8fafc] p-3 text-sm"
+                      >
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[#64748b]">
+                          <span>ROU: {formatLeaseMoney(lease.rou_asset, entity.entity_currency)}</span>
+                          <span>Liability: {formatLeaseMoney(lease.lease_liability, entity.entity_currency)}</span>
+                          <span>Term: {lease.lease_term_years} yr</span>
+                          {lease.lease_id && <span className="text-xs">ID: {lease.lease_id}</span>}
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-3">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(lease.is_intercompany)}
+                              onChange={(e) =>
+                                updateLease(idx, leaseIdx, {
+                                  is_intercompany: e.target.checked,
+                                  intercompany_with: e.target.checked
+                                    ? lease.intercompany_with || counterpartyOptions[0] || ''
+                                    : undefined,
+                                })
+                              }
+                            />
+                            <span className="text-xs font-medium text-[#64748b]">Intercompany?</span>
+                          </label>
+                          {lease.is_intercompany && (
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-[#64748b]">Lessor is which entity?</label>
+                              <select
+                                className="px-2 py-1 rounded border border-[#e2e8f0] bg-white text-sm"
+                                value={lease.intercompany_with || ''}
+                                onChange={(e) =>
+                                  updateLease(idx, leaseIdx, { intercompany_with: e.target.value })
+                                }
+                              >
+                                <option value="">Select lessor entity…</option>
+                                {counterpartyOptions.map((name) => (
+                                  <option key={name} value={name}>
+                                    {name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </div>
+                        {lease.is_intercompany && (
+                          <p className="mt-2 text-xs text-[#64748b]">
+                            Mark this lease as intercompany if {entity.entity_name || 'this entity'} is leasing from
+                            another entity in this same group. It will be excluded from group totals.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -343,6 +433,37 @@ export default function ConsolidationPage() {
                 <div>FX Translation Reserve: <strong>{formatGroupMoney(Number(result.group_totals?.fx_translation_adjustment || 0))}</strong></div>
               </div>
             </div>
+
+            {Number(result.intercompany_eliminated_count || 0) > 0 && (
+              <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0]">
+                <h4 className="font-semibold mb-1">Intercompany Eliminations</h4>
+                <p className="text-sm text-[#64748b] mb-3">
+                  Intercompany eliminations: {result.intercompany_eliminated_count} lease(s) excluded from group totals
+                </p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[#e2e8f0]">
+                        <th className="text-left py-2">Lessee</th>
+                        <th className="text-left py-2">Lessor</th>
+                        <th className="text-right py-2">ROU Asset Excluded</th>
+                        <th className="text-right py-2">Lease Liability Excluded</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(result.intercompany_eliminations || []).map((row: any, i: number) => (
+                        <tr key={row.lease_id || i} className="border-b border-[#e2e8f0]">
+                          <td className="py-2">{row.lessee_entity}</td>
+                          <td className="py-2">{row.lessor_entity}</td>
+                          <td className="py-2 text-right">{formatGroupMoney(Number(row.rou_asset || 0))}</td>
+                          <td className="py-2 text-right">{formatGroupMoney(Number(row.lease_liability || 0))}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             <div className="bg-white rounded-[14px] p-5 border border-[#e2e8f0]">
               <h4 className="font-semibold mb-3">Consolidation Journal Entries</h4>
