@@ -26,7 +26,7 @@ timeout /t 6 /nobreak >nul
 
 REM Start Frontend (new window - keep it open) — must match frontend/package.json "dev" (port 3004)
 echo [2/2] Opening Frontend window...
-start "IFRS AI Frontend" cmd /k "cd /d %~dp0frontend && echo Starting frontend... && npm run dev"
+start "IFRS AI Frontend" cmd /k "cd /d %~dp0frontend && echo Starting frontend... && npm run dev:webpack"
 
 echo Waiting until Next.js answers on 127.0.0.1:3004 ^(first run can take 1-2 minutes^)...
 set /a _FRONT_WAIT=0

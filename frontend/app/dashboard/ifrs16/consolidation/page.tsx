@@ -1,10 +1,11 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { consolidationApi } from '@/lib/api';
 import {
+  getDistinctLegalEntities,
   getLeaseRepository,
   refreshLeaseRepositoryFromServer,
   type LeaseRepositoryEntry,
@@ -88,14 +89,64 @@ function mapLeaseToInput(l: LeaseRepositoryEntry): LeaseInput {
   };
 }
 
+function matchesLegalEntity(lease: LeaseRepositoryEntry, legalEntityFilter: string): boolean {
+  return (lease.legal_entity || '').trim() === legalEntityFilter.trim();
+}
+
+async function resolveActiveLeasesFromRepo(legalEntityFilter?: string): Promise<{
+  mapped: LeaseInput[];
+  dominant: string;
+} | null> {
+  let repo = await refreshLeaseRepositoryFromServer();
+  if (repo.length === 0) repo = getLeaseRepository();
+
+  let active = repo
+    .filter(isActiveLease)
+    .filter((l) => !isPortfolioAggregateLease(l))
+    .filter((l) => {
+      const mapped = mapLeaseToInput(l);
+      return mapped.lease_liability > 0 || mapped.rou_asset > 0;
+    });
+
+  if (legalEntityFilter?.trim()) {
+    active = active.filter((l) => matchesLegalEntity(l, legalEntityFilter));
+  }
+
+  if (active.length === 0) return null;
+
+  const mapped = active.map(mapLeaseToInput);
+  const dominant = String(
+    active[0]?.currency || active[0]?.payments?.currency || getCurrentFirmCurrency()
+  ).toUpperCase();
+  return { mapped, dominant };
+}
+
 export default function ConsolidationPage() {
   const [groupCurrency, setGroupCurrency] = useState(() => defaultEntityCurrency());
-  const [entities, setEntities] = useState<EntityInput[]>([blankEntity()]);
+  const [entities, setEntities] = useState<EntityInput[]>([]);
+  const [availableEntities, setAvailableEntities] = useState<string[]>([]);
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [importingIdx, setImportingIdx] = useState<number | null>(null);
+  const [importingEntity, setImportingEntity] = useState<string | null>(null);
 
   const formatGroupMoney = (amount: number) => formatLeaseMoney(amount, groupCurrency);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        let repo = await refreshLeaseRepositoryFromServer();
+        if (repo.length === 0) repo = getLeaseRepository();
+        if (!cancelled) setAvailableEntities(getDistinctLegalEntities(repo));
+      } catch {
+        if (!cancelled) setAvailableEntities(getDistinctLegalEntities(getLeaseRepository()));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const addEntity = () => setEntities((p) => [...p, blankEntity()]);
   const removeEntity = (idx: number) => setEntities((p) => p.filter((_, i) => i !== idx));
@@ -136,37 +187,68 @@ export default function ConsolidationPage() {
       )
     );
 
-  const loadFromSavedLeases = async (idx: number) => {
+  const loadFromSavedLeases = async (idx: number, legalEntityFilter?: string) => {
     setImportingIdx(idx);
     try {
-      let repo = await refreshLeaseRepositoryFromServer();
-      if (repo.length === 0) repo = getLeaseRepository();
-
-      const active = repo
-        .filter(isActiveLease)
-        .filter((l) => !isPortfolioAggregateLease(l))
-        .filter((l) => {
-          const mapped = mapLeaseToInput(l);
-          return mapped.lease_liability > 0 || mapped.rou_asset > 0;
-        });
-
-      if (active.length === 0) {
-        toast.error('No active leases found. Save leases in IFRS 16 first.');
+      const resolved = await resolveActiveLeasesFromRepo(legalEntityFilter);
+      if (!resolved) {
+        toast.error(
+          legalEntityFilter
+            ? `No active leases found for ${legalEntityFilter}.`
+            : 'No active leases found. Save leases in IFRS 16 first.'
+        );
         return;
       }
 
-      const mapped = active.map(mapLeaseToInput);
-      const dominant = active[0]?.currency || active[0]?.payments?.currency || getCurrentFirmCurrency();
-      updateEntity(idx, {
-        leases: mapped,
-        entity_currency: String(dominant).toUpperCase(),
-        fx_rate_to_group: String(dominant).toUpperCase() === groupCurrency ? 1 : undefined,
-      });
-      toast.success(`Loaded ${mapped.length} lease(s) from repository`);
+      const patch: Partial<EntityInput> = {
+        leases: resolved.mapped,
+        entity_currency: resolved.dominant,
+      };
+      if (resolved.dominant === groupCurrency) {
+        patch.fx_rate_to_group = 1;
+      }
+      updateEntity(idx, patch);
+      toast.success(`Loaded ${resolved.mapped.length} lease(s) from repository`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Failed to load leases');
     } finally {
       setImportingIdx(null);
+    }
+  };
+
+  const togglePortfolioEntity = async (name: string, checked: boolean) => {
+    if (!checked) {
+      setEntities((p) => p.filter((e) => e.entity_name.trim() !== name));
+      return;
+    }
+
+    setImportingEntity(name);
+    try {
+      const resolved = await resolveActiveLeasesFromRepo(name);
+      if (!resolved) {
+        toast.error(`No active leases found for ${name}.`);
+        return;
+      }
+
+      setEntities((prev) => {
+        const existingIdx = prev.findIndex((e) => e.entity_name.trim() === name);
+        const patch: Partial<EntityInput> = {
+          leases: resolved.mapped,
+          entity_currency: resolved.dominant,
+        };
+        if (resolved.dominant === groupCurrency) {
+          patch.fx_rate_to_group = 1;
+        }
+        if (existingIdx >= 0) {
+          return prev.map((e, i) => (i === existingIdx ? { ...e, ...patch } : e));
+        }
+        return [...prev, { ...blankEntity(), entity_name: name, ...patch }];
+      });
+      toast.success(`Added ${name} with ${resolved.mapped.length} lease(s)`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to load leases');
+    } finally {
+      setImportingEntity(null);
     }
   };
 
@@ -224,11 +306,10 @@ export default function ConsolidationPage() {
     >
       <div className="space-y-6">
         <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
-          <strong>How to use:</strong> Add each entity below → Load their saved leases → Click Consolidate to see
-          group totals.
+          <strong>How to use:</strong> Select entities from your lease portfolio below (leases load automatically) →
+          mark any intercompany leases → Click Consolidate to see group totals.
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button className="bg-[#f97316] text-white" onClick={addEntity}>+ Add Entity</Button>
           <Button className="bg-blue-600 text-white" onClick={runConsolidation} disabled={loading}>
             {loading ? 'Calculating...' : 'Consolidate'}
           </Button>
@@ -255,6 +336,42 @@ export default function ConsolidationPage() {
               ))}
             </select>
           </div>
+        </div>
+
+        <div className="bg-white rounded-[14px] p-4 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+          <h3 className="text-sm font-semibold text-[#334155] mb-2">Select entities from your lease portfolio</h3>
+          {availableEntities.length === 0 ? (
+            <p className="text-sm text-[#64748b] mb-3">
+              No entities found in your saved leases yet. Add a Legal Entity when creating a lease, or add an entity
+              manually below.
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-x-4 gap-y-2 mb-3">
+              {availableEntities.map((name) => {
+                const selected = entities.some((e) => e.entity_name.trim() === name);
+                return (
+                  <label
+                    key={name}
+                    className="flex items-center gap-2 cursor-pointer text-sm text-[#334155]"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      disabled={importingEntity === name}
+                      onChange={(e) => void togglePortfolioEntity(name, e.target.checked)}
+                    />
+                    <span>
+                      {name}
+                      {importingEntity === name ? ' (loading…)' : ''}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <Button variant="secondary" onClick={addEntity}>
+            + Add entity not in your portfolio
+          </Button>
         </div>
 
         <div className="space-y-4">
@@ -338,6 +455,7 @@ export default function ConsolidationPage() {
                           {lease.lease_id && <span className="text-xs">ID: {lease.lease_id}</span>}
                         </div>
                         <div className="mt-2 flex flex-wrap items-center gap-3">
+                          {/* TODO: auto-suggest intercompany relationships based on lessor/lessee name matching */}
                           <label className="flex items-center gap-2 cursor-pointer">
                             <input
                               type="checkbox"

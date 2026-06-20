@@ -271,6 +271,16 @@ export function getLeaseRepository(): LeaseRepositoryEntry[] {
   }
 }
 
+/** Distinct non-empty legal_entity values from saved leases (sorted). */
+export function getDistinctLegalEntities(repo: LeaseRepositoryEntry[]): string[] {
+  const names = new Set<string>();
+  for (const lease of repo) {
+    const name = (lease.legal_entity || '').trim();
+    if (name) names.add(name);
+  }
+  return Array.from(names).sort();
+}
+
 export function saveToLeaseRepository(entry: LeaseRepositoryEntry): void {
   const repo = getLeaseRepository();
   const enrichedEntry = ensureDisclosureNotes(entry);
