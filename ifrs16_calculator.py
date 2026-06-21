@@ -101,7 +101,7 @@ class IFRS16Calculator:
             return Decimal('0')
 
         is_advance = (lease.payment_type or "Arrears").strip().lower() == "advance"
-        if self._use_schedule_based_pv(lease) and not is_advance:
+        if self._use_schedule_based_pv(lease):
             return self._pv_lease_payments_schedule_based(lease)
         
         monthly_rate = lease.annual_discount_rate / Decimal('12')
@@ -178,6 +178,13 @@ class IFRS16Calculator:
         IFRS 16 §42: At each review date, remeasure lease liability using
         current index / base index ratio applied to the original payment.
         Future payments are assumed to stay at the revised amount.
+
+        NOTE: This applies a single, static CPI ratio (cpi_index_current / cpi_index_base) at
+        EVERY annual review point for the life of the lease. It does not model a changing index
+        series across multiple review dates — the same ratio is reapplied each year. This is a
+        simplification appropriate for leases with one CPI rebasing event; leases requiring
+        genuinely period-specific index updates each year are not yet supported and would need
+        a per-period index input (future enhancement, not implemented).
         """
         if cpi_index_base and cpi_index_base > 0 and cpi_index_current > 0:
             return base_payment * (cpi_index_current / cpi_index_base)
@@ -196,6 +203,10 @@ class IFRS16Calculator:
         Annual fixed escalation applies at the start of periods 13, 25, 37…
         (i.e. after each 12-month lease year), aligned with typical step-up clauses.
         CPI index reviews use the same anniversary periods when indices are provided.
+
+        When both CPI index fields and escalation_rate are set, CPI review takes precedence;
+        fixed escalation is not compounded on top (real leases use CPI-linked OR fixed review,
+        not both stacked).
         """
         if period <= rent_free:
             return payment
@@ -205,25 +216,26 @@ class IFRS16Calculator:
         cpi_cur = getattr(lease, 'cpi_index_current', Decimal('0')) or Decimal('0')
 
         if period > 1 and (period - 1) % freq == 0 and cpi_base > 0 and cpi_cur > 0:
+            # CPI review takes precedence over fixed escalation when both are set.
+            # Real commercial leases use CPI-linked OR fixed-escalation review, not both
+            # stacked. If a lease genuinely has both, only the CPI review is applied.
             base_lease_payment = self.get_lease_component_payment(lease)
             cpi_adjusted = self._get_cpi_adjusted_payment(
                 base_lease_payment,
                 cpi_base,
                 cpi_cur,
             )
-            escalation_cycles = (period - 1) // 12
-            return (cpi_adjusted * ((Decimal('1') + er) ** escalation_cycles)).quantize(
-                self.precision, ROUND_HALF_UP
-            )
+            return cpi_adjusted.quantize(self.precision, ROUND_HALF_UP)
         if er > 0 and period > 12 and (period - 1) % 12 == 0:
             return (payment * (Decimal('1') + er)).quantize(self.precision, ROUND_HALF_UP)
         return payment
 
     def _pv_lease_payments_schedule_based(self, lease: LeaseInput) -> Decimal:
-        """PV of lease payments when CPI and/or escalation change amounts period-by-period (arrears path)."""
+        """PV of lease payments when CPI and/or escalation change amounts period-by-period."""
         monthly_rate = lease.annual_discount_rate / Decimal('12')
         rent_free = getattr(lease, 'rent_free_months', 0) or 0
         payment = self.get_lease_component_payment(lease)
+        is_advance = (lease.payment_type or "Arrears").strip().lower() == "advance"
         pv = Decimal('0')
         for period in range(1, lease.lease_term_months + 1):
             if rent_free > 0 and period <= rent_free:
@@ -235,7 +247,10 @@ class IFRS16Calculator:
             if monthly_rate == 0:
                 pv += pay_amt
             else:
-                pv += pay_amt / ((Decimal('1') + monthly_rate) ** period)
+                # Advance: payment at start of period p occurs at t = p-1 months from commencement.
+                # Arrears: payment at end of period p occurs at t = p months from commencement.
+                exponent = (period - 1) if is_advance else period
+                pv += pay_amt / ((Decimal('1') + monthly_rate) ** exponent)
         return pv.quantize(self.precision, ROUND_HALF_UP)
 
     def _use_schedule_based_pv(self, lease: LeaseInput) -> bool:

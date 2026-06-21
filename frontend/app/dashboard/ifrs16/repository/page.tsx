@@ -27,6 +27,7 @@ import { ifrs16Api } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import toast from 'react-hot-toast';
+import * as XLSX from 'xlsx';
 
 function getStatus(endDate: string, entryStatus?: string): { label: string; className: string } {
   if (entryStatus === 'Draft') return { label: 'Draft', className: 'bg-gray-100 text-gray-700' };
@@ -68,6 +69,7 @@ export default function LeaseRepositoryPage() {
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [exportingWorkbooks, setExportingWorkbooks] = useState(false);
 
   const load = useCallback(() => {
     setLeases(getLeaseRepository());
@@ -153,14 +155,128 @@ export default function LeaseRepositoryPage() {
     toast.success('Deleted selected leases');
   };
 
-  const handleDownloadExcel = (entry: any) => {
+  const handleDownloadExcel = async (entry: any) => {
+    const leaseId = String(entry.lease_id || entry.id || 'lease');
     const fid = entry.excel_file_id;
-    if (!fid) {
-      toast.error('No Excel file for this lease');
+    if (fid) {
+      window.open(ifrs16Api.downloadReport(fid), '_blank');
+      toast.success('Download started');
       return;
     }
-    window.open(ifrs16Api.downloadReport(fid), '_blank');
-    toast.success('Download started');
+    const results = buildCalculationResults(entry);
+    const sched = results.amortization_schedule;
+    const hasSchedule = Array.isArray(sched) && sched.length > 0;
+    const hasTotals = results.lease_liability != null || results.rou_asset != null;
+    if (!hasSchedule && !hasTotals) {
+      toast.error('No calculation results for this lease — recalculate first');
+      return;
+    }
+    const toastId = toast.loading(`Building workbook for ${leaseId}…`);
+    try {
+      const blob = await ifrs16Api.exportLeaseWorkbookFromResults(leaseId, results);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `IFRS16_${leaseId}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success('Download started', { id: toastId });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Excel export failed', { id: toastId });
+    }
+  };
+
+  const handleExportContracts = () => {
+    const rows = (filtered.length > 0 ? filtered : leases).map((l) => {
+      const endDate = l.end_date || l.dates?.end || '9999-12-31';
+      const status = getStatus(endDate, l.status);
+      const ccy = resolveLeaseCurrency(l);
+      const liability = Number(l.liability ?? (l.results as { lease_liability?: number })?.lease_liability ?? 0);
+      const rou = Number(l.rou ?? (l.results as { rou_asset?: number })?.rou_asset ?? 0);
+      return {
+        'Lease ID': l.lease_id || l.id || '',
+        Title: l.title || l.asset || '',
+        'Lease Type': l.lease_type || '',
+        Lessee: l.lessee || l.lessee_name || '',
+        Lessor: l.lessor || l.lessor_name || '',
+        'Legal Entity': l.legal_entity || '',
+        Currency: ccy,
+        'Start Date': l.start_date || l.dates?.commencement || '',
+        'End Date': l.end_date || l.dates?.end || '',
+        'Monthly Payment': Number(l.monthly_payment ?? l.payments?.monthly ?? 0),
+        'Lease Liability': liability,
+        'ROU Asset': rou,
+        Status: status.label,
+        Version: l.version || 'V1',
+      };
+    });
+
+    if (rows.length === 0) {
+      toast.error('No leases to export');
+      return;
+    }
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Lease Register');
+    const stamp = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `IFRS16_Lease_Register_${rows.length}_leases_${stamp}.xlsx`);
+    toast.success(`Exported ${rows.length} lease(s) to Excel`);
+  };
+
+  const buildCalculationResults = (entry: any): Record<string, unknown> => {
+    const base = { ...((entry.results || {}) as Record<string, unknown>) };
+    const leaseId = String(entry.lease_id || entry.id || 'lease');
+    if (base.lease_id == null) base.lease_id = leaseId;
+    if (base.lease_liability == null && entry.liability != null) base.lease_liability = entry.liability;
+    if (base.rou_asset == null && entry.rou != null) base.rou_asset = entry.rou;
+    if (!base.disclosure_data && entry.currency) {
+      base.disclosure_data = { currency: entry.currency };
+    }
+    return base;
+  };
+
+  const handleExportAllWorkbooks = async (scope: 'all' | 'filtered' | 'selected' = 'all') => {
+    let source = leases;
+    if (scope === 'filtered') source = filtered;
+    else if (scope === 'selected') {
+      source = leases.filter((l) => selectedIds.has(rowSelectionKey(l)));
+      if (source.length === 0) {
+        toast.error('No leases selected');
+        return;
+      }
+    }
+
+    const payloads = source.map((l) => ({
+      lease_id: String(l.lease_id || l.id || 'lease'),
+      calculation_results: buildCalculationResults(l),
+    }));
+
+    if (payloads.length === 0) {
+      toast.error('No leases to export');
+      return;
+    }
+
+    setExportingWorkbooks(true);
+    const toastId = toast.loading(`Building ${payloads.length} IFRS 16 workbooks…`);
+    try {
+      const { blob, exportedCount, requestedCount } = await ifrs16Api.exportAllLeaseWorkbooksZip(payloads);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `IFRS16_All_Leases_${exportedCount}_${new Date().toISOString().slice(0, 10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      const msg =
+        exportedCount === requestedCount
+          ? `Downloaded ZIP with ${exportedCount} full workbook(s)`
+          : `Downloaded ${exportedCount} of ${requestedCount} workbooks — see _export_manifest.txt in ZIP for skips`;
+      toast.success(msg, { id: toastId });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Bulk workbook export failed', { id: toastId });
+    } finally {
+      setExportingWorkbooks(false);
+    }
   };
 
   const handleDelete = (entry: any) => {
@@ -195,8 +311,21 @@ export default function LeaseRepositoryPage() {
             <Button variant="secondary" className="border border-[#e2e8f0] bg-white">
               <FileSpreadsheet className="w-4 h-4 mr-2" /> Import Excel
             </Button>
-            <Button variant="secondary" className="border border-[#e2e8f0] bg-white">
-              <FileDown className="w-4 h-4 mr-2" /> Export Contracts
+            <Button
+              variant="secondary"
+              className="border border-[#e2e8f0] bg-white"
+              onClick={handleExportContracts}
+            >
+              <FileDown className="w-4 h-4 mr-2" /> Export Register
+            </Button>
+            <Button
+              variant="secondary"
+              className="border border-[#e2e8f0] bg-white"
+              onClick={() => void handleExportAllWorkbooks('all')}
+              disabled={exportingWorkbooks || leases.length === 0}
+            >
+              <Download className="w-4 h-4 mr-2" />
+              {exportingWorkbooks ? 'Building ZIP…' : 'Export All Workbooks (ZIP)'}
             </Button>
             <Link href="/dashboard/ifrs16/leases/new">
               <Button className="bg-gradient-to-r from-[#f97316] to-[#ef4444] text-white hover:opacity-90">
@@ -308,6 +437,15 @@ export default function LeaseRepositoryPage() {
         {selectedIds.size > 0 && (
           <div className="flex flex-wrap items-center gap-3 p-3 rounded-lg bg-[#f8fafc] border border-[#e2e8f0]">
             <span className="text-sm text-[#64748b]">{selectedIds.size} selected</span>
+            <Button
+              variant="secondary"
+              className="border border-[#e2e8f0] bg-white"
+              onClick={() => void handleExportAllWorkbooks('selected')}
+              disabled={exportingWorkbooks}
+            >
+              <Download className="w-4 h-4 mr-2" />
+              Export selected workbooks (ZIP)
+            </Button>
             <Button
               variant="secondary"
               className="border border-red-200 text-red-700 hover:bg-red-50"
@@ -447,7 +585,7 @@ export default function LeaseRepositoryPage() {
                                       </button>
                                     </Link>
                                     <button
-                                      onClick={() => handleDownloadExcel(l)}
+                                      onClick={() => void handleDownloadExcel(l)}
                                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[#1e293b] hover:bg-[#f8fafc]"
                                     >
                                       <Download className="w-4 h-4" /> Download Excel

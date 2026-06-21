@@ -483,6 +483,7 @@ export default function BulkUploadPage() {
   const [parsedRows, setParsedRows] = useState<ParsedLeaseRow[]>([]);
   const [previewPage, setPreviewPage] = useState(0);
   const [bulkResult, setBulkResult] = useState<MergedBulkResponse | null>(null);
+  const [exportingWorkbooks, setExportingWorkbooks] = useState(false);
   const [calculating, setCalculating] = useState(false);
   const [calcDone, setCalcDone] = useState(0);
   const [calcTotal, setCalcTotal] = useState(0);
@@ -678,6 +679,44 @@ export default function BulkUploadPage() {
     toast.success('Results downloaded');
   };
 
+  const downloadAllWorkbooks = async () => {
+    if (!bulkResult) return;
+    const successes = bulkResult.results.filter((r) => r.status === 'success');
+    if (successes.length === 0) {
+      toast.error('No successful leases to export');
+      return;
+    }
+    setExportingWorkbooks(true);
+    const toastId = toast.loading(`Building ${successes.length} IFRS 16 workbooks…`);
+    try {
+      const payloads = successes.map((r) => ({
+        lease_id: r.lease_id,
+        calculation_results: (r.calculation_results || {
+          lease_liability: r.lease_liability,
+          rou_asset: r.rou_asset,
+          monthly_depreciation: r.monthly_depreciation,
+          total_interest: r.total_interest,
+        }) as Record<string, unknown>,
+      }));
+      const { blob, exportedCount, requestedCount } = await ifrs16Api.exportAllLeaseWorkbooksZip(payloads);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `IFRS16_All_Leases_${exportedCount}_${new Date().toISOString().slice(0, 10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      const msg =
+        exportedCount === requestedCount
+          ? `Downloaded ZIP with ${exportedCount} full workbook(s)`
+          : `Downloaded ${exportedCount} of ${requestedCount} workbooks — see _export_manifest.txt in ZIP for skips`;
+      toast.success(msg, { id: toastId });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Bulk workbook export failed', { id: toastId });
+    } finally {
+      setExportingWorkbooks(false);
+    }
+  };
+
   const saveAllToRepository = () => {
     if (!bulkResult) return;
     let n = 0;
@@ -699,6 +738,7 @@ export default function BulkUploadPage() {
         monthly_payment: pr?.monthly_payment ?? 0,
         currency: pr?.currency ?? 'INR',
         lessee_name: pr?.lessee_name,
+        legal_entity: pr?.lessee_name,
         lessor_name: pr?.lessor_name,
         discount_rate: pr ? pr.annual_discount_rate * 100 : undefined,
         rent_free_months: pr?.rent_free_months ?? 0,
@@ -1077,9 +1117,17 @@ export default function BulkUploadPage() {
             </div>
 
             <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => void downloadAllWorkbooks()}
+                disabled={exportingWorkbooks}
+              >
+                <Download className="w-4 h-4" />
+                {exportingWorkbooks ? 'Building ZIP…' : 'Download All Workbooks (ZIP)'}
+              </Button>
               <Button variant="secondary" onClick={downloadResultsExcel}>
                 <Download className="w-4 h-4" />
-                Download Results Excel
+                Download Summary Excel
               </Button>
               <Button variant="primary" onClick={saveAllToRepository}>
                 Save All to Repository

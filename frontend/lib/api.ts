@@ -238,6 +238,33 @@ export const ifrs16Api = {
     return response.blob();
   },
 
+  /** ZIP of full IFRS 16 workbooks (one .xlsx per lease with calculation results). */
+  exportAllLeaseWorkbooksZip: async (
+    leases: { lease_id: string; calculation_results: Record<string, unknown> }[]
+  ): Promise<{ blob: Blob; exportedCount: number; requestedCount: number }> => {
+    const response = await fetch(`${API_URL}/api/ifrs16/export-excel-bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ leases }),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      let msg = `Bulk Excel export failed (${response.status})`;
+      try {
+        const err = JSON.parse(text) as { detail?: unknown };
+        if (typeof err.detail === 'string') msg = err.detail;
+        else if (err.detail != null) msg = JSON.stringify(err.detail);
+      } catch {
+        const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 300);
+        if (snippet) msg = `${msg}. ${snippet}`;
+      }
+      throw new Error(msg);
+    }
+    const exportedCount = Number(response.headers.get('X-Exported-Count') || leases.length);
+    const requestedCount = Number(response.headers.get('X-Requested-Count') || leases.length);
+    return { blob: await response.blob(), exportedCount, requestedCount };
+  },
+
   bulkTemplateUrl: () => `${API_URL}/api/ifrs16/bulk-template`,
 
   bulkCalculate: async (leases: unknown[]) =>

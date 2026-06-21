@@ -518,6 +518,17 @@ class IFRS16ExportExcelRequest(BaseModel):
     calculation_results: Dict[str, Any] = Field(..., description="Full IFRS16Calculator output (JSON shape)")
 
 
+class IFRS16BulkExportExcelItem(BaseModel):
+    lease_id: str = Field(default="lease")
+    calculation_results: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IFRS16BulkExportExcelRequest(BaseModel):
+    """Build one full IFRS 16 workbook per lease and return as a single ZIP."""
+
+    leases: List[IFRS16BulkExportExcelItem] = Field(default_factory=list)
+
+
 class IFRS16CFOInsightsRequest(BaseModel):
     """CFO strategic insights — lease portfolio from client repository."""
 
@@ -1930,6 +1941,71 @@ async def ifrs16_export_excel(body: IFRS16ExportExcelRequest):
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.post("/api/ifrs16/export-excel-bulk")
+async def ifrs16_export_excel_bulk(body: IFRS16BulkExportExcelRequest):
+    """
+    Return a ZIP of full IFRS 16 workbooks (Summary, Amortization, Journals, Maturity, Disclosure)
+    for each lease that has calculation results in the payload.
+    """
+    import zipfile
+
+    from ifrs16_excel_export import IFRS16ExcelExporter
+
+    if not body.leases:
+        raise HTTPException(status_code=400, detail="No leases provided")
+
+    exporter = IFRS16ExcelExporter()
+    manifest: list[str] = []
+    exported = 0
+    zip_buf = io.BytesIO()
+
+    def _results_exportable(results: dict) -> bool:
+        sched = results.get("amortization_schedule")
+        if isinstance(sched, list) and len(sched) > 0:
+            return True
+        if sched is not None and hasattr(sched, "empty") and not sched.empty:
+            return True
+        return bool(results.get("lease_liability") or results.get("rou_asset"))
+
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for item in body.leases:
+            raw_id = (item.lease_id or "lease").strip()
+            safe = "".join(c for c in raw_id if c.isalnum() or c in "._-")[:80] or "lease"
+            results = dict(item.calculation_results or {})
+            if not _results_exportable(results):
+                manifest.append(f"SKIP {raw_id}: no calculation results")
+                continue
+            try:
+                xlsx = exporter.export_ifrs16_workbook_bytes(results)
+                zf.writestr(f"IFRS16_{safe}.xlsx", xlsx)
+                exported += 1
+                manifest.append(f"OK {raw_id}")
+            except Exception as exc:
+                manifest.append(f"FAIL {raw_id}: {exc}")
+
+        manifest.insert(0, f"Exported: {exported} of {len(body.leases)} leases")
+        zf.writestr("_export_manifest.txt", "\n".join(manifest))
+
+    if exported == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No leases could be exported — ensure each lease has been calculated first",
+        )
+
+    zip_buf.seek(0)
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    fname = f"IFRS16_All_Leases_{exported}_{stamp}.zip"
+    return Response(
+        content=zip_buf.read(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "X-Exported-Count": str(exported),
+            "X-Requested-Count": str(len(body.leases)),
+        },
     )
 
 

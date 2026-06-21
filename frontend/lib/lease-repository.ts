@@ -320,6 +320,7 @@ export function buildLeaseEntry(params: {
   currency: string;
   lessee_name?: string;
   lessor_name?: string;
+  legal_entity?: string;
   results: Record<string, unknown>;
   excel_file_id?: string;
   title?: string;
@@ -370,6 +371,7 @@ export function buildLeaseEntry(params: {
     calculated_at: new Date().toISOString(),
     lessee_name: params.lessee_name ?? params.lessee,
     lessor_name: params.lessor_name ?? params.lessor,
+    legal_entity: (params.legal_entity ?? params.lessee_name ?? params.lessee ?? '').trim() || undefined,
     excel_file_id: params.excel_file_id,
     title: params.title || params.asset_description,
     lessee: params.lessee ?? params.lessee_name,

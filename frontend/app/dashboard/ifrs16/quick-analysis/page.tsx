@@ -1445,57 +1445,39 @@ Do not use bullet points.`;
       toast.error('No successful leases to download');
       return;
     }
-    const t = toast.loading('Preparing downloads…');
+    const t = toast.loading(`Building ${successes.length} IFRS 16 workbooks…`);
     try {
-      let count = 0;
-      for (let i = 0; i < successes.length; i++) {
-        const br = successes[i];
-        const cr = br.calculation_results;
-        if (cr && typeof cr === 'object' && Object.keys(cr as object).length > 0) {
-          try {
-            const blob = await ifrs16Api.exportLeaseWorkbookFromResults(br.lease_id, cr as Record<string, unknown>);
-            const objUrl = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = objUrl;
-            link.download = `IFRS16_${br.lease_id}.xlsx`;
-            link.rel = 'noopener';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(objUrl);
-            count += 1;
-          } catch (e) {
-            toast.dismiss(t);
-            toast.error(e instanceof Error ? e.message : 'Excel export failed');
-            return;
-          }
-        } else {
-          const fid = await resolveExcelFileId(br);
-          if (!fid) {
-            toast.dismiss(t);
-            toast.error(`Could not prepare Excel for ${br.lease_id}`);
-            return;
-          }
-          const url = ifrs16Api.downloadReport(fid);
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = `IFRS16_${br.lease_id}.xlsx`;
-          link.rel = 'noopener';
-          link.target = '_blank';
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          count += 1;
-        }
-        if (i < successes.length - 1) {
-          await new Promise((r) => setTimeout(r, 800));
-        }
-      }
-      toast.dismiss(t);
-      toast.success(`Downloaded ${count} IFRS 16 reports`);
+      const payloads = successes.map((br) => {
+        const cr =
+          br.calculation_results &&
+          typeof br.calculation_results === 'object' &&
+          Object.keys(br.calculation_results as object).length > 0
+            ? (br.calculation_results as Record<string, unknown>)
+            : {
+                lease_liability: br.lease_liability,
+                rou_asset: br.rou_asset,
+                monthly_depreciation: br.monthly_depreciation,
+                total_interest: br.total_interest,
+              };
+        return { lease_id: br.lease_id, calculation_results: cr };
+      });
+      const { blob, exportedCount, requestedCount } = await ifrs16Api.exportAllLeaseWorkbooksZip(payloads);
+      const objUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objUrl;
+      link.download = `IFRS16_All_Leases_${exportedCount}_${new Date().toISOString().slice(0, 10)}.zip`;
+      link.rel = 'noopener';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objUrl);
+      const msg =
+        exportedCount === requestedCount
+          ? `Downloaded ZIP with ${exportedCount} full workbook(s)`
+          : `Downloaded ${exportedCount} of ${requestedCount} workbooks — see _export_manifest.txt in ZIP for skips`;
+      toast.success(msg, { id: t });
     } catch (e) {
-      toast.dismiss(t);
-      toast.error(e instanceof Error ? e.message : 'Download failed');
+      toast.error(e instanceof Error ? e.message : 'Download failed', { id: t });
     }
   };
 
@@ -2844,7 +2826,7 @@ Do not use bullet points.`;
                   onClick={() => void downloadPack()}
                   className="w-full sm:w-auto bg-orange-500 hover:bg-orange-600 text-white font-bold py-4 px-8 rounded-xl text-lg transition-colors shadow-lg"
                 >
-                  ⬇ Download Complete Pack
+                  ⬇ Download All Workbooks (ZIP)
                 </button>
                 <button
                   type="button"

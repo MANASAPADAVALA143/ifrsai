@@ -262,6 +262,181 @@ class IFRS16CalculatorTests(unittest.TestCase):
             self.assertLess(len(schedule), 120)
 
 
+class CPIEscalationInteractionTests(unittest.TestCase):
+    """Regression tests for CPI vs fixed escalation payment logic."""
+
+    def _cpi_escalation_lease(
+        self,
+        *,
+        escalation_rate: str = "0",
+        cpi_base: str = "0",
+        cpi_current: str = "0",
+    ) -> LeaseInput:
+        return LeaseInput(
+            lease_id="CPI-ESC-TEST",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=36,
+            monthly_payment=Decimal("155000"),
+            annual_discount_rate=Decimal("0.07"),
+            escalation_rate=Decimal(escalation_rate),
+            cpi_index_base=Decimal(cpi_base),
+            cpi_index_current=Decimal(cpi_current),
+            currency="AED",
+        )
+
+    def test_cpi_only_payment_at_first_review(self):
+        """CPI-only: payment after review = base × (current / base index)."""
+        calc = IFRS16Calculator()
+        lease = self._cpi_escalation_lease(cpi_base="100", cpi_current="115")
+        payment = calc.get_lease_component_payment(lease)
+        reviewed = calc._apply_cpi_and_escalation_payment(lease, 13, 0, payment)
+        self.assertEqual(reviewed, Decimal("178250.00"))
+
+        results = calc.calculate_full_ifrs16(lease)
+        schedule = results["amortization_schedule"]
+        self.assertEqual(schedule.iloc[11]["Payment"], 155000.0)
+        self.assertEqual(schedule.iloc[12]["Payment"], 178250.0)
+
+    def test_escalation_only_unchanged_when_cpi_empty(self):
+        """Escalation-only path must not regress when CPI fields are empty."""
+        lease = LeaseInput(
+            lease_id="ESC-ONLY",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=24,
+            monthly_payment=Decimal("100000"),
+            annual_discount_rate=Decimal("0.07"),
+            escalation_rate=Decimal("0.05"),
+            currency="AED",
+        )
+        calc = IFRS16Calculator()
+        payment = calc.get_lease_component_payment(lease)
+        reviewed = calc._apply_cpi_and_escalation_payment(lease, 13, 0, payment)
+        self.assertEqual(reviewed, Decimal("105000.00"))
+
+        results = calc.calculate_full_ifrs16(lease)
+        schedule = results["amortization_schedule"]
+        self.assertEqual(schedule.iloc[11]["Payment"], 100000.0)
+        self.assertEqual(schedule.iloc[12]["Payment"], 105000.0)
+
+    def test_both_cpi_and_escalation_cpi_takes_precedence(self):
+        """When both are set, only CPI applies — escalation must not stack on top."""
+        calc = IFRS16Calculator()
+        lease = self._cpi_escalation_lease(
+            escalation_rate="0.02",
+            cpi_base="100",
+            cpi_current="115",
+        )
+        payment = calc.get_lease_component_payment(lease)
+        reviewed = calc._apply_cpi_and_escalation_payment(lease, 13, 0, payment)
+
+        cpi_only = Decimal("178250.00")
+        buggy_stacked = (cpi_only * Decimal("1.02")).quantize(Decimal("0.01"))
+        self.assertEqual(reviewed, cpi_only)
+        self.assertNotEqual(reviewed, buggy_stacked)
+        self.assertNotEqual(reviewed, Decimal("181815.00"))
+
+        results = calc.calculate_full_ifrs16(lease)
+        schedule = results["amortization_schedule"]
+        self.assertEqual(schedule.iloc[12]["Payment"], 178250.0)
+
+
+class AdvancePaymentEscalationTests(unittest.TestCase):
+    """Advance-payment leases must use schedule-based PV when escalation/CPI is present."""
+
+    def _advance_escalation_lease(self, **overrides) -> LeaseInput:
+        base = dict(
+            lease_id="ADV-ESC-24",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=24,
+            monthly_payment=Decimal("100000"),
+            annual_discount_rate=Decimal("0.05"),
+            escalation_rate=Decimal("0.05"),
+            payment_type="Advance",
+            currency="AED",
+        )
+        base.update(overrides)
+        return LeaseInput(**base)
+
+    def test_advance_escalation_liability_known_answer(self):
+        """Advance + escalation must not use the flat-payment formula."""
+        calc = IFRS16Calculator()
+        lease = self._advance_escalation_lease()
+        liability = calc.calculate_lease_liability(lease)
+
+        self.assertAlmostEqual(float(liability), 2344682.19, places=0)
+        self.assertNotAlmostEqual(float(liability), 2288887.30, places=0)
+
+    def test_advance_escalation_schedule_amortizes_to_zero(self):
+        """Opening liability must reconcile with the escalating schedule."""
+        calc = IFRS16Calculator()
+        lease = self._advance_escalation_lease()
+        results = calc.calculate_full_ifrs16(lease)
+        schedule = results["amortization_schedule"]
+
+        self.assertEqual(schedule.iloc[11]["Payment"], 100000.0)
+        self.assertEqual(schedule.iloc[12]["Payment"], 105000.0)
+        self.assertAlmostEqual(schedule.iloc[-1]["Closing_Balance"], 0.0, places=0)
+
+    def test_advance_cpi_uses_schedule_based_pv(self):
+        """Advance + CPI (no escalation) must reflect CPI-adjusted payments."""
+        calc = IFRS16Calculator()
+        lease = self._advance_escalation_lease(
+            lease_id="ADV-CPI-24",
+            escalation_rate=Decimal("0"),
+            cpi_index_base=Decimal("100"),
+            cpi_index_current=Decimal("110"),
+        )
+        liability = calc.calculate_lease_liability(lease)
+        flat_advance = Decimal("2288887.30")
+
+        self.assertGreater(liability, flat_advance)
+        results = calc.calculate_full_ifrs16(lease)
+        schedule = results["amortization_schedule"]
+        self.assertEqual(schedule.iloc[12]["Payment"], 110000.0)
+        self.assertAlmostEqual(schedule.iloc[-1]["Closing_Balance"], 0.0, places=0)
+
+    def test_advance_flat_payments_unchanged(self):
+        """Plain Advance lease (no escalation/CPI) must match flat annuity-due formula."""
+        calc = IFRS16Calculator()
+        lease = LeaseInput(
+            lease_id="ADV-FLAT-24",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=24,
+            monthly_payment=Decimal("100000"),
+            annual_discount_rate=Decimal("0.05"),
+            payment_type="Advance",
+            currency="AED",
+        )
+        liability = calc.calculate_lease_liability(lease)
+        self.assertEqual(liability, Decimal("2288887.30"))
+
+    def test_arrears_escalation_unchanged(self):
+        """Arrears + escalation path must not regress."""
+        lease = LeaseInput(
+            lease_id="ARR-ESC-24",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=24,
+            monthly_payment=Decimal("100000"),
+            annual_discount_rate=Decimal("0.05"),
+            escalation_rate=Decimal("0.05"),
+            payment_type="Arrears",
+            currency="AED",
+        )
+        calc = IFRS16Calculator()
+        liability = calc.calculate_lease_liability(lease)
+        results = calc.calculate_full_ifrs16(lease)
+        schedule = results["amortization_schedule"]
+
+        self.assertAlmostEqual(float(liability), 2334953.22, places=0)
+        self.assertEqual(schedule.iloc[12]["Payment"], 105000.0)
+        self.assertAlmostEqual(schedule.iloc[-1]["Closing_Balance"], 0.0, places=0)
+
+
 class ConsolidateLeasesTests(unittest.TestCase):
     def test_intercompany_lease_excluded_from_group_totals(self):
         from ifrs16_calculator import consolidate_leases
