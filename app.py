@@ -5501,7 +5501,22 @@ except ImportError as _ifrs9_err:
 
 # In-memory store for ERP config during dev (use Supabase/env in production).
 # Credentials are kept server-side and NEVER returned to the frontend.
-_erp_zoho_config: dict = {}
+_erp_zoho_config: dict = {
+    "client_id": os.getenv("ZOHO_CLIENT_ID", ""),
+    "client_secret": os.getenv("ZOHO_CLIENT_SECRET", ""),
+    "refresh_token": os.getenv("ZOHO_REFRESH_TOKEN", ""),
+    "organization_id": os.getenv("ZOHO_ORG_ID", ""),
+    "data_centre": os.getenv("ZOHO_DATA_CENTRE", "com"),
+    "org_name": os.getenv("ZOHO_ORG_NAME", ""),
+    "account_ids": {
+        "rou_asset": os.getenv("ZOHO_ACCOUNT_ROU_ASSET", ""),
+        "lease_liability": os.getenv("ZOHO_ACCOUNT_LEASE_LIABILITY", ""),
+        "interest_expense": os.getenv("ZOHO_ACCOUNT_INTEREST_EXPENSE", ""),
+        "depreciation": os.getenv("ZOHO_ACCOUNT_DEPRECIATION", ""),
+        "acc_dep_rou": os.getenv("ZOHO_ACCOUNT_ACC_DEP_ROU", ""),
+        "cash": os.getenv("ZOHO_ACCOUNT_CASH", ""),
+    },
+}
 _erp_tally_config: dict = {}
 _erp_sap_config: dict = {}
 
@@ -5563,7 +5578,15 @@ async def erp_zoho_configure(body: _ZohoConfigBody):
         },
         "connected_at": datetime.utcnow().isoformat(),
     })
-    return {"configured": True, "org_name": org_info.get("org_name", "")}
+    return {
+        "configured": True,
+        "org_name": org_info.get("org_name", ""),
+        "persistence_note": (
+            "Credentials active for this session. "
+            "For persistence across server restarts, set env vars: "
+            "ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN, ZOHO_ORG_ID, ZOHO_DATA_CENTRE"
+        ),
+    }
 
 
 @app.get("/api/erp/zoho/status")

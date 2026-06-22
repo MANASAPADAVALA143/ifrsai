@@ -37,17 +37,24 @@ def map_initial_recognition(lease_id: str, results: dict, account_mapping: dict)
 
 
 def map_monthly_entry(lease_id: str, period_row: dict, account_mapping: dict) -> dict:
-    """Map one month's recurring journal (depreciation + interest + payment)."""
+    """Map one month's recurring journal (depreciation + interest + payment).
+
+    Three internally balanced entries:
+      1. Interest accrual:  Dr Interest Expense / Cr Lease Liability
+      2. Lease payment:     Dr Lease Liability (full payment) / Cr Cash (full payment)
+         — liability was already increased by interest in entry 1, so debiting the full
+           payment nets to a reduction equal to principal (payment - interest). ✓
+      3. Depreciation:      Dr Depreciation / Cr Accumulated Depreciation
+    """
     period = str(period_row.get("period", ""))
     date = str(period_row.get("date", ""))
     interest = _f(period_row.get("interest"))
     depreciation = _f(period_row.get("depreciation"))
     payment = _f(period_row.get("payment"))
-    principal = _f(period_row.get("principal"))
 
     lines = []
 
-    # Interest expense: Dr Interest Expense / Cr Lease Liability
+    # Entry 1: Interest accrual — Dr Interest Expense / Cr Lease Liability
     if interest > 0:
         lines.append({
             "account": account_mapping.get("interest_expense", ""),
@@ -62,13 +69,15 @@ def map_monthly_entry(lease_id: str, period_row: dict, account_mapping: dict) ->
             "description": f"Interest accrual on lease liability — {period}",
         })
 
-    # Lease payment: Dr Lease Liability (principal) / Cr Cash
-    if payment > 0 and principal > 0:
+    # Entry 2: Lease payment — Dr Lease Liability (full) / Cr Cash (full)
+    # Full payment to liability because entry 1 already added interest back;
+    # net effect on liability = -payment + interest = -principal. ✓
+    if payment > 0:
         lines.append({
             "account": account_mapping.get("lease_liability", ""),
             "side": "debit",
-            "amount": principal,
-            "description": f"Lease liability repayment (principal) — {period}",
+            "amount": payment,
+            "description": f"Lease liability settlement (full payment) — {period}",
         })
         lines.append({
             "account": account_mapping.get("cash", ""),
@@ -77,7 +86,7 @@ def map_monthly_entry(lease_id: str, period_row: dict, account_mapping: dict) ->
             "description": f"Cash payment for lease — {period}",
         })
 
-    # Depreciation: Dr Depreciation / Cr Accumulated Depreciation
+    # Entry 3: Depreciation — Dr Depreciation / Cr Accumulated Depreciation
     if depreciation > 0:
         lines.append({
             "account": account_mapping.get("depreciation", ""),
