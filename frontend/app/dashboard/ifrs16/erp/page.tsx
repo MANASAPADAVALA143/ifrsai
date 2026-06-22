@@ -393,6 +393,8 @@ export default function ErpPage() {
 
   // Live connection state
   const [activeTab, setActiveTab] = useState<'file' | 'live'>('file');
+
+  // Zoho
   const [zohoStatus, setZohoStatus] = useState<ZohoStatus | null>(null);
   const [zohoStatusLoading, setZohoStatusLoading] = useState(false);
   const [showZohoConfigure, setShowZohoConfigure] = useState(false);
@@ -404,6 +406,23 @@ export default function ErpPage() {
     acc_dep_rou_account_id: '', cash_account_id: '',
   });
   const [zohoConfiguring, setZohoConfiguring] = useState(false);
+
+  // Tally
+  const [tallyStatus, setTallyStatus] = useState<{ connected: boolean; gateway_url: string; company: string; error?: string } | null>(null);
+  const [tallyStatusLoading, setTallyStatusLoading] = useState(false);
+  const [showTallyConfigure, setShowTallyConfigure] = useState(false);
+  const [tallyForm, setTallyForm] = useState({
+    gateway_url: 'http://localhost:9000', company: '',
+    rou_asset_ledger: 'Right-of-Use Asset',
+    lease_liability_ledger: 'Lease Liability',
+    interest_expense_ledger: 'Finance Cost',
+    depreciation_ledger: 'Depreciation Expense',
+    acc_dep_rou_ledger: 'Accumulated Depreciation - ROU',
+    cash_ledger: 'Bank/Cash',
+  });
+  const [tallyConfiguring, setTallyConfiguring] = useState(false);
+
+  // Push log (shared across ERPs)
   const [pushLog, setPushLog] = useState<PushLogEntry[]>([]);
   const [pushLogLoading, setPushLogLoading] = useState(false);
   const [period, setPeriod] = useState(() => {
@@ -416,6 +435,7 @@ export default function ErpPage() {
   useEffect(() => {
     setLeases(getLeaseRepository());
     fetchZohoStatus();
+    fetchTallyStatus();
   }, []);
 
   useEffect(() => {
@@ -448,11 +468,47 @@ export default function ErpPage() {
     }
   }
 
+  async function fetchTallyStatus() {
+    setTallyStatusLoading(true);
+    try {
+      const data = await apiGet('/api/erp/tally/status');
+      setTallyStatus(data);
+    } catch {
+      setTallyStatus({ connected: false, gateway_url: '', company: '' });
+    } finally {
+      setTallyStatusLoading(false);
+    }
+  }
+
+  async function handleTallyConfigure() {
+    setTallyConfiguring(true);
+    try {
+      const result = await apiPost('/api/erp/tally/configure', tallyForm);
+      toast.success(`Connected to Tally Prime${result.company ? ` — ${result.company}` : ''}`);
+      setShowTallyConfigure(false);
+      await fetchTallyStatus();
+    } catch (e: any) {
+      toast.error(`Tally connection failed: ${e.message}`);
+    } finally {
+      setTallyConfiguring(false);
+    }
+  }
+
   async function fetchPushLog() {
     setPushLogLoading(true);
     try {
-      const data = await apiGet('/api/erp/zoho/push-log');
-      setPushLog((data.entries || []).slice().reverse());
+      // Merge Zoho + Tally logs
+      const [zohoData, tallyData] = await Promise.allSettled([
+        apiGet('/api/erp/zoho/push-log'),
+        apiGet('/api/erp/tally/push-log'),
+      ]);
+      const zohoEntries = zohoData.status === 'fulfilled' ? (zohoData.value.entries || []) : [];
+      const tallyEntries = tallyData.status === 'fulfilled' ? (tallyData.value.entries || []) : [];
+      const combined = [...zohoEntries, ...tallyEntries]
+        .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+        .slice(-50)
+        .reverse();
+      setPushLog(combined);
     } catch {
       setPushLog([]);
     } finally {
@@ -640,17 +696,102 @@ export default function ErpPage() {
             )}
           </div>
 
-          {/* Tally Prime — coming soon */}
-          <div className="bg-white rounded-[14px] p-6 border border-border-default shadow-card opacity-60">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
-                <WifiOff className="w-5 h-5 text-gray-400" />
+          {/* Tally Prime — live */}
+          <div className="bg-white rounded-[14px] p-6 border border-border-default shadow-card">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-emerald-50 flex items-center justify-center">
+                  <Wifi className="w-5 h-5 text-emerald-600" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-text-primary">Tally Prime</h3>
+                  <p className="text-xs text-text-muted">Push via TDL Developer Gateway (local)</p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-base font-bold text-text-primary">Tally Prime <span className="ml-2 text-xs font-normal text-text-muted bg-gray-100 px-2 py-0.5 rounded-full">Coming soon</span></h3>
-                <p className="text-xs text-text-muted">Live push via Tally Developer Gateway</p>
+              <div className="flex items-center gap-2">
+                {tallyStatusLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-text-muted" />
+                ) : tallyStatus?.connected ? (
+                  <span className="flex items-center gap-1 text-xs text-green-700 bg-green-50 border border-green-200 px-2 py-1 rounded-full">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Gateway reachable
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-xs text-red-600 bg-red-50 border border-red-200 px-2 py-1 rounded-full">
+                    <XCircle className="w-3.5 h-3.5" /> Not connected
+                  </span>
+                )}
+                <Button variant="secondary" size="sm" onClick={() => setShowTallyConfigure(!showTallyConfigure)}>
+                  Configure
+                </Button>
+                <Button variant="secondary" size="sm" onClick={fetchTallyStatus}>
+                  Ping
+                </Button>
               </div>
             </div>
+
+            {tallyStatus?.connected && (
+              <p className="text-xs text-text-muted mb-1">
+                Gateway: <span className="font-mono">{tallyStatus.gateway_url}</span>
+                {tallyStatus.company && <> &nbsp;|&nbsp; Company: <strong>{tallyStatus.company}</strong></>}
+              </p>
+            )}
+            {tallyStatus?.error && !tallyStatus.connected && (
+              <p className="text-xs text-red-500 mb-2">{tallyStatus.error}</p>
+            )}
+
+            {showTallyConfigure && (
+              <div className="border-t border-border-default pt-4 space-y-3">
+                <h4 className="text-sm font-semibold text-text-primary">Tally Developer Gateway</h4>
+                <p className="text-xs text-text-muted">
+                  Enable in Tally Prime: <span className="font-mono">Gateway &gt; Settings &gt; Enable TDL Gateway Server</span> (default port 9000).
+                </p>
+                {[
+                  { key: 'gateway_url', label: 'Gateway URL', placeholder: 'http://localhost:9000' },
+                  { key: 'company', label: 'Company Name (optional — leave blank for active company)', placeholder: '' },
+                ].map(({ key, label, placeholder }) => (
+                  <div key={key}>
+                    <label className="block text-xs font-medium text-text-secondary mb-1">{label}</label>
+                    <input
+                      type="text"
+                      value={(tallyForm as any)[key]}
+                      onChange={(e) => setTallyForm({ ...tallyForm, [key]: e.target.value })}
+                      className="w-full px-3 py-2 bg-bg-light border border-border-default rounded-lg text-sm font-mono"
+                      placeholder={placeholder}
+                    />
+                  </div>
+                ))}
+                <h4 className="text-sm font-semibold text-text-primary pt-2">Tally Ledger Names</h4>
+                <p className="text-xs text-text-muted">Enter the exact ledger name as it appears in your Tally Chart of Accounts.</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {[
+                    { key: 'rou_asset_ledger', label: 'ROU Asset' },
+                    { key: 'lease_liability_ledger', label: 'Lease Liability' },
+                    { key: 'interest_expense_ledger', label: 'Interest / Finance Cost' },
+                    { key: 'depreciation_ledger', label: 'Depreciation Expense' },
+                    { key: 'acc_dep_rou_ledger', label: 'Accumulated Depreciation ROU' },
+                    { key: 'cash_ledger', label: 'Cash / Bank' },
+                  ].map(({ key, label }) => (
+                    <div key={key}>
+                      <label className="block text-xs font-medium text-text-secondary mb-1">{label}</label>
+                      <input
+                        type="text"
+                        value={(tallyForm as any)[key]}
+                        onChange={(e) => setTallyForm({ ...tallyForm, [key]: e.target.value })}
+                        className="w-full px-3 py-2 bg-bg-light border border-border-default rounded-lg text-sm"
+                        placeholder={label}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <Button variant="primary" size="md" className="bg-gradient-orange" onClick={handleTallyConfigure} disabled={tallyConfiguring}>
+                    {tallyConfiguring ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                    {tallyConfiguring ? 'Connecting…' : 'Save & Verify Connection'}
+                  </Button>
+                  <Button variant="secondary" size="md" onClick={() => setShowTallyConfigure(false)}>Cancel</Button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* SAP B1 — coming soon */}

@@ -5517,7 +5517,18 @@ _erp_zoho_config: dict = {
         "cash": os.getenv("ZOHO_ACCOUNT_CASH", ""),
     },
 }
-_erp_tally_config: dict = {}
+_erp_tally_config: dict = {
+    "gateway_url": os.getenv("TALLY_GATEWAY_URL", "http://localhost:9000"),
+    "company": os.getenv("TALLY_COMPANY", ""),
+    "account_mapping": {
+        "rou_asset": os.getenv("TALLY_LEDGER_ROU_ASSET", "Right-of-Use Asset"),
+        "lease_liability": os.getenv("TALLY_LEDGER_LEASE_LIABILITY", "Lease Liability"),
+        "interest_expense": os.getenv("TALLY_LEDGER_INTEREST_EXPENSE", "Finance Cost"),
+        "depreciation": os.getenv("TALLY_LEDGER_DEPRECIATION", "Depreciation Expense"),
+        "acc_dep_rou": os.getenv("TALLY_LEDGER_ACC_DEP_ROU", "Accumulated Depreciation - ROU"),
+        "cash": os.getenv("TALLY_LEDGER_CASH", "Bank/Cash"),
+    },
+}
 _erp_sap_config: dict = {}
 
 
@@ -5689,21 +5700,166 @@ async def erp_zoho_push_log(lease_id: Optional[str] = None):
     return {"entries": entries}
 
 
-# Phase 2 — Tally Prime stubs
+# ---------------------------------------------------------------------------
+# Phase 2 — Tally Prime (fully implemented)
+# ---------------------------------------------------------------------------
+
 class _TallyConfigBody(BaseModel):
     gateway_url: str = "http://localhost:9000"
     company: str = ""
+    # Tally ledger names for each IFRS 16 account
+    rou_asset_ledger: str = "Right-of-Use Asset"
+    lease_liability_ledger: str = "Lease Liability"
+    interest_expense_ledger: str = "Finance Cost"
+    depreciation_ledger: str = "Depreciation Expense"
+    acc_dep_rou_ledger: str = "Accumulated Depreciation - ROU"
+    cash_ledger: str = "Bank/Cash"
+
+
+class _TallyPushBody(BaseModel):
+    lease_id: str
+    journal_type: str  # "initial" | "monthly"
+    period: str = ""   # "YYYY-MM" for monthly
+    calculation_results: Dict[str, Any] = {}
+    account_mapping: Dict[str, str] = {}
 
 
 @app.post("/api/erp/tally/configure")
 async def erp_tally_configure(body: _TallyConfigBody):
-    _erp_tally_config.update({"gateway_url": body.gateway_url, "company": body.company})
-    return {"status": "coming_soon", "message": "Tally Prime integration in progress"}
+    """Store Tally Gateway config server-side and verify connectivity."""
+    from erp_integrations.tally_prime import TallyPrimeClient
+    client = TallyPrimeClient(gateway_url=body.gateway_url, company=body.company)
+    ping = await client.ping()
+    if not ping.get("reachable"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot reach Tally Gateway at {body.gateway_url}. "
+                "Ensure Tally Prime is running with TDL Gateway enabled (Gateway > Settings). "
+                f"Error: {ping.get('error', 'timeout')}"
+            ),
+        )
+    _erp_tally_config.update({
+        "gateway_url": body.gateway_url,
+        "company": body.company,
+        "account_mapping": {
+            "rou_asset": body.rou_asset_ledger,
+            "lease_liability": body.lease_liability_ledger,
+            "interest_expense": body.interest_expense_ledger,
+            "depreciation": body.depreciation_ledger,
+            "acc_dep_rou": body.acc_dep_rou_ledger,
+            "cash": body.cash_ledger,
+        },
+        "connected_at": datetime.utcnow().isoformat(),
+    })
+    return {
+        "configured": True,
+        "gateway_url": body.gateway_url,
+        "company": body.company,
+        "persistence_note": (
+            "Config active for this session. For persistence across restarts set: "
+            "TALLY_GATEWAY_URL, TALLY_COMPANY, TALLY_LEDGER_ROU_ASSET, "
+            "TALLY_LEDGER_LEASE_LIABILITY, TALLY_LEDGER_INTEREST_EXPENSE, "
+            "TALLY_LEDGER_DEPRECIATION, TALLY_LEDGER_ACC_DEP_ROU, TALLY_LEDGER_CASH"
+        ),
+    }
+
+
+@app.get("/api/erp/tally/status")
+async def erp_tally_status():
+    """Return Tally Gateway connection status (live ping)."""
+    from erp_integrations.tally_prime import TallyPrimeClient
+    cfg = _erp_tally_config
+    if not cfg.get("gateway_url"):
+        return {"connected": False, "gateway_url": "", "company": ""}
+    client = TallyPrimeClient(gateway_url=cfg["gateway_url"], company=cfg.get("company", ""))
+    ping = await client.ping()
+    return {
+        "connected": ping.get("reachable", False),
+        "gateway_url": cfg["gateway_url"],
+        "company": cfg.get("company", ""),
+        "error": ping.get("error") if not ping.get("reachable") else None,
+    }
 
 
 @app.post("/api/erp/tally/push-journal")
-async def erp_tally_push_journal(body: Dict[str, Any]):
-    return {"status": "coming_soon", "message": "Tally Prime integration in progress"}
+async def erp_tally_push_journal(body: _TallyPushBody):
+    """Push IFRS 16 journal entries to Tally Prime via Developer Gateway."""
+    if not _erp_tally_config.get("gateway_url"):
+        raise HTTPException(status_code=400, detail="Tally not configured. Call /api/erp/tally/configure first.")
+
+    from erp_integrations.tally_prime import TallyPrimeClient
+    from erp_integrations.journal_mapper import map_initial_recognition, map_monthly_entry
+    from erp_integrations.audit_log import log_push
+
+    cfg = _erp_tally_config
+    # Merge caller-supplied mapping with configured ledger names
+    account_mapping = {**cfg.get("account_mapping", {}), **body.account_mapping}
+
+    client = TallyPrimeClient(gateway_url=cfg["gateway_url"], company=cfg.get("company", ""))
+
+    if body.journal_type == "initial":
+        mapped = map_initial_recognition(body.lease_id, body.calculation_results, account_mapping)
+        rou = float(body.calculation_results.get("rou_asset") or 0)
+        liability = float(body.calculation_results.get("lease_liability") or 0)
+        date_str = mapped["date"] or (body.period + "-01" if body.period else "")
+        result = await client.push_initial_recognition(
+            body.lease_id, rou, liability, date_str, account_mapping
+        )
+        payload_summary = {"journal_type": "initial", "date": date_str, "rou": rou, "liability": liability}
+
+    elif body.journal_type == "monthly":
+        period_row = body.calculation_results.get("period_row") or body.calculation_results
+        mapped = map_monthly_entry(body.lease_id, period_row, account_mapping)
+        date_str = mapped["date"] or (body.period + "-01" if body.period else "")
+        result = await client.push_monthly_entry(
+            lease_id=body.lease_id,
+            period=body.period or str(period_row.get("period", "")),
+            date_str=date_str,
+            interest=float(period_row.get("interest") or 0),
+            payment=float(period_row.get("payment") or 0),
+            depreciation=float(period_row.get("depreciation") or 0),
+            account_mapping=account_mapping,
+        )
+        payload_summary = {"journal_type": "monthly", "period": body.period, "date": date_str}
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported journal_type: {body.journal_type}")
+
+    log_push(
+        erp="tally_prime",
+        lease_id=body.lease_id,
+        journal_type=body.journal_type,
+        payload={"reference_number": f"IFRS16-{body.lease_id}-{body.journal_type.upper()}",
+                 "journal_date": payload_summary.get("date", ""),
+                 "line_items": []},
+        response={"journal_id": f"tally-{body.lease_id}-{body.journal_type}",
+                  "created": result.get("created", 0), "errors": result.get("errors", 0)},
+        success=result.get("success", False),
+        error=result.get("raw", "") if not result.get("success") else "",
+    )
+
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Tally push failed — {result.get('errors', 0)} error(s). Response: {result.get('raw', '')[:300]}",
+        )
+
+    return {
+        "success": True,
+        "created": result.get("created", 0),
+        "altered": result.get("altered", 0),
+        "message": f"Voucher(s) created in Tally Prime — {result.get('created', 0)} created, {result.get('altered', 0)} altered",
+    }
+
+
+@app.get("/api/erp/tally/push-log")
+async def erp_tally_push_log(lease_id: Optional[str] = None):
+    """Return last 50 Tally push log entries."""
+    from erp_integrations.audit_log import read_log
+    all_entries = read_log(lease_id=lease_id, limit=200)
+    tally_entries = [e for e in all_entries if e.get("erp") == "tally_prime"][-50:]
+    return {"entries": tally_entries}
 
 
 # Phase 3 — SAP Business One stubs
