@@ -521,6 +521,10 @@ class IFRS16ExportExcelRequest(BaseModel):
 class IFRS16BulkExportExcelItem(BaseModel):
     lease_id: str = Field(default="lease")
     calculation_results: Dict[str, Any] = Field(default_factory=dict)
+    lease_data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional repository entry — used to recalculate missing amortization_schedule during export",
+    )
 
 
 class IFRS16BulkExportExcelRequest(BaseModel):
@@ -1245,6 +1249,188 @@ def convert_lease_request_to_input(request: LeaseRequest):
     )
 
 
+def _normalize_annual_discount_rate(raw: Any) -> Optional[float]:
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    if v > 1:
+        v = v / 100.0
+    if v <= 0.0001 or v > 1:
+        return None
+    return v
+
+
+def _has_amortization_schedule(results: dict) -> bool:
+    sched = results.get("amortization_schedule")
+    if isinstance(sched, list) and len(sched) > 0:
+        return True
+    if sched is not None and hasattr(sched, "empty") and not sched.empty:
+        return True
+    return False
+
+
+def _lease_repository_to_request(lease_data: Dict[str, Any]) -> Optional[LeaseRequest]:
+    """Build a LeaseRequest from a client lease-repository entry when inputs are sufficient."""
+    if not isinstance(lease_data, dict):
+        return None
+
+    dates = lease_data.get("dates") if isinstance(lease_data.get("dates"), dict) else {}
+    payments = lease_data.get("payments") if isinstance(lease_data.get("payments"), dict) else {}
+    results = lease_data.get("results") if isinstance(lease_data.get("results"), dict) else {}
+    disclosure = results.get("disclosure_data") if isinstance(results.get("disclosure_data"), dict) else {}
+
+    lease_id = str(lease_data.get("lease_id") or lease_data.get("id") or "").strip()
+    commencement = str(
+        lease_data.get("start_date") or dates.get("commencement") or ""
+    ).strip()[:10]
+    if not lease_id or not commencement:
+        return None
+
+    term_months: Optional[int] = None
+    raw_term = lease_data.get("lease_term_months") or dates.get("term_months")
+    if raw_term is not None:
+        try:
+            term_months = int(raw_term)
+        except (TypeError, ValueError):
+            term_months = None
+    if not term_months or term_months <= 0:
+        end_raw = lease_data.get("end_date") or dates.get("end")
+        if end_raw:
+            try:
+                d0 = datetime.strptime(commencement, "%Y-%m-%d")
+                d1 = datetime.strptime(str(end_raw).strip()[:10], "%Y-%m-%d")
+                term_months = max(1, round((d1 - d0).days / 30.44))
+            except ValueError:
+                return None
+        else:
+            return None
+
+    monthly_raw = lease_data.get("monthly_payment") or payments.get("monthly")
+    try:
+        monthly_payment = float(monthly_raw)
+    except (TypeError, ValueError):
+        return None
+    if monthly_payment <= 0:
+        return None
+
+    annual_rate = _normalize_annual_discount_rate(
+        lease_data.get("annual_discount_rate")
+        or results.get("annual_discount_rate")
+        or disclosure.get("discount_rate_pct")
+        or lease_data.get("discount_rate")
+    )
+    if annual_rate is None:
+        return None
+
+    legal = float(lease_data.get("legal_fees") or 0)
+    brokerage = float(lease_data.get("brokerage_fees") or 0)
+    other = float(lease_data.get("other_initial_direct_costs") or 0)
+    idc = legal + brokerage + other
+    if idc <= 0:
+        idc = float(lease_data.get("initial_direct_costs") or 0)
+
+    cpi_adj = bool(lease_data.get("cpi_adjustments") or lease_data.get("cpiAdjustments"))
+    esc_val = (
+        lease_data.get("escalation_value")
+        or lease_data.get("escalationValue")
+        or lease_data.get("escalation_rate")
+        or 0
+    )
+    escalation_rate = 0.0
+    try:
+        ev = float(esc_val)
+        if ev > 0 and not cpi_adj:
+            escalation_rate = ev / 100.0 if ev > 1 else ev
+    except (TypeError, ValueError):
+        pass
+
+    return LeaseRequest(
+        lease_id=lease_id,
+        asset_description=str(lease_data.get("title") or lease_data.get("asset") or lease_id),
+        lessee_name=str(lease_data.get("lessee_name") or lease_data.get("lessee") or ""),
+        lessor_name=str(lease_data.get("lessor_name") or lease_data.get("lessor") or ""),
+        commencement_date=commencement,
+        lease_term_months=term_months,
+        monthly_payment=monthly_payment,
+        non_lease_component=float(lease_data.get("non_lease_component") or 0),
+        non_lease_description=str(lease_data.get("non_lease_description") or ""),
+        practical_expedient_elected=bool(lease_data.get("practical_expedient_elected") or False),
+        annual_discount_rate=annual_rate,
+        initial_direct_costs=idc,
+        legal_fees=legal,
+        brokerage_fees=brokerage,
+        other_initial_direct_costs=other,
+        escalation_rate=escalation_rate,
+        cpi_index_base=float(lease_data.get("base_index_value") or lease_data.get("baseIndexValue") or 0)
+        if cpi_adj
+        else 0.0,
+        cpi_index_current=float(lease_data.get("current_index_value") or lease_data.get("currentIndexValue") or 0)
+        if cpi_adj
+        else 0.0,
+        cpi_adjustment_frequency_months=int(
+            lease_data.get("cpi_adjustment_frequency_months")
+            or lease_data.get("cpiAdjustmentFrequencyMonths")
+            or 12
+        ),
+        currency=str(lease_data.get("currency") or payments.get("currency") or "INR"),
+        payment_type=str(lease_data.get("payment_type") or lease_data.get("paymentType") or "Arrears"),
+        rent_free_months=int(lease_data.get("rent_free_months") or lease_data.get("rentFreeMonths") or 0),
+        cash_incentive=float(
+            lease_data.get("cash_incentive")
+            or lease_data.get("cashIncentive")
+            or lease_data.get("lease_incentives")
+            or 0
+        ),
+        rvg_amount=float(lease_data.get("rvg_amount") or lease_data.get("rvgAmount") or 0),
+        rvg_guaranteed_by=str(lease_data.get("rvg_guaranteed_by") or lease_data.get("rvgGuaranteedBy") or "None"),
+        rvg_expected_payment=float(
+            lease_data.get("rvg_expected_payment") or lease_data.get("rvgExpectedPayment") or 0
+        ),
+    )
+
+
+def _recalculate_results_json(lease_request: LeaseRequest) -> Dict[str, Any]:
+    from ifrs16_calculator import IFRS16Calculator
+
+    calculator = IFRS16Calculator()
+    lease_input = convert_lease_request_to_input(lease_request)
+    result = calculator.calculate_full_ifrs16(lease_input)
+    result_json = result.copy()
+    if "amortization_schedule" in result_json and hasattr(result_json["amortization_schedule"], "to_dict"):
+        result_json["amortization_schedule"] = result_json["amortization_schedule"].to_dict(orient="records")
+    return result_json
+
+
+def _resolve_bulk_export_results(
+    item: IFRS16BulkExportExcelItem,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Return (results, skip_reason). Recalculates from lease_data when schedule is missing
+    but stored inputs are sufficient.
+    """
+    results = dict(item.calculation_results or {})
+    if _has_amortization_schedule(results):
+        return results, None
+
+    lease_data = item.lease_data if isinstance(item.lease_data, dict) else None
+    if lease_data:
+        req = _lease_repository_to_request(lease_data)
+        if req:
+            try:
+                recalc = _recalculate_results_json(req)
+                if _has_amortization_schedule(recalc):
+                    merged = {**results, **recalc}
+                    merged["lease_id"] = str(item.lease_id or merged.get("lease_id") or req.lease_id)
+                    return merged, None
+            except Exception:
+                pass
+
+    return None, "missing amortization schedule (recalculate first)"
+
+
 # API Endpoints
 
 @app.get("/", response_class=HTMLResponse)
@@ -1962,21 +2148,13 @@ async def ifrs16_export_excel_bulk(body: IFRS16BulkExportExcelRequest):
     exported = 0
     zip_buf = io.BytesIO()
 
-    def _results_exportable(results: dict) -> bool:
-        sched = results.get("amortization_schedule")
-        if isinstance(sched, list) and len(sched) > 0:
-            return True
-        if sched is not None and hasattr(sched, "empty") and not sched.empty:
-            return True
-        return bool(results.get("lease_liability") or results.get("rou_asset"))
-
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item in body.leases:
             raw_id = (item.lease_id or "lease").strip()
             safe = "".join(c for c in raw_id if c.isalnum() or c in "._-")[:80] or "lease"
-            results = dict(item.calculation_results or {})
-            if not _results_exportable(results):
-                manifest.append(f"SKIP {raw_id}: no calculation results")
+            results, skip_reason = _resolve_bulk_export_results(item)
+            if results is None:
+                manifest.append(f"SKIP {raw_id}: {skip_reason or 'no calculation results'}")
                 continue
             try:
                 xlsx = exporter.export_ifrs16_workbook_bytes(results)
@@ -5315,6 +5493,217 @@ try:
     app.include_router(_ifrs9_router)
 except ImportError as _ifrs9_err:
     print(f"WARNING: IFRS 9 router not loaded: {_ifrs9_err}")
+
+
+# ---------------------------------------------------------------------------
+# ERP Integrations — Zoho Books (Phase 1 full), Tally Prime & SAP B1 stubs
+# ---------------------------------------------------------------------------
+
+# In-memory store for ERP config during dev (use Supabase/env in production).
+# Credentials are kept server-side and NEVER returned to the frontend.
+_erp_zoho_config: dict = {}
+_erp_tally_config: dict = {}
+_erp_sap_config: dict = {}
+
+
+class _ZohoConfigBody(BaseModel):
+    client_id: str
+    client_secret: str
+    refresh_token: str
+    organization_id: str
+    data_centre: str = "com"
+
+    # Also accept Zoho account IDs for the standard IFRS 16 GL lines
+    rou_asset_account_id: str = ""
+    lease_liability_account_id: str = ""
+    interest_expense_account_id: str = ""
+    depreciation_account_id: str = ""
+    acc_dep_rou_account_id: str = ""
+    cash_account_id: str = ""
+
+
+class _ZohoPushBody(BaseModel):
+    lease_id: str
+    journal_type: str  # "initial" | "monthly" | "modification" | "termination"
+    period: str = ""   # "YYYY-MM" for monthly
+    calculation_results: Dict[str, Any] = {}
+    account_mapping: Dict[str, str] = {}
+
+
+@app.post("/api/erp/zoho/configure")
+async def erp_zoho_configure(body: _ZohoConfigBody):
+    """Store Zoho Books credentials server-side and verify connection immediately."""
+    from erp_integrations.zoho_books import ZohoBooksClient
+    client = ZohoBooksClient(
+        client_id=body.client_id,
+        client_secret=body.client_secret,
+        refresh_token=body.refresh_token,
+        organization_id=body.organization_id,
+        data_centre=body.data_centre,
+    )
+    try:
+        org_info = await client.verify_connection()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Zoho connection failed: {exc}")
+
+    _erp_zoho_config.update({
+        "client_id": body.client_id,
+        "client_secret": body.client_secret,
+        "refresh_token": body.refresh_token,
+        "organization_id": body.organization_id,
+        "data_centre": body.data_centre,
+        "org_name": org_info.get("org_name", ""),
+        "account_ids": {
+            "rou_asset": body.rou_asset_account_id,
+            "lease_liability": body.lease_liability_account_id,
+            "interest_expense": body.interest_expense_account_id,
+            "depreciation": body.depreciation_account_id,
+            "acc_dep_rou": body.acc_dep_rou_account_id,
+            "cash": body.cash_account_id,
+        },
+        "connected_at": datetime.utcnow().isoformat(),
+    })
+    return {"configured": True, "org_name": org_info.get("org_name", "")}
+
+
+@app.get("/api/erp/zoho/status")
+async def erp_zoho_status():
+    """Return connection status — credentials are never included in the response."""
+    from erp_integrations.audit_log import read_log
+    if not _erp_zoho_config.get("organization_id"):
+        return {"connected": False, "org_name": "", "data_centre": "", "last_push": None}
+    recent = read_log(limit=1)
+    last_push = recent[-1]["timestamp"] if recent else None
+    return {
+        "connected": True,
+        "org_name": _erp_zoho_config.get("org_name", ""),
+        "data_centre": _erp_zoho_config.get("data_centre", "com"),
+        "last_push": last_push,
+    }
+
+
+@app.post("/api/erp/zoho/push-journal")
+async def erp_zoho_push_journal(body: _ZohoPushBody):
+    """Push IFRS 16 journal entries to Zoho Books."""
+    if not _erp_zoho_config.get("organization_id"):
+        raise HTTPException(status_code=400, detail="Zoho Books not configured. Call /api/erp/zoho/configure first.")
+
+    from erp_integrations.zoho_books import ZohoBooksClient
+    from erp_integrations.journal_mapper import (
+        map_initial_recognition, map_monthly_entry, map_to_zoho_line_items
+    )
+    from erp_integrations.audit_log import log_push
+
+    cfg = _erp_zoho_config
+    zoho_account_ids = cfg.get("account_ids", {})
+
+    # Merge caller-supplied account_mapping with configured account IDs
+    account_mapping = {**zoho_account_ids, **body.account_mapping}
+
+    if body.journal_type == "initial":
+        mapped = map_initial_recognition(body.lease_id, body.calculation_results, account_mapping)
+    elif body.journal_type == "monthly":
+        period_row = body.calculation_results.get("period_row") or body.calculation_results
+        mapped = map_monthly_entry(body.lease_id, period_row, account_mapping)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported journal_type: {body.journal_type}. Use 'initial' or 'monthly'.")
+
+    zoho_line_items = map_to_zoho_line_items(mapped["lines"], zoho_account_ids)
+
+    zoho_payload = {
+        "journal_date": mapped["date"] or body.period + "-01" if body.period else mapped["date"],
+        "reference_number": mapped["reference"],
+        "notes": mapped["notes"],
+        "line_items": zoho_line_items,
+    }
+
+    client = ZohoBooksClient(
+        client_id=cfg["client_id"],
+        client_secret=cfg["client_secret"],
+        refresh_token=cfg["refresh_token"],
+        organization_id=cfg["organization_id"],
+        data_centre=cfg.get("data_centre", "com"),
+    )
+
+    try:
+        journal = await client.push_journal(
+            journal_date=zoho_payload["journal_date"],
+            reference_number=zoho_payload["reference_number"],
+            notes=zoho_payload["notes"],
+            line_items=zoho_payload["line_items"],
+        )
+        log_push(
+            erp="zoho_books",
+            lease_id=body.lease_id,
+            journal_type=body.journal_type,
+            payload=zoho_payload,
+            response=journal,
+            success=True,
+        )
+        return {
+            "success": True,
+            "zoho_journal_id": journal.get("journal_id", ""),
+            "message": f"Journal entry created in Zoho Books — ref {zoho_payload['reference_number']}",
+        }
+    except Exception as exc:
+        log_push(
+            erp="zoho_books",
+            lease_id=body.lease_id,
+            journal_type=body.journal_type,
+            payload=zoho_payload,
+            response={},
+            success=False,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=502, detail=f"Zoho Books push failed: {exc}")
+
+
+@app.get("/api/erp/zoho/push-log")
+async def erp_zoho_push_log(lease_id: Optional[str] = None):
+    """Return last 50 push log entries (optionally filtered by lease_id)."""
+    from erp_integrations.audit_log import read_log
+    entries = read_log(lease_id=lease_id, limit=50)
+    return {"entries": entries}
+
+
+# Phase 2 — Tally Prime stubs
+class _TallyConfigBody(BaseModel):
+    gateway_url: str = "http://localhost:9000"
+    company: str = ""
+
+
+@app.post("/api/erp/tally/configure")
+async def erp_tally_configure(body: _TallyConfigBody):
+    _erp_tally_config.update({"gateway_url": body.gateway_url, "company": body.company})
+    return {"status": "coming_soon", "message": "Tally Prime integration in progress"}
+
+
+@app.post("/api/erp/tally/push-journal")
+async def erp_tally_push_journal(body: Dict[str, Any]):
+    return {"status": "coming_soon", "message": "Tally Prime integration in progress"}
+
+
+# Phase 3 — SAP Business One stubs
+class _SAPConfigBody(BaseModel):
+    server_url: str
+    company_db: str
+    username: str
+    password: str
+
+
+@app.post("/api/erp/sap/configure")
+async def erp_sap_configure(body: _SAPConfigBody):
+    _erp_sap_config.update({
+        "server_url": body.server_url,
+        "company_db": body.company_db,
+        "username": body.username,
+    })
+    return {"status": "coming_soon"}
+
+
+@app.post("/api/erp/sap/push-journal")
+async def erp_sap_push_journal(body: Dict[str, Any]):
+    return {"status": "coming_soon"}
 
 
 # Run application (local dev). Tries PORT/API_PORT then scans for a free port if busy (Windows 10048, etc.).

@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
-import { Download, Copy, Link2 } from 'lucide-react';
+import { Download, Copy, Link2, Wifi, WifiOff, CheckCircle2, XCircle, Loader2, ChevronDown } from 'lucide-react';
 import { getLeaseRepository } from '@/lib/lease-repository';
 import { getErpAccountCodes, saveErpAccountCodes } from '@/lib/erp-codes';
 import {
@@ -347,11 +347,65 @@ function generateManualCsv(
   return [hdr, ...rows].join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// Live Connection helpers
+// ---------------------------------------------------------------------------
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:9000';
+
+async function apiGet(path: string) {
+  const r = await fetch(`${API_BASE}${path}`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function apiPost(path: string, body: unknown) {
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+const ZOHO_ACCOUNT_FIELDS = [
+  { key: 'rou_asset_account_id', label: 'ROU Asset (Zoho account_id)' },
+  { key: 'lease_liability_account_id', label: 'Lease Liability (Zoho account_id)' },
+  { key: 'interest_expense_account_id', label: 'Interest Expense (Zoho account_id)' },
+  { key: 'depreciation_account_id', label: 'Depreciation Expense (Zoho account_id)' },
+  { key: 'acc_dep_rou_account_id', label: 'Acc. Depreciation ROU (Zoho account_id)' },
+  { key: 'cash_account_id', label: 'Cash / Bank (Zoho account_id)' },
+];
+
+type ZohoStatus = { connected: boolean; org_name: string; data_centre: string; last_push: string | null };
+type PushLogEntry = {
+  timestamp: string; erp: string; lease_id: string; journal_type: string;
+  success: boolean; error: string; erp_reference: string;
+  payload_summary: { reference_number: string; journal_date: string; line_count: number };
+};
+
+// ---------------------------------------------------------------------------
+
 export default function ErpPage() {
   const [leases, setLeases] = useState<LeaseRepositoryEntry[]>([]);
   const [selectedLease, setSelectedLease] = useState<string>('');
   const [erpType, setErpType] = useState<ErpType>('tally');
   const [exportType, setExportType] = useState<ExportType>('monthly');
+
+  // Live connection state
+  const [activeTab, setActiveTab] = useState<'file' | 'live'>('file');
+  const [zohoStatus, setZohoStatus] = useState<ZohoStatus | null>(null);
+  const [zohoStatusLoading, setZohoStatusLoading] = useState(false);
+  const [showZohoConfigure, setShowZohoConfigure] = useState(false);
+  const [zohoForm, setZohoForm] = useState({
+    client_id: '', client_secret: '', refresh_token: '', organization_id: '',
+    data_centre: 'com',
+    rou_asset_account_id: '', lease_liability_account_id: '',
+    interest_expense_account_id: '', depreciation_account_id: '',
+    acc_dep_rou_account_id: '', cash_account_id: '',
+  });
+  const [zohoConfiguring, setZohoConfiguring] = useState(false);
+  const [pushLog, setPushLog] = useState<PushLogEntry[]>([]);
+  const [pushLogLoading, setPushLogLoading] = useState(false);
   const [period, setPeriod] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -361,11 +415,50 @@ export default function ErpPage() {
 
   useEffect(() => {
     setLeases(getLeaseRepository());
+    fetchZohoStatus();
   }, []);
 
   useEffect(() => {
     saveErpAccountCodes(codes);
   }, [codes]);
+
+  async function fetchZohoStatus() {
+    setZohoStatusLoading(true);
+    try {
+      const data = await apiGet('/api/erp/zoho/status');
+      setZohoStatus(data);
+    } catch {
+      setZohoStatus({ connected: false, org_name: '', data_centre: '', last_push: null });
+    } finally {
+      setZohoStatusLoading(false);
+    }
+  }
+
+  async function handleZohoConfigure() {
+    setZohoConfiguring(true);
+    try {
+      const result = await apiPost('/api/erp/zoho/configure', zohoForm);
+      toast.success(`Connected to Zoho Books — ${result.org_name}`);
+      setShowZohoConfigure(false);
+      await fetchZohoStatus();
+    } catch (e: any) {
+      toast.error(`Connection failed: ${e.message}`);
+    } finally {
+      setZohoConfiguring(false);
+    }
+  }
+
+  async function fetchPushLog() {
+    setPushLogLoading(true);
+    try {
+      const data = await apiGet('/api/erp/zoho/push-log');
+      setPushLog((data.entries || []).slice().reverse());
+    } catch {
+      setPushLog([]);
+    } finally {
+      setPushLogLoading(false);
+    }
+  }
 
   const lease = leases.find((l) => l.id === selectedLease || l.lease_id === selectedLease);
   const rowForPeriod = lease ? getScheduleRowForPeriod(lease, period) : null;
@@ -430,8 +523,193 @@ export default function ErpPage() {
     })();
 
   return (
-    <SidebarLayout pageTitle="ERP Export" pageSubtitle="Export journal entries for Tally Prime, SAP, Oracle, QuickBooks">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <SidebarLayout pageTitle="ERP Export" pageSubtitle="Export journal entries or push live to your ERP">
+      {/* Tab switcher */}
+      <div className="flex gap-1 mb-6 bg-bg-light rounded-lg p-1 w-fit border border-border-default">
+        <button
+          className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === 'file' ? 'bg-white text-text-primary shadow-sm' : 'text-text-muted hover:text-text-primary'}`}
+          onClick={() => setActiveTab('file')}
+        >
+          File Export
+        </button>
+        <button
+          className={`px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 ${activeTab === 'live' ? 'bg-white text-text-primary shadow-sm' : 'text-text-muted hover:text-text-primary'}`}
+          onClick={() => { setActiveTab('live'); fetchPushLog(); }}
+        >
+          <Wifi className="w-3.5 h-3.5" /> Live ERP Connection
+        </button>
+      </div>
+
+      {activeTab === 'live' && (
+        <div className="space-y-6">
+          {/* Zoho Books card */}
+          <div className="bg-white rounded-[14px] p-6 border border-border-default shadow-card">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center">
+                  <Wifi className="w-5 h-5 text-blue-600" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-text-primary">Zoho Books</h3>
+                  <p className="text-xs text-text-muted">Push IFRS 16 journals directly via REST API</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {zohoStatusLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-text-muted" />
+                ) : zohoStatus?.connected ? (
+                  <span className="flex items-center gap-1 text-xs text-green-700 bg-green-50 border border-green-200 px-2 py-1 rounded-full">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Connected — {zohoStatus.org_name}
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-xs text-red-600 bg-red-50 border border-red-200 px-2 py-1 rounded-full">
+                    <XCircle className="w-3.5 h-3.5" /> Not connected
+                  </span>
+                )}
+                <Button variant="secondary" size="sm" onClick={() => setShowZohoConfigure(!showZohoConfigure)}>
+                  Configure
+                </Button>
+                <Button variant="secondary" size="sm" onClick={fetchZohoStatus}>
+                  Refresh
+                </Button>
+              </div>
+            </div>
+
+            {zohoStatus?.connected && zohoStatus.last_push && (
+              <p className="text-xs text-text-muted mb-4">Last push: {new Date(zohoStatus.last_push).toLocaleString()}</p>
+            )}
+
+            {showZohoConfigure && (
+              <div className="border-t border-border-default pt-4 space-y-3">
+                <h4 className="text-sm font-semibold text-text-primary">Zoho Books Credentials</h4>
+                <p className="text-xs text-text-muted">Credentials are stored server-side and never returned to the browser.</p>
+                {[
+                  { key: 'client_id', label: 'Client ID', type: 'text' },
+                  { key: 'client_secret', label: 'Client Secret', type: 'password' },
+                  { key: 'refresh_token', label: 'Refresh Token', type: 'password' },
+                  { key: 'organization_id', label: 'Organization ID', type: 'text' },
+                ].map(({ key, label, type }) => (
+                  <div key={key}>
+                    <label className="block text-xs font-medium text-text-secondary mb-1">{label}</label>
+                    <input
+                      type={type}
+                      value={(zohoForm as any)[key]}
+                      onChange={(e) => setZohoForm({ ...zohoForm, [key]: e.target.value })}
+                      className="w-full px-3 py-2 bg-bg-light border border-border-default rounded-lg text-sm font-mono"
+                      placeholder={label}
+                    />
+                  </div>
+                ))}
+                <div>
+                  <label className="block text-xs font-medium text-text-secondary mb-1">Data Centre</label>
+                  <select
+                    value={zohoForm.data_centre}
+                    onChange={(e) => setZohoForm({ ...zohoForm, data_centre: e.target.value })}
+                    className="w-full px-3 py-2 bg-bg-light border border-border-default rounded-lg text-sm"
+                  >
+                    <option value="com">US (.com)</option>
+                    <option value="eu">Europe (.eu)</option>
+                    <option value="in">India (.in)</option>
+                    <option value="au">Australia (.au)</option>
+                  </select>
+                </div>
+                <h4 className="text-sm font-semibold text-text-primary pt-2">Zoho Chart of Accounts — Account IDs</h4>
+                <p className="text-xs text-text-muted">Enter the Zoho numeric account_id for each IFRS 16 GL line.</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {ZOHO_ACCOUNT_FIELDS.map(({ key, label }) => (
+                    <div key={key}>
+                      <label className="block text-xs font-medium text-text-secondary mb-1">{label}</label>
+                      <input
+                        type="text"
+                        value={(zohoForm as any)[key]}
+                        onChange={(e) => setZohoForm({ ...zohoForm, [key]: e.target.value })}
+                        className="w-full px-3 py-2 bg-bg-light border border-border-default rounded-lg text-sm font-mono"
+                        placeholder="Zoho account_id"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <Button variant="primary" size="md" className="bg-gradient-orange" onClick={handleZohoConfigure} disabled={zohoConfiguring}>
+                    {zohoConfiguring ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                    {zohoConfiguring ? 'Verifying…' : 'Save & Verify Connection'}
+                  </Button>
+                  <Button variant="secondary" size="md" onClick={() => setShowZohoConfigure(false)}>Cancel</Button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Tally Prime — coming soon */}
+          <div className="bg-white rounded-[14px] p-6 border border-border-default shadow-card opacity-60">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
+                <WifiOff className="w-5 h-5 text-gray-400" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-text-primary">Tally Prime <span className="ml-2 text-xs font-normal text-text-muted bg-gray-100 px-2 py-0.5 rounded-full">Coming soon</span></h3>
+                <p className="text-xs text-text-muted">Live push via Tally Developer Gateway</p>
+              </div>
+            </div>
+          </div>
+
+          {/* SAP B1 — coming soon */}
+          <div className="bg-white rounded-[14px] p-6 border border-border-default shadow-card opacity-60">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
+                <WifiOff className="w-5 h-5 text-gray-400" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-text-primary">SAP Business One <span className="ml-2 text-xs font-normal text-text-muted bg-gray-100 px-2 py-0.5 rounded-full">Coming soon</span></h3>
+                <p className="text-xs text-text-muted">Live push via Service Layer REST API</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Push log */}
+          <div className="bg-white rounded-[14px] p-6 border border-border-default shadow-card">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-bold text-text-primary">Push Log</h3>
+              <Button variant="secondary" size="sm" onClick={fetchPushLog} disabled={pushLogLoading}>
+                {pushLogLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Refresh'}
+              </Button>
+            </div>
+            {pushLog.length === 0 ? (
+              <p className="text-sm text-text-muted text-center py-6">No pushes recorded yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-border-default">
+                      {['Timestamp', 'Lease', 'Type', 'Status', 'ERP Reference', 'Error'].map((h) => (
+                        <th key={h} className="text-left py-2 px-2 font-medium text-text-muted">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pushLog.map((entry, i) => (
+                      <tr key={i} className="border-t border-border-default hover:bg-bg-light">
+                        <td className="py-2 px-2 whitespace-nowrap">{new Date(entry.timestamp).toLocaleString()}</td>
+                        <td className="py-2 px-2">{entry.lease_id}</td>
+                        <td className="py-2 px-2">{entry.journal_type}</td>
+                        <td className="py-2 px-2">
+                          {entry.success
+                            ? <span className="text-green-700 font-medium">Success</span>
+                            : <span className="text-red-600 font-medium">Failed</span>}
+                        </td>
+                        <td className="py-2 px-2 font-mono">{entry.erp_reference || '—'}</td>
+                        <td className="py-2 px-2 text-red-500">{entry.error || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'file' && <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
           <div className="bg-white rounded-[14px] p-6 border border-border-default shadow-card">
@@ -549,6 +827,8 @@ export default function ErpPage() {
           </p>
         </div>
       </div>
+    </div>}
+
     </SidebarLayout>
   );
 }

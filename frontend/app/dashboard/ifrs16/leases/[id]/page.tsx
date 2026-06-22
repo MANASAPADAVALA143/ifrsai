@@ -84,6 +84,88 @@ import {
 import { LeasePdfUploadBar } from '@/components/ifrs16/LeasePdfUploadBar';
 import { FieldLabelWithExtraction } from '@/components/ifrs16/FieldLabelWithExtraction';
 
+// ---------------------------------------------------------------------------
+// Zoho Books push button (inline, no extra file needed)
+// ---------------------------------------------------------------------------
+const _ZOHO_API = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:9000';
+
+function ZohoPushButton({ leaseId, calcResults, period }: { leaseId: string; calcResults: any; period: string }) {
+  const [zohoConnected, setZohoConnected] = useState<boolean | null>(null);
+  const [pushType, setPushType] = useState<'initial' | 'monthly'>('initial');
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [pushing, setPushing] = useState(false);
+
+  useEffect(() => {
+    fetch(`${_ZOHO_API}/api/erp/zoho/status`)
+      .then((r) => r.json())
+      .then((d) => setZohoConnected(d.connected))
+      .catch(() => setZohoConnected(false));
+  }, []);
+
+  if (zohoConnected === false) return null;
+  if (zohoConnected === null) return null;
+
+  async function handlePush(type: 'initial' | 'monthly') {
+    setPushing(true);
+    setShowDropdown(false);
+    try {
+      const resp = await fetch(`${_ZOHO_API}/api/erp/zoho/push-journal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lease_id: leaseId,
+          journal_type: type,
+          period,
+          calculation_results: calcResults,
+          account_mapping: {},
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || 'Push failed');
+      toast.success(`Pushed to Zoho Books — journal ${data.zoho_journal_id}`);
+    } catch (e: any) {
+      toast.error(`Zoho push failed: ${e.message}`);
+    } finally {
+      setPushing(false);
+    }
+  }
+
+  return (
+    <div className="relative inline-block mt-2">
+      <div className="flex rounded-lg overflow-hidden border border-[#0077b6] w-fit">
+        <button
+          className="px-4 py-2 bg-[#0077b6] text-white text-sm font-medium hover:bg-[#005f8e] disabled:opacity-60 flex items-center gap-2"
+          onClick={() => handlePush(pushType)}
+          disabled={pushing}
+        >
+          {pushing && <span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />}
+          Push to Zoho Books ({pushType === 'initial' ? 'Initial' : 'Monthly'})
+        </button>
+        <button
+          className="px-2 py-2 bg-[#0077b6] text-white border-l border-[#005f8e] hover:bg-[#005f8e]"
+          onClick={() => setShowDropdown(!showDropdown)}
+        >
+          <ChevronDown className="w-4 h-4" />
+        </button>
+      </div>
+      {showDropdown && (
+        <div className="absolute z-20 mt-1 left-0 bg-white border border-[#e2e8f0] rounded-lg shadow-lg min-w-[220px]">
+          {(['initial', 'monthly'] as const).map((t) => (
+            <button
+              key={t}
+              className="w-full text-left px-4 py-2 text-sm hover:bg-[#f8fafc] first:rounded-t-lg last:rounded-b-lg"
+              onClick={() => { setPushType(t); handlePush(t); }}
+            >
+              {t === 'initial' ? 'Push initial recognition' : 'Push this month\'s entry'}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+// ---------------------------------------------------------------------------
+
 const TAB_IDS = ['contract', 'financial', 'modifications', 'assets', 'schedules', 'disclosures', 'review'] as const;
 const TABS: { id: typeof TAB_IDS[number]; label: string; icon: any }[] = [
   { id: 'contract', label: 'Contract Details', icon: FileText },
@@ -3187,6 +3269,8 @@ The Company has not applied the short-term or low-value exemptions to this lease
                         onPosted={() => toast.success('Posted to FinReportAI')}
                       />
                     )}
+
+                    {hasResults && <ZohoPushButton leaseId={form.leaseId || existingLease?.lease_id || existingLease?.id || ''} calcResults={calcResults ?? existingLease?.results ?? {}} period={(form.startDate || '').slice(0, 7)} />}
 
                     {/* Section 5 — Download Reports */}
                     <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden mb-6">
