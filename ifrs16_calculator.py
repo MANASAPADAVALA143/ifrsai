@@ -80,53 +80,62 @@ class IFRS16Calculator:
     
     def calculate_lease_liability(self, lease: LeaseInput) -> Decimal:
         """
-        Calculate present value of lease payments (Initial Lease Liability)
-        
+        Calculate the initial lease liability per IFRS 16.26.
+
+        Includes:
+        - PV of lease payments (regular lease component, net of non-lease component)
+        - PV of amounts expected to be payable under residual value guarantees
+          where the guarantee is provided by the lessee (IFRS 16.26(d))
+
+        Does NOT include: initial direct costs, lease incentives (those adjust the
+        ROU asset, not the lease liability).
+
         When rent-free period exists: payments start AFTER rent-free months.
-        PV is calculated for the payment months only, discounted appropriately.
-        
-        Arrears (ordinary annuity, payment at end of period):
-          PV = PMT × [(1 - (1 + r)^-n) / r] × (1+r)^(-rent_free)
+        Arrears (ordinary annuity): PV = PMT × [(1-(1+r)^-n)/r] × (1+r)^(-rent_free)
         Advance (annuity-due): first payment at beginning of first payment month.
-        
-        Args:
-            lease: LeaseInput object with lease parameters
-            
-        Returns:
-            Present value of lease payments
         """
         rent_free = getattr(lease, 'rent_free_months', 0) or 0
         payment_months = lease.lease_term_months - rent_free
         if payment_months <= 0:
             return Decimal('0')
 
-        is_advance = (lease.payment_type or "Arrears").strip().lower() == "advance"
+        # Step 1: PV of regular lease-component payments
         if self._use_schedule_based_pv(lease):
-            return self._pv_lease_payments_schedule_based(lease)
-        
-        monthly_rate = lease.annual_discount_rate / Decimal('12')
-        
-        # Handle zero interest rate edge case
-        effective_payment = self.get_lease_component_payment(lease)
-        if monthly_rate == 0:
-            return effective_payment * Decimal(str(payment_months))
-        
-        # Ordinary annuity (Arrears): PV of n payments
-        discount_factor = (
-            Decimal('1') - (Decimal('1') + monthly_rate) ** -payment_months
-        ) / monthly_rate
-        
-        pv = effective_payment * discount_factor
-        
-        # Advance (annuity-due): first payment at start of first payment period
-        if (lease.payment_type or "Arrears").strip().lower() == "advance":
-            pv = pv * (Decimal('1') + monthly_rate)
-        
-        # Discount back to commencement (payments start after rent-free months)
-        if rent_free > 0:
-            pv = pv * (Decimal('1') + monthly_rate) ** -rent_free
-        
-        return pv.quantize(self.precision, ROUND_HALF_UP)
+            pv_regular = self._pv_lease_payments_schedule_based(lease)
+        else:
+            monthly_rate = lease.annual_discount_rate / Decimal('12')
+            effective_payment = self.get_lease_component_payment(lease)
+            if monthly_rate == 0:
+                pv_regular = effective_payment * Decimal(str(payment_months))
+            else:
+                discount_factor = (
+                    Decimal('1') - (Decimal('1') + monthly_rate) ** -payment_months
+                ) / monthly_rate
+                pv_regular = effective_payment * discount_factor
+                if (lease.payment_type or "Arrears").strip().lower() == "advance":
+                    pv_regular = pv_regular * (Decimal('1') + monthly_rate)
+                if rent_free > 0:
+                    pv_regular = pv_regular * (Decimal('1') + monthly_rate) ** -rent_free
+            pv_regular = pv_regular.quantize(self.precision, ROUND_HALF_UP)
+
+        # Step 2: PV of RVG expected payment (IFRS 16.26(d))
+        # Only included when the lessee itself guarantees the residual value.
+        rvg_expected = getattr(lease, 'rvg_expected_payment', Decimal('0')) or Decimal('0')
+        rvg_guaranteed_by = (
+            getattr(lease, 'rvg_guaranteed_by', 'None') or 'None'
+        ).strip().lower()
+        pv_rvg = Decimal('0')
+        if rvg_expected > 0 and rvg_guaranteed_by == 'lessee':
+            monthly_rate = lease.annual_discount_rate / Decimal('12')
+            if monthly_rate > 0:
+                pv_rvg = (
+                    rvg_expected /
+                    (Decimal('1') + monthly_rate) ** lease.lease_term_months
+                ).quantize(self.precision, ROUND_HALF_UP)
+            else:
+                pv_rvg = rvg_expected
+
+        return (pv_regular + pv_rvg).quantize(self.precision, ROUND_HALF_UP)
     
     def calculate_rou_asset(
         self,
@@ -695,22 +704,24 @@ class IFRS16Calculator:
         # Step 0: Determine lease component payment for IFRS 16 measurement
         effective_payment = self.get_lease_component_payment(lease)
 
-        # Step 1: Calculate Lease Liability (PV of regular lease-component payments)
-        pv_regular_payments = self.calculate_lease_liability(lease)
-        
-        # Step 1b: Add PV of residual value guarantee if lessee guarantees (IFRS 16 para 26(d))
+        # Step 1: Calculate Lease Liability — RVG (IFRS 16.26(d)) already included
+        # inside calculate_lease_liability(); no separate addition needed here.
         rvg_expected = getattr(lease, 'rvg_expected_payment', Decimal('0')) or Decimal('0')
         rvg_guaranteed_by = (getattr(lease, 'rvg_guaranteed_by', 'None') or 'None').strip().lower()
+        lease_liability = self.calculate_lease_liability(lease)
+
+        # Derive pv_regular_payments and pv_rvg for the liability_breakdown output dict.
+        monthly_rate = lease.annual_discount_rate / Decimal('12')
         pv_rvg = Decimal('0')
         if rvg_expected > 0 and rvg_guaranteed_by == 'lessee':
-            monthly_rate = lease.annual_discount_rate / Decimal('12')
             if monthly_rate > 0:
-                pv_rvg = (rvg_expected / (Decimal('1') + monthly_rate) ** lease.lease_term_months).quantize(
-                    self.precision, ROUND_HALF_UP
-                )
+                pv_rvg = (
+                    rvg_expected /
+                    (Decimal('1') + monthly_rate) ** lease.lease_term_months
+                ).quantize(self.precision, ROUND_HALF_UP)
             else:
                 pv_rvg = rvg_expected
-        lease_liability = pv_regular_payments + pv_rvg
+        pv_regular_payments = lease_liability - pv_rvg
         
         # Step 2: Compute lease incentives. Rent-free months are already reflected
         # as zero payments in the PV cash flows; do not deduct them again.

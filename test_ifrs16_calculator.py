@@ -515,5 +515,72 @@ class ConsolidateLeasesTests(unittest.TestCase):
         self.assertEqual(result["group_totals"]["rou_asset"], 200_000)
 
 
+class RVGLeaseLibabilityTests(unittest.TestCase):
+    """IFRS 16.26(d) — residual value guarantee must be included in lease liability."""
+
+    def _re_uae_007_lease(self, rvg_guaranteed_by="Lessee", rvg_expected_payment=Decimal("400000")):
+        return LeaseInput(
+            lease_id="RE-UAE-007",
+            asset_description="Test Asset",
+            commencement_date=datetime(2022, 4, 1),
+            lease_term_months=84,
+            monthly_payment=Decimal("310000"),
+            annual_discount_rate=Decimal("0.053"),
+            payment_type="Arrears",
+            escalation_rate=Decimal("0.03"),
+            rent_free_months=0,
+            cpi_index_base=Decimal("100"),
+            cpi_index_current=Decimal("107"),
+            non_lease_component=Decimal("38000"),
+            practical_expedient_elected=False,
+            legal_fees=Decimal("60000"),
+            brokerage_fees=Decimal("40000"),
+            other_initial_direct_costs=Decimal("18000"),
+            cash_incentive=Decimal("0"),
+            rvg_amount=Decimal("800000"),
+            rvg_guaranteed_by=rvg_guaranteed_by,
+            rvg_expected_payment=rvg_expected_payment,
+        )
+
+    def test_rvg_included_when_lessee_guarantees(self):
+        """calculate_lease_liability() must include PV of RVG when lessee guarantees."""
+        calc = IFRS16Calculator()
+        lease = self._re_uae_007_lease(rvg_guaranteed_by="Lessee", rvg_expected_payment=Decimal("400000"))
+        ll = calc.calculate_lease_liability(lease)
+        # Independently verified: 20,441,847.19 (includes PV of 400k over 84 months @ 5.3%/12)
+        self.assertAlmostEqual(float(ll), 20441847.19, delta=1.0,
+                               msg=f"Expected ~20441847.19, got {ll}")
+
+    def test_rvg_excluded_when_third_party_guarantees(self):
+        """IFRS 16.26(d) only includes lessee guarantees — third-party RVG must be excluded."""
+        calc = IFRS16Calculator()
+        lease = self._re_uae_007_lease(rvg_guaranteed_by="Third Party", rvg_expected_payment=Decimal("400000"))
+        ll = calc.calculate_lease_liability(lease)
+        # No RVG added: 20,165,604.05
+        self.assertAlmostEqual(float(ll), 20165604.05, delta=1.0,
+                               msg=f"Expected ~20165604.05 (no RVG), got {ll}")
+
+    def test_rvg_excluded_when_expected_payment_zero(self):
+        """rvg_amount set but rvg_expected_payment=0 means lessee expects no payment — exclude."""
+        calc = IFRS16Calculator()
+        lease = self._re_uae_007_lease(rvg_guaranteed_by="Lessee", rvg_expected_payment=Decimal("0"))
+        ll_no_rvg = calc.calculate_lease_liability(lease)
+        lease_third = self._re_uae_007_lease(rvg_guaranteed_by="Third Party", rvg_expected_payment=Decimal("400000"))
+        ll_third = calc.calculate_lease_liability(lease_third)
+        # Both should produce the same result (no RVG in either case)
+        self.assertAlmostEqual(float(ll_no_rvg), float(ll_third), delta=0.01,
+                               msg="Zero expected payment should produce same result as third-party guarantee")
+
+    def test_no_double_counting_full_vs_standalone(self):
+        """calculate_full_ifrs16 lease_liability must match calculate_lease_liability exactly."""
+        calc = IFRS16Calculator()
+        lease = self._re_uae_007_lease(rvg_guaranteed_by="Lessee", rvg_expected_payment=Decimal("400000"))
+        standalone = float(calc.calculate_lease_liability(lease))
+        full = calc.calculate_full_ifrs16(lease)
+        full_ll = full["lease_liability"]
+        self.assertAlmostEqual(standalone, full_ll, delta=0.01,
+                               msg=f"Double-counting detected: standalone={standalone}, full={full_ll}")
+
+
 if __name__ == "__main__":
     unittest.main()
