@@ -850,7 +850,8 @@ export default function ErpPage() {
         </div>
       )}
 
-      {activeTab === 'file' && <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {activeTab === 'file' && (
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
           <div className="bg-white rounded-[14px] p-6 border border-border-default shadow-card">
@@ -968,7 +969,7 @@ export default function ErpPage() {
           </p>
         </div>
       </div>
-    </div>}
+      )}
 
     </SidebarLayout>
   );

@@ -171,10 +171,14 @@ async function serverDeleteLease(leaseId: string): Promise<void> {
   }
 }
 
+let syncChain: Promise<void> = Promise.resolve();
+
 function queueServerSync(fn: () => Promise<void>): void {
-  void fn().catch((err) => {
-    console.warn('[lease-repository] server sync failed:', err);
-  });
+  syncChain = syncChain
+    .then(fn)
+    .catch((err) => {
+      console.warn('[lease-repository] server sync failed:', err);
+    });
 }
 
 function formatDisclosureAmount(amount: number, currency: string): string {
@@ -187,7 +191,7 @@ function formatDisclosureAmount(amount: number, currency: string): string {
     return `£${numeric.toLocaleString('en-GB', { maximumFractionDigits: 0 })}`;
   }
   if (ccy === 'AED') {
-    return `AED ${numeric.toLocaleString('en-GB', { maximumFractionDigits: 0 })}`;
+    return `AED ${numeric.toLocaleString('en-AE', { maximumFractionDigits: 0 })}`;
   }
   return `${ccy} ${numeric.toLocaleString('en-GB', { maximumFractionDigits: 0 })}`;
 }
@@ -282,16 +286,26 @@ export function getDistinctLegalEntities(repo: LeaseRepositoryEntry[]): string[]
 }
 
 export function saveToLeaseRepository(entry: LeaseRepositoryEntry): void {
+  saveManyToLeaseRepository([entry]);
+}
+
+/** Batch local save + serialized server sync (avoids flooding /api/ifrs16/portfolio/add). */
+export function saveManyToLeaseRepository(entries: LeaseRepositoryEntry[]): void {
+  if (entries.length === 0) return;
   const repo = getLeaseRepository();
-  const enrichedEntry = ensureDisclosureNotes(entry);
-  const exists = repo.findIndex((e) => e.id === entry.id || e.lease_id === entry.lease_id);
-  if (exists >= 0) {
-    repo[exists] = enrichedEntry;
-  } else {
-    repo.unshift(enrichedEntry);
+  const enriched = entries.map((entry) => ensureDisclosureNotes(entry));
+  for (const entry of enriched) {
+    const exists = repo.findIndex((e) => e.id === entry.id || e.lease_id === entry.lease_id);
+    if (exists >= 0) {
+      repo[exists] = entry;
+    } else {
+      repo.unshift(entry);
+    }
   }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(repo));
-  queueServerSync(() => serverUpsertLease(enrichedEntry));
+  for (const entry of enriched) {
+    queueServerSync(() => serverUpsertLease(entry));
+  }
 }
 
 export function getLeaseById(id: string): LeaseRepositoryEntry | undefined {

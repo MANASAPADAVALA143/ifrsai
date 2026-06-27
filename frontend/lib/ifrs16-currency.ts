@@ -51,6 +51,22 @@ export function formatLeaseMoney(
   return formatCurrency(Number(amount) || 0, ccy, decimals);
 }
 
+/** Compact INR labels (Cr/L) for chart axes only. Non-INR always uses full formatted amounts. */
+export function formatLeaseChartTick(
+  amount: number,
+  currency?: string | null
+): string {
+  const ccy = sanitizeCurrencyCode(currency ?? undefined, getDefaultIfrs16Currency());
+  const v = Number(amount) || 0;
+  if (ccy === 'INR') {
+    const av = Math.abs(v);
+    if (av >= 10_000_000) return `₹${(v / 10_000_000).toFixed(1)}Cr`;
+    if (av >= 100_000) return `₹${(v / 100_000).toFixed(0)}L`;
+    return formatLeaseMoney(v, ccy);
+  }
+  return formatLeaseMoney(v, ccy, 0);
+}
+
 const UK_DEMO_PATTERN =
   /canary wharf|manchester retail|head office canary|multiple commercial properties including head office|london,|,\s*london|united kingdom|uk retail centre/i;
 

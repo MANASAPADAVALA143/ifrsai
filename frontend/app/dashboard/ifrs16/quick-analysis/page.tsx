@@ -8,7 +8,8 @@ import { Upload, Loader2, CheckCircle2, Zap, Copy } from 'lucide-react';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { ifrs16Api } from '@/lib/api';
-import { saveToLeaseRepository, buildLeaseEntry } from '@/lib/lease-repository';
+import { saveToLeaseRepository, saveManyToLeaseRepository, buildLeaseEntry } from '@/lib/lease-repository';
+import { formatLeaseMoney } from '@/lib/ifrs16-currency';
 
 const cardClass =
   'bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]';
@@ -1214,7 +1215,7 @@ export default function QuickAnalysisPage() {
       setBulkResult(merged);
       saveHistoryEntry(merged, elapsed);
       try {
-        let n = 0;
+        const toSave: ReturnType<typeof buildLeaseEntry>[] = [];
         for (const r of merged.results) {
           if (r.status !== 'success') continue;
           const pr = parsedRows.find((p) => p.lease_id === r.lease_id);
@@ -1225,14 +1226,14 @@ export default function QuickAnalysisPage() {
             monthly_depreciation: r.monthly_depreciation,
             total_interest: r.total_interest,
           }) as Record<string, unknown>;
-          saveToLeaseRepository(
+          toSave.push(
             buildLeaseEntry({
               lease_id: r.lease_id,
               asset_description: pr.asset_description ?? r.lease_id,
               commencement_date: pr.commencement_date ?? '',
               lease_term_months: pr.lease_term_months ?? 12,
               monthly_payment: pr.monthly_payment ?? 0,
-              currency: pr.currency ?? 'INR',
+              currency: pr.currency ?? 'AED',
               lessee_name: pr.lessee_name,
               lessor_name: pr.lessor_name,
               discount_rate: pr ? pr.annual_discount_rate * 100 : undefined,
@@ -1241,10 +1242,12 @@ export default function QuickAnalysisPage() {
               status: 'Calculated',
             })
           );
-          n++;
         }
-        if (n > 0) {
-          toast.success(`${n} lease${n === 1 ? '' : 's'} auto-saved to repository`, { duration: 2000 });
+        if (toSave.length > 0) {
+          saveManyToLeaseRepository(toSave);
+          toast.success(`${toSave.length} lease${toSave.length === 1 ? '' : 's'} auto-saved to repository`, {
+            duration: 2000,
+          });
         }
       } catch (e) {
         console.log('Auto-save skipped:', e);
@@ -1374,16 +1377,15 @@ export default function QuickAnalysisPage() {
   const formatAmount = useCallback(
     (value: number, currency?: string) => {
       const cur = currency || portfolioCurrency;
-      const sym = getCurrencySymbol(cur);
       const v = Number(value) || 0;
-      const av = Math.abs(v);
-      if (av >= 10_000_000) return `${sym}${(v / 10_000_000).toFixed(2)}Cr`;
-      if (av >= 100_000) return `${sym}${(v / 100_000).toFixed(2)}L`;
-      // INR: Indian grouping. Other currencies: Western (avoids £ + "L" on large rows vs en-IN small rows).
-      if (String(cur).toUpperCase() === 'INR') {
-        return `${sym}${v.toLocaleString('en-IN')}`;
+      const ccy = String(cur).toUpperCase();
+      if (ccy === 'INR') {
+        const av = Math.abs(v);
+        if (av >= 10_000_000) return `₹${(v / 10_000_000).toFixed(2)}Cr`;
+        if (av >= 100_000) return `₹${(v / 100_000).toFixed(2)}L`;
+        return `₹${v.toLocaleString('en-IN')}`;
       }
-      return `${sym}${v.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      return formatLeaseMoney(v, cur, 0);
     },
     [portfolioCurrency]
   );

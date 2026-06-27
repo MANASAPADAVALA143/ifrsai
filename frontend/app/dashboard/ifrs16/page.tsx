@@ -8,6 +8,7 @@ import { KPICard } from '@/components/KPICard';
 import { getLeaseRepository } from '@/lib/lease-repository';
 import {
   formatLeaseMoney,
+  formatLeaseChartTick,
   getDefaultIfrs16Currency,
   getIfrs16MarketMode,
   resolveLeaseCurrency,
@@ -35,29 +36,7 @@ import {
   ResponsiveContainer,
 } from '@/components/Charts';
 
-const LEASE_LIABILITY_TREND_SAMPLE = [
-  { month: 'Jul', liability: 45.2 },
-  { month: 'Aug', liability: 43.8 },
-  { month: 'Sep', liability: 42.1 },
-  { month: 'Oct', liability: 40.5 },
-  { month: 'Nov', liability: 38.9 },
-  { month: 'Dec', liability: 37.2 },
-];
-
-const LEASES_BY_TYPE_SAMPLE = [
-  { name: 'Office Space', value: 45, color: '#6366F1' },
-  { name: 'Equipment', value: 30, color: '#10B981' },
-  { name: 'Vehicles', value: 15, color: '#F59E0B' },
-  { name: 'Warehouse', value: 10, color: '#EF4444' },
-];
-
 const PIE_COLORS = ['#6366F1', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#06B6D4'];
-
-const RECENT_CALCULATIONS_SAMPLE = [
-  { id: '1', date: '2024-02-20', leaseName: 'Mumbai Office Lease', standard: 'IFRS 16', liability: 12453200, status: 'Completed', fileId: 'file-123' },
-  { id: '2', date: '2024-02-19', leaseName: 'Delhi Warehouse', standard: 'IFRS 16', liability: 8675400, status: 'Completed', fileId: 'file-124' },
-  { id: '3', date: '2024-02-18', leaseName: 'Software License Revenue', standard: 'IFRS 15', liability: 15000000, status: 'Completed', fileId: 'file-125' },
-];
 
 function getStatus(endDate: string): { label: string; className: string } {
   const end = new Date(endDate);
@@ -405,57 +384,46 @@ export default function IFRS16DashboardPage() {
   const formatKpiAmount = (amount: number) =>
     marketMode === 'IN' ? formatCrores(amount) : fmtPortfolio(amount);
 
-  const kpiLiability = hasLivePortfolio && totalLeaseLiability > 0
-    ? formatKpiAmount(totalLeaseLiability)
-    : formatCrores(372000000);
-  const kpiRou = hasLivePortfolio && totalRou > 0
-    ? formatKpiAmount(totalRou)
-    : formatCrores(385000000);
-  const kpiActive = hasLivePortfolio ? String(totalActive) : '47';
-  const kpiExpiring = hasLivePortfolio ? String(expiring90.length) : '5';
+  const kpiLiability = formatKpiAmount(totalLeaseLiability);
+  const kpiRou = formatKpiAmount(totalRou);
+  const kpiActive = String(totalActive);
+  const kpiExpiring = String(expiring90.length);
 
   const hasScheduleTrend = liabilityByMonth.some((m) => m.liability > 0);
   const liabilityTrendData = hasScheduleTrend
     ? liabilityByMonth.map((m) => ({
         month: m.month.split(' ')[0],
-        liability: marketMode === 'IN' ? m.liability / 1e7 : m.liability / 1e6,
+        liability: m.liability,
       }))
-    : LEASE_LIABILITY_TREND_SAMPLE;
+    : [];
 
-  const pieChartData =
-    pieData.length > 0
-      ? pieData.map((d, i) => ({ ...d, color: PIE_COLORS[i % PIE_COLORS.length] }))
-      : LEASES_BY_TYPE_SAMPLE;
+  const pieChartData = pieData.map((d, i) => ({ ...d, color: PIE_COLORS[i % PIE_COLORS.length] }));
 
-  const recentCalculations = hasLivePortfolio
-    ? [...leases]
-        .sort((a, b) => {
-          const da = new Date(a.updated_at || a.start_date || a.dates?.commencement || 0).getTime();
-          const db = new Date(b.updated_at || b.start_date || b.dates?.commencement || 0).getTime();
-          return db - da;
-        })
-        .slice(0, 5)
-        .map((l) => {
-          const liability = Number(l.liability ?? (l.results as any)?.lease_liability ?? 0);
-          const hasResults = l.results != null || liability > 0;
-          return {
-            id: String(l.id || l.lease_id),
-            date: l.updated_at || l.start_date || l.dates?.commencement || new Date().toISOString().slice(0, 10),
-            leaseName: l.title || l.asset || 'Untitled lease',
-            standard: 'IFRS 16',
-            liability,
-            status: hasResults ? 'Completed' : 'Pending',
-            fileId: l.excel_file_id as string | undefined,
-            leaseId: String(l.id || l.lease_id),
-          };
-        })
-    : RECENT_CALCULATIONS_SAMPLE.map((c) => ({ ...c, leaseId: c.id }));
+  const recentCalculations = [...leases]
+    .sort((a, b) => {
+      const da = new Date(a.updated_at || a.start_date || a.dates?.commencement || 0).getTime();
+      const db = new Date(b.updated_at || b.start_date || b.dates?.commencement || 0).getTime();
+      return db - da;
+    })
+    .slice(0, 5)
+    .map((l) => {
+      const liability = Number(l.liability ?? (l.results as any)?.lease_liability ?? 0);
+      const hasResults = l.results != null || liability > 0;
+      return {
+        id: String(l.id || l.lease_id),
+        date: l.updated_at || l.start_date || l.dates?.commencement || new Date().toISOString().slice(0, 10),
+        leaseName: l.title || l.asset || 'Untitled lease',
+        standard: 'IFRS 16',
+        liability,
+        status: hasResults ? 'Completed' : 'Pending',
+        fileId: l.excel_file_id as string | undefined,
+        leaseId: String(l.id || l.lease_id),
+      };
+    });
 
   const trendTooltipFormatter = (value: number | string | undefined) => {
     if (value === undefined) return '';
-    const suffix = marketMode === 'IN' ? 'Cr' : 'M';
-    const prefix = marketMode === 'IN' ? '₹' : 'AED ';
-    return [`${prefix}${value}${suffix}`, 'Liability'];
+    return [formatLeaseChartTick(Number(value), portfolioCurrency), 'Liability'];
   };
 
   return (
@@ -470,14 +438,13 @@ export default function IFRS16DashboardPage() {
             title="Total Lease Liability"
             value={kpiLiability}
             icon={FileText}
-            trend={hasLivePortfolio ? undefined : { value: 2.5, isPositive: false }}
-            subtitle={hasLivePortfolio ? 'Portfolio total' : 'Down from last month'}
+            subtitle={hasLivePortfolio ? 'Portfolio total' : 'No leases in repository'}
           />
           <KPICard
             title="Total ROU Assets"
             value={kpiRou}
             icon={TrendingUp}
-            trend={hasLivePortfolio ? undefined : { value: 1.2, isPositive: false }}
+            subtitle={hasLivePortfolio ? 'Portfolio total' : 'No leases in repository'}
           />
           <KPICard
             title="Active Leases"
@@ -528,52 +495,68 @@ export default function IFRS16DashboardPage() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-100">
             <h3 className="text-lg font-bold text-primary mb-4">Lease Liability Trend</h3>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={liabilityTrendData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis dataKey="month" stroke="#666" style={{ fontSize: '12px' }} />
-                <YAxis stroke="#666" style={{ fontSize: '12px' }} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#fff',
-                    border: '1px solid #ddd',
-                    borderRadius: '8px',
-                  }}
-                  formatter={(value: number | string | undefined) => trendTooltipFormatter(value)}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="liability"
-                  stroke="#6366F1"
-                  strokeWidth={3}
-                  dot={{ fill: '#6366F1', r: 4 }}
-                  activeDot={{ r: 6 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            {hasScheduleTrend ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart data={liabilityTrendData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                  <XAxis dataKey="month" stroke="#666" style={{ fontSize: '12px' }} />
+                  <YAxis
+                    stroke="#666"
+                    style={{ fontSize: '12px' }}
+                    tickFormatter={(v) => formatLeaseChartTick(Number(v), portfolioCurrency)}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#fff',
+                      border: '1px solid #ddd',
+                      borderRadius: '8px',
+                    }}
+                    formatter={(value: number | string | undefined) => trendTooltipFormatter(value)}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="liability"
+                    stroke="#6366F1"
+                    strokeWidth={3}
+                    dot={{ fill: '#6366F1', r: 4 }}
+                    activeDot={{ r: 6 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-[300px] text-sm text-[#64748b] text-center px-6">
+                No liability trend yet. Add and calculate leases to see the chart.
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-100">
             <h3 className="text-lg font-bold text-primary mb-4">Leases by Asset Type</h3>
-            <ResponsiveContainer width="100%" height={300}>
-              <PieChart>
-                <Pie
-                  data={pieChartData}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
-                  outerRadius={100}
-                  fill="#8884d8"
-                  dataKey="value"
-                >
-                  {pieChartData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip />
-              </PieChart>
-            </ResponsiveContainer>
+            {pieChartData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                  <Pie
+                    data={pieChartData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
+                    outerRadius={100}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {pieChartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-[300px] text-sm text-[#64748b] text-center px-6">
+                No leases yet. Add leases to see the breakdown by asset type.
+              </div>
+            )}
           </div>
         </div>
 
@@ -598,7 +581,13 @@ export default function IFRS16DashboardPage() {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {recentCalculations.map((calc) => (
+                {recentCalculations.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-6 py-12 text-center text-sm text-[#64748b]">
+                      No calculations yet. Add a new lease or upload leases to get started.
+                    </td>
+                  </tr>
+                ) : recentCalculations.map((calc) => (
                   <tr
                     key={calc.id}
                     className="hover:bg-gray-50 cursor-pointer"
@@ -707,7 +696,11 @@ export default function IFRS16DashboardPage() {
                 <BarChart data={paymentTimeline}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                   <XAxis dataKey="month" tick={{ fontSize: 11 }} stroke="#64748b" />
-                  <YAxis tick={{ fontSize: 11 }} stroke="#64748b" tickFormatter={(v) => `${(v / 1e5).toFixed(1)}L`} />
+                  <YAxis
+                    tick={{ fontSize: 11 }}
+                    stroke="#64748b"
+                    tickFormatter={(v) => formatLeaseChartTick(Number(v), portfolioCurrency)}
+                  />
                   <Tooltip formatter={(value: number | string | undefined) => (value !== undefined ? [fmtPortfolio(Number(value)), 'Payment'] : '')} />
                   <Bar dataKey="payment" fill="#f97316" radius={[4, 4, 0, 0]} />
                 </BarChart>

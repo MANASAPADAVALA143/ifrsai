@@ -27,6 +27,37 @@ function rowNum(row: Record<string, unknown>, key: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function rowPrincipal(row: Record<string, unknown>): number {
+  const raw = row.Principal ?? row.principal;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n !== 0) return n;
+  const payment =
+    rowNum(row, 'Payment') ||
+    rowNum(row, 'payment') ||
+    rowNum(row, 'Total_Payment') ||
+    rowNum(row, 'total_payment');
+  const interest = rowNum(row, 'Interest') + rowNum(row, 'interest');
+  return Math.max(0, payment - interest);
+}
+
+function rowClosingBalance(row: Record<string, unknown>): number {
+  return (
+    rowNum(row, 'Closing_Balance') ||
+    rowNum(row, 'closing_balance') ||
+    rowNum(row, 'Closing') ||
+    rowNum(row, 'closing')
+  );
+}
+
+function rowOpeningBalance(row: Record<string, unknown>): number {
+  return (
+    rowNum(row, 'Opening_Balance') ||
+    rowNum(row, 'opening_balance') ||
+    rowNum(row, 'Opening') ||
+    rowNum(row, 'opening')
+  );
+}
+
 function addMonths(d: Date, months: number): Date {
   const r = new Date(d.getTime());
   r.setMonth(r.getMonth() + months);
@@ -34,7 +65,10 @@ function addMonths(d: Date, months: number): Date {
 }
 
 function toDateStr(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 export const MATURITY_BUCKET_LABELS = [
@@ -51,7 +85,9 @@ export type MaturityBucketRow = { undiscounted: number; pv: number };
 /** IFRS 16 para 58(b) — undiscounted payments in maturity buckets from reporting date. */
 export function buildMaturityBuckets(
   schedule: Array<Record<string, unknown>>,
-  reportingDate: Date
+  reportingDate: Date,
+  currentLiability: number,
+  nonCurrentLiability: number
 ): { buckets: MaturityBucketRow[]; totalUndiscounted: number; totalPV: number } {
   const buckets: MaturityBucketRow[] = MATURITY_BUCKET_LABELS.map(() => ({
     undiscounted: 0,
@@ -68,8 +104,10 @@ export function buildMaturityBuckets(
     .filter((x): x is { row: Record<string, unknown>; dt: Date } => x.dt != null)
     .sort((a, b) => a.dt.getTime() - b.dt.getTime());
 
+  const msPerYear = 365.25 * 24 * 60 * 60 * 1000;
+  const future = rows.filter((r) => r.dt.getTime() > reportingDt.getTime());
+
   let totalUndiscounted = 0;
-  let totalPV = 0;
 
   const bucketIndex = (yearsFromReport: number): number => {
     if (yearsFromReport < 1) return 0;
@@ -80,13 +118,7 @@ export function buildMaturityBuckets(
     return 5;
   };
 
-  const msPerYear = 365.25 * 24 * 60 * 60 * 1000;
-  // IFRS 16 para 58(b): bucket undiscounted lease payments by due date relative to reporting date.
-  const future = rows.filter((r) => r.dt.getTime() > reportingDt.getTime());
-  const source = future.length > 0 ? future : rows;
-
-  for (const { row, dt } of source) {
-    if (future.length > 0 && dt.getTime() <= reportingDt.getTime()) continue;
+  for (const { row, dt } of future) {
     const payment =
       rowNum(row, 'Payment') ||
       rowNum(row, 'payment') ||
@@ -96,9 +128,29 @@ export function buildMaturityBuckets(
     const yearsFromReport = Math.max(0, (dt.getTime() - reportingDt.getTime()) / msPerYear);
     const idx = bucketIndex(yearsFromReport);
     buckets[idx].undiscounted += payment;
-    buckets[idx].pv += payment;
     totalUndiscounted += payment;
-    totalPV += payment;
+  }
+
+  const totalPV = currentLiability + nonCurrentLiability;
+
+  let allocatedPV = 0;
+  buckets.forEach((bucket) => {
+    if (totalUndiscounted > 0) {
+      bucket.pv = Math.round((bucket.undiscounted / totalUndiscounted) * totalPV);
+      allocatedPV += bucket.pv;
+    } else {
+      bucket.pv = 0;
+    }
+  });
+
+  const pvRoundingDiff = Math.round(totalPV) - allocatedPV;
+  if (pvRoundingDiff !== 0 && totalUndiscounted > 0) {
+    const adjustIdx =
+      buckets
+        .map((b, i) => (b.undiscounted > 0 ? i : -1))
+        .filter((i) => i >= 0)
+        .pop() ?? 0;
+    buckets[adjustIdx].pv += pvRoundingDiff;
   }
 
   return { buckets, totalUndiscounted, totalPV };
@@ -134,10 +186,16 @@ export function computeLiabilitySplitFromSchedule(
 
   let totalLiability: number;
   if (onOrBefore.length === 0 || reportingDt.getTime() <= firstDt.getTime()) {
-    totalLiability = rowNum(rows[0].row, 'Opening_Balance') || rowNum(rows[0].row, 'opening_balance');
+    totalLiability = rowOpeningBalance(rows[0].row);
   } else {
     const last = onOrBefore[onOrBefore.length - 1].row;
-    totalLiability = rowNum(last, 'Closing_Balance') || rowNum(last, 'closing_balance');
+    totalLiability = rowClosingBalance(last);
+    if (totalLiability === 0 && onOrBefore.length < rows.length) {
+      const nextAfter = rows.find((r) => r.dt.getTime() > reportingDt.getTime());
+      if (nextAfter && rowOpeningBalance(nextAfter.row) > 0) {
+        totalLiability = rowOpeningBalance(nextAfter.row);
+      }
+    }
   }
 
   let current = 0;
@@ -145,12 +203,19 @@ export function computeLiabilitySplitFromSchedule(
   const dueAfter = rows.filter(
     (r) => r.dt.getTime() > reportingDt.getTime() && r.dt.getTime() <= cutoffDt.getTime()
   );
-  current = dueAfter.reduce((s, r) => s + rowNum(r.row, 'Principal') + rowNum(r.row, 'principal'), 0);
+  current = dueAfter.reduce((s, r) => s + rowPrincipal(r.row), 0);
 
   if (current === 0 && reportingDt.getTime() <= firstDt.getTime()) {
     const head = rows.slice(0, Math.min(12, rows.length));
-    current = head.reduce((s, r) => s + rowNum(r.row, 'Principal') + rowNum(r.row, 'principal'), 0);
-    totalLiability = rowNum(rows[0].row, 'Opening_Balance') || rowNum(rows[0].row, 'opening_balance');
+    current = head.reduce((s, r) => s + rowPrincipal(r.row), 0);
+    totalLiability = rowOpeningBalance(rows[0].row);
+  }
+
+  if (totalLiability === 0 && current > 0) {
+    const remaining = rows
+      .filter((r) => r.dt.getTime() > reportingDt.getTime())
+      .reduce((s, r) => s + rowPrincipal(r.row), 0);
+    totalLiability = current + remaining;
   }
 
   const nonCurrent = Math.max(0, totalLiability - current);

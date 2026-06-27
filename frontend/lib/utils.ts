@@ -64,7 +64,15 @@ export function sanitizeCurrencyCode(
 // Format number with currency (INR, USD, etc.)
 export function formatCurrency(amount: number, currency: string = 'INR', decimals: number = 0): string {
   const safeCurrency = sanitizeCurrencyCode(currency || 'INR', 'INR');
-  const formatter = new Intl.NumberFormat(safeCurrency === 'INR' ? 'en-IN' : 'en-US', {
+  const locale =
+    safeCurrency === 'INR'
+      ? 'en-IN'
+      : safeCurrency === 'AED'
+        ? 'en-AE'
+        : safeCurrency === 'GBP'
+          ? 'en-GB'
+          : 'en-US';
+  const formatter = new Intl.NumberFormat(locale, {
     style: 'currency',
     currency: safeCurrency,
     minimumFractionDigits: decimals,

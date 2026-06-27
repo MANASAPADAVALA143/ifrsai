@@ -240,7 +240,11 @@ export const ifrs16Api = {
 
   /** ZIP of full IFRS 16 workbooks (one .xlsx per lease with calculation results). */
   exportAllLeaseWorkbooksZip: async (
-    leases: { lease_id: string; calculation_results: Record<string, unknown> }[]
+    leases: {
+      lease_id: string;
+      calculation_results: Record<string, unknown>;
+      lease_data?: Record<string, unknown>;
+    }[]
   ): Promise<{ blob: Blob; exportedCount: number; requestedCount: number }> => {
     const response = await fetch(`${API_URL}/api/ifrs16/export-excel-bulk`, {
       method: 'POST',

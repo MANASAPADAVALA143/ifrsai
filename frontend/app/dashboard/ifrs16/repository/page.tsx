@@ -250,6 +250,7 @@ export default function LeaseRepositoryPage() {
     const payloads = source.map((l) => ({
       lease_id: String(l.lease_id || l.id || 'lease'),
       calculation_results: buildCalculationResults(l),
+      lease_data: l,
     }));
 
     if (payloads.length === 0) {

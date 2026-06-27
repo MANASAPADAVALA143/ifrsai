@@ -660,6 +660,7 @@ export default function LeaseDetailTabbedPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadingSeconds, setUploadingSeconds] = useState(0);
   const [extractionBanner, setExtractionBanner] = useState<string | null>(null);
+  const [scheduleStaleNotice, setScheduleStaleNotice] = useState<string | null>(null);
   const [extractedTabs, setExtractedTabs] = useState<Set<string>>(new Set());
   const [extractedConfidences, setExtractedConfidences] = useState<ExtractionConfidenceMap>({});
   const [extractionSummary, setExtractionSummary] = useState<{
@@ -947,9 +948,8 @@ function getReportingDateForFY(fy: string): Date {
           practicalExpedientElected: loaded.practicalExpedientElected,
         })
       ) {
-        toast(
-          'Saved schedule was calculated without rent-free / non-lease settings. Click Calculate IFRS 16 to refresh.',
-          { icon: '⚠️', duration: 8000 }
+        setScheduleStaleNotice(
+          'Saved schedule was calculated without rent-free / non-lease settings. Click Calculate IFRS 16 to refresh.'
         );
       }
     } else if (isNew) {
@@ -1118,6 +1118,7 @@ function getReportingDateForFY(fy: string): Date {
       }
       const resultsPayload = { ...typedData?.results, excel_file_id: typedData?.excel_file_id };
       setCalcResults(resultsPayload);
+      setScheduleStaleNotice(null);
       setLastCalculatedAt(new Date().toISOString());
       setLastCalcFingerprint(financialInputsFingerprint(f));
       const syncedIbr = annualDecimalToPercentDisplay(
@@ -1341,6 +1342,13 @@ function getReportingDateForFY(fy: string): Date {
         {extractionBanner && (
           <div className="mb-6 p-4 rounded-xl bg-[#f0fdf4] border border-[#86efac] text-[#166534] text-sm">
             {extractionBanner}
+          </div>
+        )}
+
+        {scheduleStaleNotice && (
+          <div className="mb-6 p-3 rounded-lg bg-[#f1f5f9] border border-[#e2e8f0] text-[#64748b] text-sm flex items-start gap-2">
+            <Info className="w-4 h-4 shrink-0 mt-0.5 opacity-70" />
+            <span>{scheduleStaleNotice}</span>
           </div>
         )}
 
@@ -2316,11 +2324,19 @@ function getReportingDateForFY(fy: string): Date {
               schedule as Record<string, unknown>[],
               reportingDate
             );
-            const currentPortion = splitAtReporting.current_portion;
-            const nonCurrentPortion = splitAtReporting.non_current_portion;
-            const closingLLAtReporting = splitAtReporting.total_liability;
+            let currentPortion = splitAtReporting.current_portion;
+            let nonCurrentPortion = splitAtReporting.non_current_portion;
+            if (currentPortion + nonCurrentPortion === 0 && liability > 0) {
+              const splitTotal = splitAtReporting.total_liability || liability;
+              currentPortion = splitTotal > 0 ? splitTotal : liability;
+              nonCurrentPortion = Math.max(0, liability - currentPortion);
+            }
             const fyStart = new Date(reportingDate.getFullYear() - 1, 3, 1);
             const fyEnd = new Date(reportingDate.getFullYear(), 2, 31);
+            const splitAtFYStart = computeLiabilitySplitFromSchedule(
+              schedule as Record<string, unknown>[],
+              fyStart
+            );
             const leaseStart = form.startDate ? new Date(form.startDate) : null;
             const leaseEnd = form.endDate ? new Date(form.endDate) : null;
             const fyOptions: string[] = [];
@@ -2343,7 +2359,9 @@ function getReportingDateForFY(fy: string): Date {
             const bucketLabels = [...MATURITY_BUCKET_LABELS];
             const maturity = buildMaturityBuckets(
               schedule as Record<string, unknown>[],
-              reportingDate
+              reportingDate,
+              currentPortion,
+              nonCurrentPortion
             );
             const buckets = maturity.buckets;
             let totalUndiscounted = maturity.totalUndiscounted;
@@ -2404,15 +2422,21 @@ function getReportingDateForFY(fy: string): Date {
             const llModificationsFY = modsInFY.reduce((s: number, m: any) => s + Number(m.llAdjustment ?? 0), 0);
             const rouModificationsFY = modsInFY.reduce((s: number, m: any) => s + Number(m.rouAdjustment ?? 0), 0);
             const gainLossModFY = modsInFY.reduce((s: number, m: any) => s + Number(m.gainLoss ?? 0), 0);
-            const openingROU = rou;
-            const openingLL = liability;
+            const monthsBeforeFYStart = (() => {
+              if (!form.startDate) return 0;
+              const start = new Date(form.startDate);
+              return Math.max(
+                0,
+                (fyStart.getFullYear() - start.getFullYear()) * 12 +
+                  (fyStart.getMonth() - start.getMonth())
+              );
+            })();
+            const openingROU = Math.max(0, rou - monthlyDepreciation * monthsBeforeFYStart);
+            const openingLL = splitAtFYStart.total_liability;
             const newLeasesROU = 0;
             const newLeasesLL = 0;
             const closingROU = Math.max(0, openingROU + newLeasesROU + rouModificationsFY - depFY);
-            const closingLL = Math.max(
-              0,
-              closingLLAtReporting || openingLL + newLeasesLL + llModificationsFY + interestDisplay - paymentsMadeDisplay
-            );
+            const closingLL = splitAtReporting.total_liability;
 
             const variableAnnual = parseFloat(String(form.variableAnnualAmount || '0')) || 0;
             const hasVariable = form.variablePayments === true || form.variablePayments === 'true' || variableAnnual > 0;
@@ -3226,7 +3250,14 @@ The Company has not applied the short-term or low-value exemptions to this lease
                             )}
                           </div>
                         )}
-                        {reviewJournalSubTab === 'year_end' && (
+                        {reviewJournalSubTab === 'year_end' && (() => {
+                          const yeDate = getReportingDateForFY(reviewJournalFY);
+                          const yeSplit = computeLiabilitySplitFromSchedule(
+                            schedule as Record<string, unknown>[],
+                            yeDate
+                          );
+                          const reclassAmt = yeSplit.current_portion;
+                          return (
                           <div className="space-y-4">
                             <div className="flex items-center gap-2 mb-4">
                               <label className="text-sm text-[#64748b]">FY</label>
@@ -3236,13 +3267,14 @@ The Company has not applied the short-term or low-value exemptions to this lease
                             </div>
                             <div className="font-mono text-sm space-y-1">
                               <p><strong>Entry 1 — Current/Non-current reclassification</strong></p>
-                              <p>Dr  {reviewAccountNames.lease_liability_non_current.padEnd(32)} {fmt(nonCurrentLL)}</p>
-                              <p>    Cr  {reviewAccountNames.lease_liability_current.padEnd(28)} {fmt(currentLL)}</p>
+                              <p>Dr  {reviewAccountNames.lease_liability_non_current.padEnd(32)} {fmt(reclassAmt)}</p>
+                              <p>    Cr  {reviewAccountNames.lease_liability_current.padEnd(28)} {fmt(reclassAmt)}</p>
                               <p className="text-[#64748b] italic text-xs mt-1">Reclassify LL due within 12 months to current as at year end date</p>
                             </div>
                             <Button size="sm" variant="secondary" className="border border-[#e2e8f0]" onClick={() => toast.success('Copied')}>📋 Copy</Button>
                           </div>
-                        )}
+                          );
+                        })()}
                         {reviewJournalSubTab === 'modification' && (
                           <div>
                             {modifications.length === 0 ? (

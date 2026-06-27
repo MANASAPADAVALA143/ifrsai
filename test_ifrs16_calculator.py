@@ -194,6 +194,98 @@ class IFRS16CalculatorTests(unittest.TestCase):
         bucket_sum = sum(v for k, v in maturity.items() if k != "Total")
         self.assertAlmostEqual(bucket_sum, maturity["Total"], places=0)
 
+    def test_maturity_zero_after_lease_end(self):
+        """Reporting after last payment — no future undiscounted flows."""
+        lease = LeaseInput(
+            lease_id="MAT-END",
+            asset_description="Office",
+            commencement_date=datetime(2020, 1, 1),
+            lease_term_months=36,
+            monthly_payment=Decimal("50000"),
+            annual_discount_rate=Decimal("0.07"),
+            currency="AED",
+        )
+        calc = IFRS16Calculator()
+        results = calc.calculate_full_ifrs16(lease, reporting_date=datetime(2025, 1, 1))
+        maturity = results["maturity_analysis"]
+        self.assertEqual(maturity["Total"], 0.0)
+
+    def test_idc_breakdown_balances_initial_journal(self):
+        """ROU and journal must both include legal/brokerage/other IDC breakdown."""
+        lease = LeaseInput(
+            lease_id="IDC-JE",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=36,
+            monthly_payment=Decimal("78000"),
+            annual_discount_rate=Decimal("0.07"),
+            initial_direct_costs=Decimal("0"),
+            legal_fees=Decimal("15000"),
+            brokerage_fees=Decimal("10000"),
+            other_initial_direct_costs=Decimal("5000"),
+            currency="AED",
+        )
+        results = IFRS16Calculator().calculate_full_ifrs16(lease)
+        je = results["journal_entries"]["initial_recognition"]
+        self.assertAlmostEqual(results["rou_asset"] - results["lease_liability"], 30000, places=0)
+        self.assertAlmostEqual(je["total_dr"], je["total_cr"], places=2)
+
+    def test_rent_free_principal_zero(self):
+        lease = LeaseInput(
+            lease_id="RF-PRIN",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=36,
+            monthly_payment=Decimal("78000"),
+            annual_discount_rate=Decimal("0.07"),
+            rent_free_months=1,
+            currency="AED",
+        )
+        schedule = IFRS16Calculator().calculate_full_ifrs16(lease)["amortization_schedule"]
+        self.assertEqual(schedule.iloc[0]["Principal"], 0)
+        self.assertGreater(schedule.iloc[0]["Interest"], 0)
+
+    def test_advance_rent_free_principal_zero(self):
+        """Advance + rent-free: principal=0, closing rises by accrued interest."""
+        lease = LeaseInput(
+            lease_id="ADV-RF-PRIN",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=24,
+            monthly_payment=Decimal("100000"),
+            annual_discount_rate=Decimal("0.05"),
+            payment_type="Advance",
+            rent_free_months=1,
+            currency="AED",
+        )
+        schedule = IFRS16Calculator().calculate_full_ifrs16(lease)["amortization_schedule"]
+        row = schedule.iloc[0]
+        self.assertEqual(row["Payment"], 0)
+        self.assertEqual(row["Principal"], 0)
+        self.assertGreater(row["Interest"], 0)
+        self.assertGreater(row["Closing_Balance"], row["Opening_Balance"])
+
+    def test_reporting_outputs_include_movement_and_year_end(self):
+        lease = LeaseInput(
+            lease_id="REP-OUT",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=36,
+            monthly_payment=Decimal("78000"),
+            annual_discount_rate=Decimal("0.07"),
+            currency="AED",
+        )
+        reporting = datetime(2026, 3, 31)
+        results = IFRS16Calculator().calculate_full_ifrs16(lease, reporting_date=reporting)
+        self.assertIsNotNone(results["liability_movement"])
+        self.assertIsNotNone(results["year_end_journal"])
+        self.assertTrue(results["liability_movement"]["reconciles"])
+        ye = results["year_end_journal"]
+        self.assertAlmostEqual(ye["total_dr"], ye["total_cr"], places=2)
+        rou_sched = results["rou_schedule"]
+        self.assertEqual(len(rou_sched), 36)
+        self.assertAlmostEqual(rou_sched.iloc[-1]["Closing_ROU"], 0.0, places=0)
+
     def test_no_rent_free_disclosure(self):
         lease = LeaseInput(
             lease_id="NO-RF",
@@ -286,17 +378,26 @@ class CPIEscalationInteractionTests(unittest.TestCase):
         )
 
     def test_cpi_only_payment_at_first_review(self):
-        """CPI-only: payment after review = base × (current / base index)."""
+        """CPI-only: payment at first review = base × (current / base index)."""
         calc = IFRS16Calculator()
         lease = self._cpi_escalation_lease(cpi_base="100", cpi_current="115")
         payment = calc.get_lease_component_payment(lease)
-        reviewed = calc._apply_cpi_and_escalation_payment(lease, 13, 0, payment)
+        reviewed = calc._apply_cpi_and_escalation_payment(lease, 12, 0, payment)
         self.assertEqual(reviewed, Decimal("178250.00"))
+        self.assertEqual(
+            calc._apply_cpi_and_escalation_payment(lease, 13, 0, payment),
+            payment,
+        )
 
         results = calc.calculate_full_ifrs16(lease)
         schedule = results["amortization_schedule"]
-        self.assertEqual(schedule.iloc[11]["Payment"], 155000.0)
-        self.assertEqual(schedule.iloc[12]["Payment"], 178250.0)
+        self.assertEqual(schedule.iloc[10]["Payment"], 155000.0)
+        self.assertEqual(schedule.iloc[11]["Payment"], 178250.0)
+        self.assertEqual(schedule.iloc[23]["Payment"], 178250.0)
+        self.assertEqual(len(results["cpi_remeasurements"]), 1)
+        self.assertAlmostEqual(
+            results["cpi_remeasurements"][0]["new_monthly_payment"], 178250.0, places=0
+        )
 
     def test_escalation_only_unchanged_when_cpi_empty(self):
         """Escalation-only path must not regress when CPI fields are empty."""
@@ -329,17 +430,62 @@ class CPIEscalationInteractionTests(unittest.TestCase):
             cpi_current="115",
         )
         payment = calc.get_lease_component_payment(lease)
-        reviewed = calc._apply_cpi_and_escalation_payment(lease, 13, 0, payment)
-
         cpi_only = Decimal("178250.00")
-        buggy_stacked = (cpi_only * Decimal("1.02")).quantize(Decimal("0.01"))
+        reviewed = calc._apply_cpi_and_escalation_payment(lease, 12, 0, payment)
         self.assertEqual(reviewed, cpi_only)
+        self.assertEqual(
+            calc._apply_cpi_and_escalation_payment(lease, 13, 0, cpi_only),
+            cpi_only,
+        )
+        buggy_stacked = (cpi_only * Decimal("1.02")).quantize(Decimal("0.01"))
         self.assertNotEqual(reviewed, buggy_stacked)
         self.assertNotEqual(reviewed, Decimal("181815.00"))
 
         results = calc.calculate_full_ifrs16(lease)
         schedule = results["amortization_schedule"]
-        self.assertEqual(schedule.iloc[12]["Payment"], 178250.0)
+        self.assertEqual(schedule.iloc[11]["Payment"], 178250.0)
+
+
+    def test_cpi_review_respects_rent_free_and_frequency(self):
+        """CPI review at rent_free + frequency months (e.g. month 14 when 2mo rent-free)."""
+        lease = LeaseInput(
+            lease_id="CPI-RF",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=36,
+            monthly_payment=Decimal("155000"),
+            annual_discount_rate=Decimal("0.07"),
+            rent_free_months=2,
+            cpi_index_base=Decimal("100"),
+            cpi_index_current=Decimal("110"),
+            cpi_adjustment_frequency_months=12,
+            currency="AED",
+        )
+        calc = IFRS16Calculator()
+        self.assertEqual(calc._cpi_first_review_period(lease, 2), 14)
+        results = calc.calculate_full_ifrs16(lease)
+        schedule = results["amortization_schedule"]
+        self.assertEqual(schedule.iloc[12]["Payment"], 155000.0)
+        self.assertEqual(schedule.iloc[13]["Payment"], 170500.0)
+
+    def test_cpi_remeasurement_closes_to_zero(self):
+        lease = LeaseInput(
+            lease_id="CPI-ZERO",
+            asset_description="Office",
+            commencement_date=datetime(2024, 1, 1),
+            lease_term_months=36,
+            monthly_payment=Decimal("155000"),
+            annual_discount_rate=Decimal("0.07"),
+            cpi_index_base=Decimal("100"),
+            cpi_index_current=Decimal("115"),
+            currency="AED",
+        )
+        results = IFRS16Calculator().calculate_full_ifrs16(lease)
+        schedule = results["amortization_schedule"]
+        self.assertAlmostEqual(schedule.iloc[-1]["Closing_Balance"], 0.0, places=0)
+        rem = results["cpi_remeasurements"][0]
+        self.assertEqual(rem["period"], 12)
+        self.assertAlmostEqual(rem["new_monthly_payment"], 178250.0, places=0)
 
 
 class AdvancePaymentEscalationTests(unittest.TestCase):
@@ -395,7 +541,7 @@ class AdvancePaymentEscalationTests(unittest.TestCase):
         self.assertGreater(liability, flat_advance)
         results = calc.calculate_full_ifrs16(lease)
         schedule = results["amortization_schedule"]
-        self.assertEqual(schedule.iloc[12]["Payment"], 110000.0)
+        self.assertEqual(schedule.iloc[11]["Payment"], 110000.0)
         self.assertAlmostEqual(schedule.iloc[-1]["Closing_Balance"], 0.0, places=0)
 
     def test_advance_flat_payments_unchanged(self):
@@ -547,9 +693,9 @@ class RVGLeaseLibabilityTests(unittest.TestCase):
         calc = IFRS16Calculator()
         lease = self._re_uae_007_lease(rvg_guaranteed_by="Lessee", rvg_expected_payment=Decimal("400000"))
         ll = calc.calculate_lease_liability(lease)
-        # Independently verified: 20,441,847.19 (includes PV of 400k over 84 months @ 5.3%/12)
-        self.assertAlmostEqual(float(ll), 20441847.19, delta=1.0,
-                               msg=f"Expected ~20441847.19, got {ll}")
+        # CPI review at month 12 increases PV vs prior month-13 review baseline
+        self.assertAlmostEqual(float(ll), 20459906.46, delta=1.0,
+                               msg=f"Expected ~20459906.46, got {ll}")
 
     def test_rvg_excluded_when_third_party_guarantees(self):
         """IFRS 16.26(d) only includes lessee guarantees — third-party RVG must be excluded."""
@@ -557,8 +703,8 @@ class RVGLeaseLibabilityTests(unittest.TestCase):
         lease = self._re_uae_007_lease(rvg_guaranteed_by="Third Party", rvg_expected_payment=Decimal("400000"))
         ll = calc.calculate_lease_liability(lease)
         # No RVG added: 20,165,604.05
-        self.assertAlmostEqual(float(ll), 20165604.05, delta=1.0,
-                               msg=f"Expected ~20165604.05 (no RVG), got {ll}")
+        self.assertAlmostEqual(float(ll), 20183663.32, delta=1.0,
+                               msg=f"Expected ~20183663.32 (no RVG), got {ll}")
 
     def test_rvg_excluded_when_expected_payment_zero(self):
         """rvg_amount set but rvg_expected_payment=0 means lessee expects no payment — exclude."""

@@ -22,6 +22,7 @@ import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import { ifrs16Api } from '@/lib/api';
 import { saveToLeaseRepository, buildLeaseEntry } from '@/lib/lease-repository';
+import { formatLeaseMoney } from '@/lib/ifrs16-currency';
 import { formatIndianNumber } from '@/lib/utils';
 
 const cardClass =
@@ -148,7 +149,11 @@ function getCurrencySymbol(currency: string): string {
 }
 
 function formatCurrencyAmount(amount: number, currency: string): string {
-  return `${getCurrencySymbol(currency)}${Number(amount || 0).toLocaleString('en-IN')}`;
+  const ccy = String(currency || 'INR').toUpperCase();
+  if (ccy === 'INR') {
+    return `₹${Number(amount || 0).toLocaleString('en-IN')}`;
+  }
+  return formatLeaseMoney(Number(amount) || 0, ccy, 0);
 }
 
 function findHeaderRow(rows: string[][]): number {
