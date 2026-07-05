@@ -564,6 +564,8 @@ class PerformanceObligationRequest(BaseModel):
     recognition_method: str  # "over_time" or "point_in_time"
     duration_months: int = 0
     transfer_date: Optional[str] = None  # YYYY-MM-DD
+    is_distinct: Optional[bool] = None
+    bundled_with: Optional[List[str]] = None
 
 
 class IFRS15CalculateRequest(BaseModel):
@@ -621,6 +623,14 @@ class IFRS15ClassifyContractRequest(BaseModel):
     contract_text: str = Field(..., min_length=1)
 
 
+class IFRSClassifyTransactionRequest(BaseModel):
+    vendor: str = Field(..., min_length=1, description="Vendor or supplier name")
+    description: str = Field(..., min_length=1, description="Invoice line or transaction description")
+    amount: float = Field(..., description="Transaction amount")
+    currency: str = Field("USD", description="ISO currency code")
+    date: str = Field(..., min_length=1, description="Invoice or transaction date (YYYY-MM-DD)")
+
+
 class IFRS15ModificationRequest(BaseModel):
     original_contract_id: str
     modification_date: str
@@ -664,6 +674,22 @@ class IFRS15VariableConsiderationRequest(BaseModel):
     constraint_factors: List[bool]  # exactly 5 items
     contract_id: Optional[str] = None
     total_contract_value: Optional[float] = None
+    contract_term_months: Optional[int] = None
+    customer_type: Optional[str] = None
+    historical_attainment_pct: Optional[float] = None
+    refund_type: str = "none"
+    recognition_type: str = "over_time"
+    currency: str = "USD"
+    has_external_dependency: bool = False
+    dependency_level: str = "low"
+    contract_term_months: Optional[int] = None
+    customer_type: Optional[str] = None
+    historical_attainment_pct: Optional[float] = None
+    refund_type: str = "none"
+    recognition_type: str = "over_time"
+    currency: str = "USD"
+    has_external_dependency: bool = False
+    dependency_level: str = "low"
 
 
 class IFRS15ReversalRiskRequest(BaseModel):
@@ -695,6 +721,9 @@ class RPOPerformanceObligation(BaseModel):
     recognised_to_date: float
     expected_recognition_pattern: str = "within_1_year"
     recognition_type: str = "over_time"
+    obligation_id: Optional[str] = None
+    expected_end_date: Optional[str] = None
+    remaining_schedule: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class RPOContractRequest(BaseModel):
@@ -706,6 +735,9 @@ class RPOContractRequest(BaseModel):
     revenue_recognised_to_date: float
     performance_obligations: List[RPOPerformanceObligation]
     practical_expedient_applied: bool = False
+    currency: str = "USD"
+    reporting_date: Optional[str] = None
+    revenue_schedule: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class IFRS15RPORequest(BaseModel):
@@ -822,6 +854,7 @@ class FinancingComponentRequest(BaseModel):
     payment_timing: str  # "advance" | "deferred"
     discount_rate: float
     currency: str = "USD"
+    revenue_schedule: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class FinancingComponentsRequest(BaseModel):
@@ -907,7 +940,7 @@ class IFRS15PrincipalAgentRequest(BaseModel):
     # IFRS 15.B34–B38 extended assessment (IFRS15Calculator)
     arrangement_id: Optional[str] = None
     description: str = ""
-    third_party_involved: bool = True
+    third_party_involved: bool = False
     gross_contract_value: Optional[float] = None
     third_party_cost: Optional[float] = None
     controls_before_transfer: Optional[bool] = None
@@ -2824,7 +2857,9 @@ async def ifrs15_calculate(request: IFRS15CalculateRequest):
                 standalone_selling_price=Decimal(str(ob.standalone_selling_price)),
                 recognition_method=ob.recognition_method,
                 duration_months=ob.duration_months,
-                transfer_date=transfer_dt
+                transfer_date=transfer_dt,
+                is_distinct=ob.is_distinct,
+                bundled_with=list(ob.bundled_with or []) if ob.bundled_with else None,
             ))
         contract = IFRS15Input(
             contract_id=request.contract_id,
@@ -3082,9 +3117,20 @@ async def ifrs15_variable_consideration(request: IFRS15VariableConsiderationRequ
             "method": request.method,
             "scenarios": [s.model_dump() for s in request.scenarios],
             "constraint_factors": list(request.constraint_factors),
+            "currency": request.currency,
+            "refund_type": request.refund_type,
+            "recognition_type": request.recognition_type,
+            "has_external_dependency": request.has_external_dependency,
+            "dependency_level": request.dependency_level,
         }
         if request.total_contract_value is not None:
             body["total_contract_value"] = request.total_contract_value
+        if request.contract_term_months is not None:
+            body["contract_term_months"] = request.contract_term_months
+        if request.customer_type is not None:
+            body["customer_type"] = request.customer_type
+        if request.historical_attainment_pct is not None:
+            body["historical_attainment_pct"] = request.historical_attainment_pct
         engine = IFRS15VariableConsiderationEngine()
         return engine.estimate(body)
     except ValueError as e:
@@ -3125,6 +3171,9 @@ async def ifrs15_rpo(request: IFRS15RPORequest):
                     revenue_recognised_to_date=c.revenue_recognised_to_date,
                     performance_obligations=[po.model_dump() for po in c.performance_obligations],
                     practical_expedient_applied=c.practical_expedient_applied,
+                    currency=c.currency,
+                    reporting_date=c.reporting_date or "",
+                    revenue_schedule=list(c.revenue_schedule or []),
                 )
                 for c in request.contracts
             ]
@@ -3169,6 +3218,10 @@ async def ifrs15_rpo(request: IFRS15RPORequest):
     except HTTPException:
         raise
     except Exception as e:
+        from ifrs15_calculator import RPOReconciliationError
+
+        if isinstance(e, RPOReconciliationError):
+            raise HTTPException(status_code=422, detail=e.to_dict()) from e
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -3322,6 +3375,7 @@ async def ifrs15_principal_agent(request: IFRS15PrincipalAgentRequest):
             "obtains_before_transfer": request.obtains_before_transfer,
             "sets_price_independently": request.sets_price_independently,
             "primarily_responsible": request.primarily_responsible,
+            "third_party_involved": bool(request.third_party_involved),
             "contract_id": request.contract_id,
         }
         leg = IFRS15PrincipalAgentEngine().assess(legacy_body)
@@ -3595,6 +3649,7 @@ async def financing_component_calculate(req: FinancingComponentsRequest):
                 payment_timing=c.payment_timing,
                 discount_rate=float(c.discount_rate),
                 currency=c.currency or "USD",
+                revenue_schedule=list(c.revenue_schedule or []),
             )
             result = calculator.calculate_financing_component(data)
             results.append(result)
@@ -4946,6 +5001,33 @@ async def ifrs15_realestate_client_report_pdf(request: RealEstatePDFInput):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ifrs/classify-transaction")
+async def ifrs_classify_transaction(request: IFRSClassifyTransactionRequest):
+    """
+    Classify an AP invoice / transaction into IFRS_16, IFRS_15, OPEX, or UNCERTAIN.
+
+    Uses keyword heuristics first; falls back to Claude when ambiguous.
+    """
+    try:
+        from ifrs_transaction_classifier import classify_transaction
+
+        result = classify_transaction(
+            vendor=request.vendor,
+            description=request.description,
+            amount=request.amount,
+            currency=request.currency,
+            date=request.date,
+            api_key=ANTHROPIC_API_KEY,
+        )
+        return {
+            "ifrs_standard": result["ifrs_standard"],
+            "confidence": result["confidence"],
+            "reason": result["reason"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transaction classification failed: {str(e)}")
 
 
 @app.post("/api/ifrs15/classify-contract")

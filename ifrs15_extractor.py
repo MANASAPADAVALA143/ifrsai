@@ -4,6 +4,7 @@ AI-powered extraction of revenue recognition terms using Claude API
 """
 
 import anthropic
+import hashlib
 import json
 import re
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,18 @@ import os
 from pathlib import Path
 
 from claude_model_config import CLAUDE_MODEL
+
+
+def _sort_obligations_deterministic(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Stable obligation ordering for repeat runs on identical contract text."""
+    step2 = data.get("step2_performance_obligations") or {}
+    obs = list(step2.get("identified_obligations") or [])
+    if obs:
+        obs.sort(key=lambda o: str((o or {}).get("obligation_id") or ""))
+        step2["identified_obligations"] = obs
+        step2["total_obligations_count"] = len(obs)
+        data["step2_performance_obligations"] = step2
+    return data
 
 
 def _field_confidence_schema(description: str) -> str:
@@ -207,6 +220,16 @@ class IFRS15ContractExtractor:
         if len(text) > max_chars:
             text = text[:max_chars] + "\n\n[... contract text truncated for extraction ...]"
 
+        cache_key = _extraction_cache_key(text, "uae_spa")
+        cached = _load_extraction_cache(cache_key)
+        if cached:
+            out = dict(cached)
+            meta = dict(out.get("extraction_metadata") or {})
+            meta["cache_hit"] = True
+            meta["cache_key"] = cache_key
+            out["extraction_metadata"] = meta
+            return out
+
         arabic_note = ""
         if self._has_arabic_script(text):
             arabic_note = """
@@ -261,8 +284,11 @@ Begin extraction:"""
             "tokens_used": message.usage.input_tokens + message.usage.output_tokens,
             "extractor_version": "uae_spa_v1",
             "language": "bilingual" if self._has_arabic_script(contract_text) else "english",
+            "cache_hit": False,
+            "cache_key": cache_key,
             **summary,
         }
+        _save_extraction_cache(cache_key, data)
         return data
 
     def validate_uae_spa_extraction(self, data: Dict) -> Dict:
@@ -326,6 +352,16 @@ Begin extraction:"""
         text = (contract_text or "").strip()
         if len(text) > max_chars:
             text = text[:max_chars] + "\n\n[... contract text truncated for extraction ...]"
+
+        cache_key = _extraction_cache_key(text, "generic")
+        cached = _load_extraction_cache(cache_key)
+        if cached:
+            out = dict(cached)
+            meta = dict(out.get("extraction_metadata") or {})
+            meta["cache_hit"] = True
+            meta["cache_key"] = cache_key
+            out["extraction_metadata"] = meta
+            return _sort_obligations_deterministic(out)
         
         prompt = f"""You are an IFRS 15 revenue recognition expert. Analyze this contract and extract all relevant revenue accounting information.
 
@@ -458,6 +494,8 @@ CRITICAL RULES:
 6. For over-time recognition, identify which IFRS 15.35 criterion applies
 7. Be conservative with confidence scores
 8. Flag anything requiring human judgment
+9. Use stable obligation_id values (PO-1, PO-2, …) ordered by materiality. Only include obligations supported by contract text — do not infer parking, storage, or ancillary items unless explicitly stated or standard bundled delivery terms apply.
+10. Identical contract text must yield the same obligation count and descriptions on repeat extraction.
 
 Begin extraction:"""
 
@@ -480,13 +518,17 @@ Begin extraction:"""
             json_text = json_text[:-3]
         
         data = self._parse_json_response(json_text.strip())
+        data = _sort_obligations_deterministic(data)
         
         # Add metadata
         data['extraction_metadata'] = {
             'timestamp': datetime.now().isoformat(),
             'model': self.model,
-            'tokens_used': message.usage.input_tokens + message.usage.output_tokens
+            'tokens_used': message.usage.input_tokens + message.usage.output_tokens,
+            'cache_hit': False,
+            'cache_key': cache_key,
         }
+        _save_extraction_cache(cache_key, data)
         
         return data
     
@@ -561,6 +603,37 @@ Begin extraction:"""
             json.dump(data, f, indent=2, ensure_ascii=False)
         
         print(f"Extraction saved to: {output_path}")
+
+
+def _extraction_cache_dir() -> Path:
+    base = Path(os.getenv("OUTPUT_DIR", "output"))
+    cache = base / "ifrs15_extraction_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    return cache
+
+
+def _extraction_cache_key(contract_text: str, contract_type: str = "generic") -> str:
+    normalized = IFRS15ContractExtractor._normalize_contract_text(contract_text or "")
+    payload = f"{contract_type}\n{normalized}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _load_extraction_cache(key: str) -> Optional[Dict[str, Any]]:
+    path = _extraction_cache_dir() / f"{key}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_extraction_cache(key: str, data: Dict[str, Any]) -> None:
+    path = _extraction_cache_dir() / f"{key}.json"
+    try:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
 
 
 # Example usage
@@ -864,4 +937,95 @@ If no non-standard clauses found:
             "overall_risk": "CLEAN",
             "summary": f"Clause detection unavailable: {str(e)}",
         }
+
+
+def variable_consideration_component_sum(var_cons: Optional[Dict[str, Any]]) -> float:
+    """Raw VC from step3 component fields — not probability-weighted EV."""
+    vc = var_cons or {}
+    return (
+        float(vc.get("performance_bonuses") or 0)
+        + float(vc.get("volume_discounts") or 0)
+        - float(vc.get("discounts") or 0)
+        - float(vc.get("rebates") or 0)
+        - float(vc.get("penalties") or 0)
+    )
+
+
+def resolve_variable_consideration_from_extraction(extracted: Dict[str, Any]) -> float:
+    """
+    Canonical VC for calculate: prefer net_variable_consideration_included (EV narrative)
+    when present; otherwise fall back to the raw component sum.
+    """
+    validation = extracted.get("validation") or {}
+    summary = validation.get("variable_consideration_summary") or {}
+    net = summary.get("net_variable_consideration_included")
+    if net is not None and net != "":
+        try:
+            return float(net)
+        except (TypeError, ValueError):
+            pass
+    step3 = extracted.get("step3_transaction_price") or {}
+    var_cons = step3.get("variable_consideration") or {}
+    return variable_consideration_component_sum(var_cons)
+
+
+def resolve_transaction_price_from_extraction(extracted: Dict[str, Any]) -> float:
+    """Fixed + canonical variable consideration — single reconciled transaction price."""
+    step1 = (extracted.get("step1_identify_contract") or {}).get("contract_details") or {}
+    step3 = extracted.get("step3_transaction_price") or {}
+    fixed = float(step3.get("fixed_consideration") or step1.get("total_contract_value") or 0)
+    return fixed + resolve_variable_consideration_from_extraction(extracted)
+
+
+_MOD_TYPE_NAMES = {
+    "TYPE_1": "New Separate Contract",
+    "TYPE_2": "Prospective Modification",
+    "TYPE_3": "Cumulative Catch-Up",
+}
+
+
+def build_modification_assessment_from_extraction(
+    extracted: Optional[Dict[str, Any]],
+    results: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Sync modification module state when main calculate already reflects extraction modifications.
+    Mirrors frontend buildModificationAssessmentFromExtraction().
+    """
+    if not extracted:
+        return None
+    mods = extracted.get("contract_modifications") or {}
+    if not mods.get("modifications_present"):
+        return None
+    details = mods.get("modification_details") or []
+    if not isinstance(details, list) or not details:
+        return None
+
+    perf_count = 0
+    if results and isinstance(results.get("performance_obligations"), list):
+        perf_count = len(results["performance_obligations"])
+
+    primary = next(
+        (d for d in details if isinstance(d, dict) and d.get("accounting_treatment") == "separate_contract"),
+        details[0] if isinstance(details[0], dict) else {},
+    )
+    treatment_map = {
+        "separate_contract": "TYPE_1",
+        "prospective": "TYPE_2",
+        "cumulative_catch_up": "TYPE_3",
+    }
+    mod_type = treatment_map.get(str(primary.get("accounting_treatment") or ""), "TYPE_1")
+
+    return {
+        "modification_type": mod_type,
+        "modification_type_name": _MOD_TYPE_NAMES.get(mod_type, "Contract Modification"),
+        "auto_computed": True,
+        "source": "main_calculation",
+        "explanation": str(primary.get("description") or ""),
+        "price_change": float(primary.get("price_change") or 0),
+        "scope_change": str(primary.get("scope_change") or ""),
+        "modification_date": str(primary.get("modification_date") or ""),
+        "modifications_in_contract": len(details),
+        "applied_in_schedule": perf_count > 1,
+    }
 

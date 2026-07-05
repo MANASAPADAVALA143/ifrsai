@@ -15,6 +15,487 @@ import os
 import re
 import uuid
 
+RPO_BUCKET_KEYS = ("within_1_year", "1_to_2_years", "2_to_5_years", "beyond_5_years")
+
+# IFRS 15.120 — exactly four fixed timing bands (not rolling 12-month windows).
+RPO_BUCKET_DEFINITIONS: Dict[str, str] = {
+    "within_1_year": "Not more than 12 months after the reporting date",
+    "1_to_2_years": "More than 12 months and not more than 24 months after the reporting date",
+    "2_to_5_years": "More than 24 months and not more than 60 months after the reporting date",
+    "beyond_5_years": "More than 60 months after the reporting date",
+}
+
+RPO_PRACTICAL_EXPEDIENT_NOTE = (
+    "The entity has applied the practical expedient in IFRS 15.121 and has not disclosed "
+    "information about remaining performance obligations for contracts with an original "
+    "expected duration of one year or less."
+)
+
+RPO_RECONCILIATION_TOLERANCE_UNITS = 1
+
+
+class RPOReconciliationError(Exception):
+    """Raised when schedule-derived bucket totals cannot reconcile to independent RPO."""
+
+    code = "RPO_RECONCILIATION_FAILED"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        total_rpo: float,
+        bucket_sum: float,
+        currency: str,
+        missing_schedule_pobs: List[Dict[str, Any]],
+    ):
+        self.message = message
+        self.total_rpo = total_rpo
+        self.bucket_sum = bucket_sum
+        self.currency = currency
+        self.missing_schedule_pobs = missing_schedule_pobs
+        super().__init__(message)
+
+    def to_dict(self) -> Dict[str, Any]:
+        diff = abs(float(self.total_rpo) - float(self.bucket_sum))
+        return {
+            "code": self.code,
+            "message": self.message,
+            "total_rpo": self.total_rpo,
+            "bucket_sum": self.bucket_sum,
+            "difference": diff,
+            "currency": self.currency,
+            "missing_schedule_pobs": self.missing_schedule_pobs,
+        }
+
+
+def round_currency_unit(amount: float) -> int:
+    """Round to nearest whole currency unit for reconciliation comparisons."""
+    return int(round(float(amount)))
+
+
+def build_rpo_reconciliation_ui_message(
+    total_rpo: float,
+    bucket_sum: float,
+    currency: str,
+    missing_schedule_pobs: List[Dict[str, Any]],
+) -> str:
+    diff = abs(round_currency_unit(total_rpo) - round_currency_unit(bucket_sum))
+    if missing_schedule_pobs:
+        pob_refs = []
+        for p in missing_schedule_pobs:
+            cid = p.get("contract_id") or "?"
+            oid = p.get("obligation_id") or p.get("obligation_name") or "?"
+            pob_refs.append(f"{cid}/{oid}")
+        pob_list = ", ".join(pob_refs)
+    else:
+        pob_list = "performance obligations with incomplete schedule data"
+
+    return (
+        f"RPO disclosure cannot be generated: Total RPO ({format_ifrs15_currency(total_rpo, currency)}) "
+        f"does not equal the sum of time bands ({format_ifrs15_currency(bucket_sum, currency)}). "
+        f"Difference: {format_ifrs15_currency(diff, currency)}.\n\n"
+        f"This usually means one or more performance obligations are missing schedule data. "
+        f"Check: {pob_list}.\n\n"
+        f"Disclosure note generation is blocked until this reconciles."
+    )
+
+
+def format_ifrs15_currency(amount: float, currency: str = "USD", *, decimals: int = 0) -> str:
+    """Format monetary amounts using the contract currency (not a hardcoded $)."""
+    code = (currency or "USD").strip().upper()
+    fmt = f"{float(amount):,.{decimals}f}"
+    prefix_symbols = {"USD": "$", "GBP": "£", "EUR": "€", "INR": "₹"}
+    if code in prefix_symbols:
+        return f"{prefix_symbols[code]}{fmt}"
+    return f"{code} {fmt}"
+
+
+def parse_ifrs15_date(value: Any) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()[:10]
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def rpo_bucket_key_for_date(recognition_date: date, reporting_date: date) -> str:
+    """
+    Map a recognition date to one of four fixed IFRS 15.120 timing bands.
+
+    Bands are anchored to the reporting date (not rolling month-by-month):
+      • within_1_year  — months 0–11 after reporting
+      • 1_to_2_years   — months 12–23 after reporting
+      • 2_to_5_years   — months 24–59 after reporting
+      • beyond_5_years — month 60+ after reporting
+    """
+    months_ahead = (recognition_date.year - reporting_date.year) * 12 + (
+        recognition_date.month - reporting_date.month
+    )
+    if recognition_date.day < reporting_date.day:
+        months_ahead -= 1
+    if months_ahead < 12:
+        return "within_1_year"
+    if months_ahead < 24:
+        return "1_to_2_years"
+    if months_ahead < 60:
+        return "2_to_5_years"
+    return "beyond_5_years"
+
+
+def contract_rpo_within_twelve_months(
+    contract_buckets: Dict[str, float],
+    contract_rpo: float,
+    *,
+    contract_term_months: Optional[int] = None,
+) -> bool:
+    """
+    True when all remaining RPO is expected within 12 months of reporting AND the contract
+    original expected duration is ≤ 12 months (IFRS 15.121(a) practical expedient).
+    """
+    if contract_rpo <= 1e-6:
+        return False
+    if contract_term_months is not None and int(contract_term_months) > 12:
+        return False
+    outside = (
+        float(contract_buckets.get("1_to_2_years", 0) or 0)
+        + float(contract_buckets.get("2_to_5_years", 0) or 0)
+        + float(contract_buckets.get("beyond_5_years", 0) or 0)
+    )
+    return outside <= 1e-6 and float(contract_buckets.get("within_1_year", 0) or 0) > 1e-6
+
+
+IMPLICIT_OBLIGATION_KEYWORDS = (
+    "common area",
+    "infrastructure",
+    "dlp",
+    "defect",
+    "warranty",
+    "parking",
+    "car park",
+    "storage",
+    "clubhouse",
+    "amenity",
+    "fit-out",
+    "implicit",
+    "ancillary",
+)
+
+RE_OFFPLAN_MAIN_KEYWORDS = (
+    "unit",
+    "apartment",
+    "villa",
+    "townhouse",
+    "off-plan",
+    "handover",
+    "residential",
+    "off plan",
+)
+
+
+def _months_between_dates(start: Optional[date], end: Optional[date]) -> Optional[int]:
+    if not start or not end:
+        return None
+    months = (end.year - start.year) * 12 + (end.month - start.month)
+    if end.day < start.day:
+        months -= 1
+    return max(1, months)
+
+
+def rpo_contract_term_months(contract: "RPOContract") -> int:
+    """Original expected contract duration in months (explicit or derived from start/end)."""
+    start = parse_ifrs15_date(contract.contract_start)
+    end = parse_ifrs15_date(contract.contract_end)
+    derived = _months_between_dates(start, end)
+    if derived is not None:
+        return derived
+    return 12
+
+
+def _is_zero_ssp_obligation(ob: Dict[str, Any]) -> bool:
+    ssp = float(ob.get("standalone_selling_price", ob.get("standalone_selling_price_estimate", 0)) or 0)
+    return ssp <= 1e-6
+
+
+def _is_implicit_obligation(ob: Dict[str, Any]) -> bool:
+    if ob.get("is_explicitly_priced") is False:
+        return True
+    if not _is_zero_ssp_obligation(ob):
+        return False
+    desc = str(ob.get("description") or "").lower()
+    return any(kw in desc for kw in IMPLICIT_OBLIGATION_KEYWORDS) or ob.get("is_distinct") is not None
+
+
+def _main_explicit_obligation(obligations: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    explicit = [o for o in obligations if float(o.get("standalone_selling_price", 0) or 0) > 1e-6]
+    if explicit:
+        return max(explicit, key=lambda o: float(o.get("standalone_selling_price", 0) or 0))
+    return obligations[0] if obligations else None
+
+
+def _should_merge_implicit_obligation(
+    implicit_ob: Dict[str, Any],
+    main_ob: Optional[Dict[str, Any]],
+) -> bool:
+    if implicit_ob.get("is_distinct") is False:
+        return True
+    bundled = implicit_ob.get("bundled_with") or []
+    main_id = str((main_ob or {}).get("obligation_id") or "")
+    if main_id and main_id in [str(b) for b in bundled]:
+        return True
+    desc = str(implicit_ob.get("description") or "").lower()
+    main_desc = str((main_ob or {}).get("description") or "").lower()
+    if any(k in main_desc for k in RE_OFFPLAN_MAIN_KEYWORDS) and any(
+        k in desc for k in IMPLICIT_OBLIGATION_KEYWORDS
+    ):
+        return True
+    if _is_zero_ssp_obligation(implicit_ob) and implicit_ob.get("is_distinct") is None:
+        if any(k in main_desc for k in RE_OFFPLAN_MAIN_KEYWORDS):
+            return True
+    return False
+
+
+def normalize_implicit_performance_obligations(
+    obligations: List[Dict[str, Any]],
+    transaction_price: float,
+    *,
+    contract_term_months: int = 12,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Resolve zero-SSP / implicit obligations before allocation (IFRS 15.22–30).
+
+    Each implicit obligation is either merged into the main PO (distinct_assessment=merged)
+    or separately allocated with non-zero SSP (distinct_assessment=separately_allocated).
+    """
+    if not obligations:
+        return [], []
+
+    working = [dict(o) for o in obligations]
+    audit: List[Dict[str, Any]] = []
+    main_ob = _main_explicit_obligation(working)
+    merged_ids: set = set()
+    distinct_implicit: List[Dict[str, Any]] = []
+
+    for ob in working:
+        oid = str(ob.get("obligation_id") or "")
+        if not _is_implicit_obligation(ob) and not _is_zero_ssp_obligation(ob):
+            if not ob.get("distinct_assessment"):
+                ob["distinct_assessment"] = "separately_allocated"
+            continue
+        if _should_merge_implicit_obligation(ob, main_ob):
+            if main_ob and main_ob is not ob:
+                merged_ids.add(oid)
+                main_ob["description"] = (
+                    f"{main_ob.get('description', '')} (includes: {ob.get('description', oid)})"
+                ).strip()
+                ob["distinct_assessment"] = "merged"
+                audit.append(
+                    {
+                        "obligation_id": oid,
+                        "description": ob.get("description"),
+                        "distinct_assessment": "merged",
+                        "merged_into": main_ob.get("obligation_id"),
+                        "reason": "Not distinct from main performance obligation (RERA off-plan bundling)",
+                    }
+                )
+            else:
+                ob["distinct_assessment"] = "separately_allocated"
+        else:
+            distinct_implicit.append(ob)
+
+    normalized = [o for o in working if str(o.get("obligation_id") or "") not in merged_ids]
+
+    if distinct_implicit:
+        observable_ssp = sum(
+            float(o.get("standalone_selling_price", 0) or 0)
+            for o in normalized
+            if o not in distinct_implicit
+        )
+        residual = max(float(transaction_price) - observable_ssp, 0.0)
+        if residual <= 1e-6:
+            residual = max(float(transaction_price) * 0.05 * len(distinct_implicit), 1.0)
+        share = residual / len(distinct_implicit)
+        for ob in distinct_implicit:
+            ob["standalone_selling_price"] = round(share, 2)
+            ob["distinct_assessment"] = "separately_allocated"
+            ob["ssp_allocation_method"] = "residual_approach"
+            audit.append(
+                {
+                    "obligation_id": ob.get("obligation_id"),
+                    "description": ob.get("description"),
+                    "distinct_assessment": "separately_allocated",
+                    "allocated_ssp": round(share, 2),
+                    "ssp_allocation_method": "residual_approach",
+                    "reason": "Distinct implicit obligation — SSP assigned via residual approach",
+                }
+            )
+
+    for ob in normalized:
+        if not ob.get("distinct_assessment"):
+            ob["distinct_assessment"] = "separately_allocated"
+
+    return normalized, audit
+
+
+def build_default_rpo_result(
+    contract: "IFRS15Input",
+    results: Dict[str, Any],
+    *,
+    reporting_date: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Auto-compute RPO from Step 5 revenue schedule (IFRS 15.120–122 schedule-derived bucketing).
+    Used as default master-summary RPO when the user has not manually overridden on the RPO screen.
+    """
+    calc = IFRS15Calculator()
+    reporting = reporting_date or date.today().isoformat()
+    reporting_dt = parse_ifrs15_date(reporting) or date.today()
+
+    eff = contract.effective_date
+    contract_start = eff.strftime("%Y-%m-%d") if eff else reporting
+    end_dt = eff + relativedelta(months=max(int(contract.contract_term_months or 12), 1)) if eff else reporting_dt
+    contract_end = end_dt.strftime("%Y-%m-%d")
+
+    tp = float(results.get("transaction_price") or results.get("total_contract_value") or 0)
+    balances = results.get("contract_balances") or {}
+    rec = float(balances.get("revenue_recognized_to_date") or results.get("total_recognised") or 0)
+    def_rev = float(balances.get("contract_liability_amount") or results.get("total_deferred") or max(0.0, tp - rec))
+
+    perf_obs = results.get("performance_obligations") or []
+    allocations = results.get("allocations") or {}
+    schedule = list(results.get("revenue_schedule") or [])
+
+    po_inputs: List[Dict[str, Any]] = []
+    for po in perf_obs:
+        if not isinstance(po, dict):
+            continue
+        oid = str(po.get("obligation_id") or po.get("Obligation_ID") or "")
+        name = str(po.get("obligation") or po.get("description") or oid or "Performance obligation")
+        alloc = float(po.get("allocated_amount") or allocations.get(oid, 0) or 0)
+        rec_po = float(po.get("revenue_recognized") or po.get("recognised_to_date") or 0)
+        remaining_lines = calc._remaining_lines_from_schedule_rows(
+            schedule,
+            reporting_dt,
+            obligation_id=oid or None,
+            obligation_name=name or None,
+        )
+        po_inputs.append(
+            {
+                "name": name,
+                "obligation_id": oid,
+                "allocated_amount": alloc,
+                "recognised_to_date": rec_po,
+                "remaining_schedule": remaining_lines,
+                "recognition_type": po.get("recognition_method") or "over_time",
+            }
+        )
+
+    if not po_inputs and def_rev > 1e-6:
+        po_inputs = [
+            {
+                "name": "Contract",
+                "obligation_id": "CONTRACT",
+                "allocated_amount": tp,
+                "recognised_to_date": rec,
+                "remaining_schedule": calc._remaining_lines_from_schedule_rows(schedule, reporting_dt),
+            }
+        ]
+
+    rpo_contract = RPOContract(
+        contract_id=contract.contract_id,
+        customer_name=contract.customer_name,
+        contract_start=contract_start,
+        contract_end=contract_end,
+        total_transaction_price=tp,
+        revenue_recognised_to_date=rec,
+        performance_obligations=po_inputs,
+        currency=contract.currency,
+        reporting_date=reporting,
+        revenue_schedule=schedule,
+    )
+
+    try:
+        rpo120 = calc.calculate_rpo([rpo_contract])
+    except RPOReconciliationError as exc:
+        return {
+            "total_rpo": round(def_rev, 2),
+            "within_1_year": round(def_rev, 2),
+            "one_to_two_years": 0.0,
+            "beyond_2_years": 0.0,
+            "auto_computed": True,
+            "manual_override": False,
+            "source": "fallback_deferred",
+            "disclosure_required": True,
+            "practical_expedient_available": False,
+            "as_of_date": reporting,
+            "reconciliation_error": exc.to_dict(),
+        }
+
+    buckets = rpo120.get("buckets") or {}
+    expedient_excluded = int(rpo120.get("expedient_contracts_excluded") or 0) > 0
+    total = float(rpo120.get("total_rpo") or 0)
+    if total <= 1e-6 and def_rev > 1e-6 and not expedient_excluded:
+        total = def_rev
+    elif total <= 1e-6 and def_rev > 1e-6 and expedient_excluded:
+        total = def_rev
+
+    return {
+        "total_rpo": round(total, 2),
+        "within_1_year": round(float(buckets.get("within_1_year", 0) or 0), 2),
+        "one_to_two_years": round(float(buckets.get("1_to_2_years", 0) or 0), 2),
+        "beyond_2_years": round(
+            float(buckets.get("2_to_5_years", 0) or 0) + float(buckets.get("beyond_5_years", 0) or 0),
+            2,
+        ),
+        "buckets": buckets,
+        "auto_computed": True,
+        "manual_override": False,
+        "source": "schedule_derived",
+        "disclosure_required": not expedient_excluded,
+        "practical_expedient_available": expedient_excluded,
+        "as_of_date": reporting,
+        "contract_term_months": int(contract.contract_term_months or rpo_contract_term_months(rpo_contract)),
+        "rpo_120": rpo120,
+    }
+
+
+def recognition_pattern_label_from_results(results: Dict[str, Any]) -> str:
+    """UI label: single handover date → point-in-time; multiple dates → schedule-based."""
+    schedule = list(results.get("revenue_schedule") or [])
+    recognition_dates: set = set()
+    for row in schedule:
+        if not isinstance(row, dict):
+            continue
+        scheduled = float(row.get("Scheduled_Revenue", row.get("scheduled_revenue", 0)) or 0)
+        if scheduled <= 1e-6:
+            continue
+        d = str(row.get("Date") or row.get("date") or row.get("expected_recognition_date") or "")[:10]
+        if d:
+            recognition_dates.add(d)
+
+    perf_obs = list(results.get("performance_obligations") or [])
+    methods = [
+        str((po or {}).get("recognition_method") or "").lower()
+        for po in perf_obs
+        if isinstance(po, dict)
+    ]
+    all_pit = bool(methods) and all("point" in m for m in methods)
+
+    if len(recognition_dates) <= 1 and all_pit:
+        return "Point-in-time (upon handover/completion)"
+    if len(recognition_dates) > 1:
+        return "Schedule-based / time-based recognition"
+    if all_pit:
+        return "Point-in-time (upon handover/completion)"
+    return "Schedule-based / time-based recognition"
+
 
 @dataclass
 class PerformanceObligation:
@@ -28,6 +509,10 @@ class PerformanceObligation:
     recognition_date: Optional[datetime] = None  # PIT single source of truth (IFRS 15 transfer)
     obligation_start_date: Optional[datetime] = None  # PO-specific start (e.g. go-live)
     completion_percentage: Decimal = Decimal('0')  # For over-time custom %
+    distinct_assessment: Optional[str] = None  # merged | separately_allocated
+    ssp_allocation_method: Optional[str] = None
+    is_distinct: Optional[bool] = None
+    bundled_with: Optional[List[str]] = None
 
 
 @dataclass
@@ -109,6 +594,9 @@ class RPOContract:
     revenue_recognised_to_date: float
     performance_obligations: List[Dict[str, Any]]
     practical_expedient_applied: bool = False
+    currency: str = "USD"
+    reporting_date: str = ""
+    revenue_schedule: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -125,6 +613,7 @@ class PrincipalAgentInput:
     inventory_risk: bool
     pricing_discretion: bool
     credit_risk: bool
+    currency: str = "USD"
 
 
 @dataclass
@@ -227,6 +716,7 @@ class FinancingComponentInput:
     payment_timing: str  # "advance" | "deferred"
     discount_rate: float
     currency: str = "USD"
+    revenue_schedule: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -453,25 +943,27 @@ class IFRS15VariableConsiderationEngine:
             raise ValueError("method must be 'expected_value', 'scenario_weighted', or 'most_likely'")
 
         constraint_score = sum(1 for f in factors if f)
-        if constraint_score == 0:
-            constrained_amount = expected_amount
-            constraint_applied = False
-            constraint_level: str = "none"
-        elif constraint_score == 1:
-            constrained_amount = expected_amount * 0.95
-            constraint_applied = True
-            constraint_level = "low"
-        elif constraint_score == 2:
-            constrained_amount = expected_amount * 0.85
-            constraint_applied = True
-            constraint_level = "moderate"
-        else:
-            constrained_amount = expected_amount * 0.70
-            constraint_applied = True
-            constraint_level = "high"
-
-        mult_by_level = {"none": 1.0, "low": 0.95, "moderate": 0.85, "high": 0.70}
-        constraint_multiplier = float(mult_by_level.get(constraint_level, 1.0))
+        currency = str(data.get("currency", "USD") or "USD")
+        unified = IFRS15UnifiedVCConstraintEngine().assess(
+            {
+                "estimated_vc": expected_amount,
+                "constraint_factors_indexed": factors,
+                "currency": currency,
+                "total_contract_value": data.get("total_contract_value"),
+                "contract_term_months": data.get("contract_term_months"),
+                "constraint_level": None,
+                "historical_attainment_pct": data.get("historical_attainment_pct"),
+                "refund_type": data.get("refund_type"),
+                "recognition_type": data.get("recognition_type"),
+                "customer_type": data.get("customer_type"),
+                "has_external_dependency": data.get("has_external_dependency"),
+                "dependency_level": data.get("dependency_level"),
+            }
+        )
+        constrained_amount = float(unified["constrained_amount"])
+        constraint_applied = bool(unified["constraint_applied"])
+        constraint_level = str(unified["constraint_level"])
+        constraint_multiplier = float(unified["constraint_multiplier"])
 
         reduction_amount = expected_amount - constrained_amount
         if expected_amount and abs(expected_amount) > 1e-9:
@@ -486,14 +978,16 @@ class IFRS15VariableConsiderationEngine:
         if constraint_applied:
             explanation += (
                 f"IFRS 15.56 constraint factors ({constraint_score} active) reduce the amount that can be included "
-                f"in the transaction price to {constrained_amount:,.2f} (from {expected_amount:,.2f} unconstrained). "
+                f"in the transaction price to {format_ifrs15_currency(constrained_amount, currency)} "
+                f"(from {format_ifrs15_currency(expected_amount, currency)} unconstrained). "
             )
         else:
             explanation += (
-                f"No material reversal risk factors were flagged, so the full {expected_amount:,.2f} is included. "
+                f"No material reversal risk factors were flagged, so the full "
+                f"{format_ifrs15_currency(expected_amount, currency)} is included. "
             )
         explanation += (
-            f"Include {constrained_amount:,.2f} in the transaction price for recognition purposes. "
+            f"Include {format_ifrs15_currency(constrained_amount, currency)} in the transaction price for recognition purposes. "
         )
         if reduction_pct > 30.0 and constraint_applied:
             explanation += (
@@ -578,20 +1072,27 @@ class IFRS15VariableConsiderationEngine:
             "constrained_amount": round(constrained_amount, 2),
             "constraint_applied": constraint_applied,
             "constraint_level": constraint_level,
-            "constraint_score": int(constraint_score),
+            "constraint_score": int(unified["risk_score"]),
+            "constraint_score_max": int(unified["constraint_score_max"]),
+            "named_factor_score": int(unified["named_factor_score"]),
             "reduction_amount": round(reduction_amount, 2),
             "reduction_pct": round(reduction_pct, 2),
             "include_in_transaction_price": round(constrained_amount, 2),
             "active_factors": active,
-            "explanation": explanation.strip(),
-            "risk_flag": bool(risk_flag),
-            "risk_message": risk_message,
+            "explanation": unified["explanation"],
+            "risk_flag": bool(unified["risk_flag"]),
+            "risk_message": unified["risk_message"],
             "revenue_at_risk": round(revenue_at_risk, 2),
             "risk_pct_of_contract": round(risk_pct_of_contract, 4),
-            "risk_level": risk_level,
+            "risk_level": unified["risk_level"],
             "risk_scenario": risk_scenario,
             "constraint_multiplier": constraint_multiplier,
-            "constraint_warning": constraint_warning,
+            "constraint_warning": unified["constraint_warning"],
+            "unified_vc_assessment": unified,
+            "factor_scores": unified["factor_scores"],
+            "highest_risk_factors": unified["highest_risk_factors"],
+            "risk_score": unified["risk_score"],
+            "risk_pct": unified["risk_pct"],
         }
 
 
@@ -712,6 +1213,24 @@ class IFRS15ContractCostsEngine:
         commission = float(data.get("commission_amount", 0) or 0)
         term = int(data.get("contract_term_months", 0) or 0)
         contract_value = float(data.get("contract_total_value", 0) or 0)
+        currency = str(data.get("currency", "USD") or "USD")
+        assessed = bool(data.get("assessed", commission > 1e-6))
+
+        if commission <= 1e-6 and not assessed:
+            return {
+                "assessed": False,
+                "capitalise": False,
+                "use_practical_expedient": False,
+                "commission_amount": 0.0,
+                "contract_term_months": term,
+                "monthly_amortisation": 0.0,
+                "total_asset_recognised": 0.0,
+                "amortisation_schedule": [],
+                "journal_entries": [],
+                "impairment_flag": False,
+                "impairment_note": "",
+                "explanation": "No contract costs assessed for this contract.",
+            }
 
         impairment_flag = bool(contract_value > 0 and commission > contract_value * 0.15)
         impairment_note = (
@@ -729,6 +1248,7 @@ class IFRS15ContractCostsEngine:
             )
             return {
                 "capitalise": False,
+                "assessed": True,
                 "use_practical_expedient": True,
                 "commission_amount": round(commission, 2),
                 "contract_term_months": term,
@@ -794,12 +1314,13 @@ class IFRS15ContractCostsEngine:
         ]
 
         explanation = (
-            f"Contract term exceeds 12 months ({term} months). Incremental commission of {commission:,.2f} is "
-            f"capitalised and amortised on a straight-line basis ({round(monthly, 2):,.2f} per month) over the "
-            f"contract term in line with IFRS 15.91–94."
+            f"Contract term exceeds 12 months ({term} months). Incremental commission of "
+            f"{format_ifrs15_currency(commission, currency)} is capitalised and amortised on a straight-line basis "
+            f"({format_ifrs15_currency(round(monthly, 2), currency)} per month) over the contract term in line with IFRS 15.91–94."
         )
 
         return {
+            "assessed": True,
             "capitalise": True,
             "use_practical_expedient": False,
             "commission_amount": round(commission, 2),
@@ -818,6 +1339,33 @@ class IFRS15PrincipalAgentEngine:
     """IFRS 15.B34–B38 principal vs agent (gross vs net) assessment."""
 
     def assess(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        if not bool(data.get("third_party_involved", False)):
+            gross = float(data.get("transaction_price", 0) or 0)
+            return {
+                "conclusion": "NOT_APPLICABLE",
+                "assessment_status": "not_applicable",
+                "revenue_recognition": "N/A",
+                "principal_score": 0,
+                "borderline": False,
+                "borderline_note": "",
+                "indicator_results": {},
+                "gross_revenue": round(gross, 2),
+                "net_revenue": round(gross, 2),
+                "cost_paid_to_supplier": 0.0,
+                "revenue_to_recognise": round(gross, 2),
+                "expense_to_recognise": 0.0,
+                "gross_margin_pct": 100.0 if gross > 1e-9 else 0.0,
+                "revenue_difference": 0.0,
+                "commission_rate_pct": 0.0,
+                "journal_entries": [],
+                "explanation": (
+                    "Not applicable — no third party identified in this contract arrangement. "
+                    "Principal vs Agent assessment applies only when the entity arranges goods or "
+                    "services from a third party on behalf of the customer (IFRS 15.B34)."
+                ),
+                "ifrs_reference": "IFRS 15.B34-B38",
+            }
+
         tpi = "obtains_before_transfer"
         spi = "sets_price_independently"
         pri = "primarily_responsible"
@@ -852,6 +1400,35 @@ class IFRS15PrincipalAgentEngine:
             bnote = "Assessment is borderline. Apply additional judgment and document rationale thoroughly for audit purposes."
         else:
             bnote = ""
+
+        if conclusion == "AGENT" and cost <= 1e-6:
+            return {
+                "conclusion": "BLOCKED",
+                "assessment_status": "blocked_missing_third_party_cost",
+                "revenue_recognition": "N/A",
+                "principal_score": int(principal_score),
+                "borderline": bool(borderline),
+                "borderline_note": (
+                    "Principal vs Agent assessment cannot produce meaningful NET revenue until "
+                    "third-party consideration is entered."
+                ),
+                "indicator_results": {tpi: ind1, spi: ind2, pri: ind3},
+                "gross_revenue": round(gross, 2),
+                "net_revenue": 0.0,
+                "cost_paid_to_supplier": 0.0,
+                "revenue_to_recognise": 0.0,
+                "expense_to_recognise": 0.0,
+                "gross_margin_pct": 0.0,
+                "revenue_difference": 0.0,
+                "commission_rate_pct": 0.0,
+                "journal_entries": [],
+                "explanation": (
+                    "Principal vs Agent assessment cannot produce meaningful NET revenue until "
+                    "third-party consideration is entered. Agent conclusion was indicated by "
+                    f"{3 - principal_score}/3 legacy indicators, but third-party cost is blank or zero."
+                ),
+                "ifrs_reference": "IFRS 15.B34-B38",
+            }
 
         if conclusion == "PRINCIPAL":
             revenue_to = gross
@@ -953,6 +1530,34 @@ class IFRS15LicenseEngine:
     """IFRS 15.B52–B63 licences of intellectual property (right to access vs right to use)."""
 
     def classify(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        desc = str(data.get("license_description") or data.get("licence_description") or "")
+        product = str(data.get("product_name") or "")
+        combined = f"{desc} {product}".lower()
+        non_ip_terms = (
+            "construction",
+            "management service",
+            "consulting",
+            "implementation",
+            "professional service",
+            "off-plan",
+            "residential",
+            "handover",
+        )
+        has_ip_signal = bool(
+            re.search(r"\b(software\s+)?licen[cs]e\b|intellectual\s+property|\bip\b", combined)
+        )
+        if (not combined.strip() or any(term in combined for term in non_ip_terms)) and not has_ip_signal:
+            return {
+                "license_type": "NOT_APPLICABLE",
+                "assessment_status": "not_applicable",
+                "pattern": "N/A",
+                "conclusion": "Not applicable — no license obligation identified.",
+                "explanation": (
+                    "Not applicable — no license obligation identified in this contract. "
+                    "Add an explicit licence line item before running Licence of IP assessment."
+                ),
+            }
+
         a = bool(data.get("significantly_affects_ip"))
         b = bool(data.get("customer_exposed_as_occurs"))
         c = bool(data.get("activities_not_separate_good"))
@@ -1134,7 +1739,7 @@ class IFRS15MasterSummaryEngine:
 
         mod = data.get("modification_result") or {}
         vc = data.get("variable_consideration_result") or {}
-        rpo = data.get("rpo_result") or {}
+        rpo = data.get("rpo_result") or core.get("rpo_result") or {}
         cc = data.get("contract_costs_result") or {}
         pa = data.get("principal_agent_result") or {}
         lic = data.get("license_result") or {}
@@ -1142,6 +1747,46 @@ class IFRS15MasterSummaryEngine:
         mod_assessed = bool(mod and mod.get("modification_type"))
         vc_assessed = bool(vc and (vc.get("expected_amount") is not None or vc.get("constrained_amount") is not None))
         rpo_assessed = bool(rpo and rpo.get("total_rpo") is not None)
+        if not rpo_assessed and def_rev > 1e-6 and core:
+            try:
+                eff = cdetails.get("effective_date") or data.get("effective_date") or ""
+                eff_dt = parse_ifrs15_date(eff) or datetime.now()
+                pob_src = perf_obs if perf_obs else []
+                pobs = []
+                for raw_po in pob_src:
+                    if not isinstance(raw_po, dict):
+                        continue
+                    pobs.append(
+                        PerformanceObligation(
+                            obligation_id=str(raw_po.get("obligation_id") or raw_po.get("Obligation_ID") or "PO-1"),
+                            description=str(raw_po.get("obligation") or raw_po.get("description") or "Obligation"),
+                            standalone_selling_price=Decimal(str(raw_po.get("allocated_amount") or 0)),
+                            recognition_method=str(raw_po.get("recognition_method") or "over_time"),
+                            duration_months=int(raw_po.get("duration_months") or term_m or 12),
+                        )
+                    )
+                stub = IFRS15Input(
+                    contract_id=contract_id,
+                    customer_name=customer_name,
+                    effective_date=eff_dt,
+                    contract_term_months=term_m or 12,
+                    fixed_consideration=Decimal(str(tp)),
+                    currency=currency,
+                    performance_obligations=pobs or [
+                        PerformanceObligation(
+                            obligation_id="PO-1",
+                            description="Contract",
+                            standalone_selling_price=Decimal(str(tp)),
+                            recognition_method="over_time",
+                            duration_months=term_m or 12,
+                        )
+                    ],
+                )
+                rpo = build_default_rpo_result(stub, core)
+                rpo_assessed = bool(rpo.get("total_rpo") is not None)
+            except Exception:
+                rpo = {"total_rpo": round(def_rev, 2), "auto_computed": True, "source": "deferred_fallback"}
+                rpo_assessed = True
         cc_assessed = bool(cc and (cc.get("commission_amount") is not None or cc.get("use_practical_expedient") is not None))
         pa_assessed = bool(pa and pa.get("conclusion"))
         lic_assessed = bool(lic and lic.get("license_type"))
@@ -1381,32 +2026,82 @@ class IFRS15MasterSummaryEngine:
         }
 
 
-class IFRS15ReversalRiskEngine:
-    """Heuristic revenue reversal risk score linked to VC constraint and contract profile."""
+VC_NAMED_FACTOR_KEYS: Tuple[str, ...] = (
+    "susceptible_to_external",
+    "long_resolution_period",
+    "wide_range_of_outcomes",
+    "limited_experience",
+    "broad_price_concession_practice",
+)
 
-    _FACTOR_DISPLAY = {
-        "constraint_level": "VC Constraint Level",
-        "contract_term": "Contract Duration",
-        "customer_type": "Customer Risk Profile",
-        "variable_pct": "Variable Component %",
-        "refund_right": "Refund / Return Rights",
-        "recognition_timing": "Recognition Timeline",
-        "historical_attainment": "Historical Attainment",
-        "external_dependency": "External Dependencies",
-    }
+VC_NAMED_FACTOR_LABELS: Dict[str, str] = {
+    "susceptible_to_external": "Highly susceptible to external factors",
+    "long_resolution_period": "Uncertainty resolves over a long period",
+    "wide_range_of_outcomes": "Wide range of possible outcomes",
+    "limited_experience": "Limited experience with this contract type",
+    "broad_price_concession_practice": "History of broad price concessions",
+}
 
-    def score(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        constraint = str(body.get("constraint_level") or "none").strip().lower()
-        if constraint == "none":
-            s1 = 0
-        elif constraint == "low":
-            s1 = 1
-        elif constraint == "moderate":
-            s1 = 2
-        elif constraint == "high":
-            s1 = 3
+UNIFIED_VC_FACTOR_DISPLAY: Dict[str, str] = {
+    "constraint_level": "VC Constraint Level",
+    "contract_term": "Contract Duration",
+    "customer_type": "Customer Risk Profile",
+    "variable_pct": "Variable Component %",
+    "refund_right": "Refund / Return Rights",
+    "recognition_timing": "Recognition Timeline",
+    "historical_attainment": "Historical Attainment",
+    "external_dependency": "External Dependencies",
+}
+
+
+class IFRS15UnifiedVCConstraintEngine:
+    """
+    Single source of truth for IFRS 15.56–58 variable consideration constraint scoring.
+
+    Uses the 24-point reversal-risk factor model (incl. Historical Attainment) for all surfaces:
+    main calculate, VC calculator form, and standalone reversal-risk widget.
+    """
+
+    MAX_SCORE = 24
+
+    @staticmethod
+    def _normalize_named_factors(body: Dict[str, Any]) -> Dict[str, bool]:
+        indexed = body.get("constraint_factors_indexed")
+        raw = body.get("constraint_factors") or {}
+        out = {k: False for k in VC_NAMED_FACTOR_KEYS}
+        if isinstance(indexed, list) and len(indexed) >= 5:
+            for i, key in enumerate(VC_NAMED_FACTOR_KEYS):
+                out[key] = bool(indexed[i])
+        elif isinstance(raw, dict):
+            for key in VC_NAMED_FACTOR_KEYS:
+                if key in raw:
+                    out[key] = bool(raw[key])
+        return out
+
+    @staticmethod
+    def _named_factors_to_constraint_score(named: Dict[str, bool]) -> int:
+        score = sum(1 for v in named.values() if v)
+        if score <= 1:
+            return 0
+        if score == 2:
+            return 2
+        return 3
+
+    def _factor_scores(self, body: Dict[str, Any], named: Dict[str, bool]) -> Dict[str, int]:
+        if any(named.values()):
+            s1 = self._named_factors_to_constraint_score(named)
         else:
-            s1 = 1
+            constraint = str(body.get("constraint_level") or "none").strip().lower()
+            if constraint == "none":
+                s1 = 0
+            elif constraint == "low":
+                s1 = 1
+            elif constraint == "moderate":
+                s1 = 2
+            elif constraint in ("high", "very_high"):
+                s1 = 3
+            else:
+                s1 = 1
 
         term = int(body.get("contract_term_months") or 0)
         if term <= 12:
@@ -1427,13 +2122,11 @@ class IFRS15ReversalRiskEngine:
             s3 = 2
         elif ct in ("startup", "new_customer"):
             s3 = 3
-        elif not ct:
-            s3 = 1
         else:
             s3 = 1
 
-        vc_amt = float(body.get("variable_consideration") or 0)
-        total_val = float(body.get("total_contract_value") or 0)
+        vc_amt = float(body.get("variable_consideration", body.get("estimated_vc", 0)) or 0)
+        total_val = float(body.get("total_contract_value", 0) or 0)
         if total_val > 1e-12:
             vp = abs(vc_amt) / total_val
         else:
@@ -1475,7 +2168,7 @@ class IFRS15ReversalRiskEngine:
             try:
                 h = float(hist)
             except (TypeError, ValueError):
-                s7 = 3
+                h = 0.0
             if h < 50.0:
                 s7 = 3
             elif h <= 75.0:
@@ -1496,7 +2189,7 @@ class IFRS15ReversalRiskEngine:
         else:
             s8 = 1
 
-        factor_scores = {
+        return {
             "constraint_level": s1,
             "contract_term": s2,
             "customer_type": s3,
@@ -1507,29 +2200,39 @@ class IFRS15ReversalRiskEngine:
             "external_dependency": s8,
         }
 
-        risk_score = int(sum(factor_scores.values()))
-        max_score = 24
-        risk_pct = round((risk_score / max_score) * 100.0, 2) if max_score else 0.0
-
+    @staticmethod
+    def _inclusion_from_risk_score(risk_score: int) -> Tuple[float, str, str]:
+        risk_pct = (risk_score / IFRS15UnifiedVCConstraintEngine.MAX_SCORE) * 100.0
         if risk_pct <= 25.0:
-            risk_level = "LOW"
-        elif risk_pct <= 50.0:
-            risk_level = "MEDIUM"
-        elif risk_pct <= 75.0:
-            risk_level = "HIGH"
-        else:
-            risk_level = "CRITICAL"
+            return 1.0, "LOW", "none" if risk_score <= 3 else "low"
+        if risk_pct <= 50.0:
+            return 0.85, "MEDIUM", "moderate"
+        if risk_pct <= 75.0:
+            return 0.50, "HIGH", "high"
+        return 0.0, "CRITICAL", "very_high"
 
-        reversal_watch = risk_pct > 50.0
-        estimated_reversal_amount = round(float(vc_amt) * (risk_pct / 100.0) * 0.5, 2)
+    def assess(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        currency = str(body.get("currency", "USD") or "USD").strip().upper() or "USD"
+        estimated_vc = float(body.get("estimated_vc", body.get("variable_consideration", 0)) or 0)
+        named = self._normalize_named_factors(body)
+        factor_scores = self._factor_scores(body, named)
+        risk_score = int(sum(factor_scores.values()))
+        risk_pct = round((risk_score / self.MAX_SCORE) * 100.0, 2)
+        inclusion_rate, risk_level, constraint_level = self._inclusion_from_risk_score(risk_score)
+        constrained = round(estimated_vc * inclusion_rate, 2)
+        excluded = round(estimated_vc - constrained, 2)
+        reduction_pct = round((excluded / estimated_vc * 100.0), 2) if abs(estimated_vc) > 1e-9 else 0.0
 
+        factors_present = [k for k, v in named.items() if v]
         ordered = sorted(factor_scores.items(), key=lambda kv: (-kv[1], kv[0]))
         highest_risk_factors = [
-            self._FACTOR_DISPLAY.get(k, k) for k, v in ordered if v == 3
+            UNIFIED_VC_FACTOR_DISPLAY.get(k, k) for k, v in ordered if v == 3
         ]
+        reversal_watch = risk_pct > 50.0
+        estimated_reversal_amount = round(estimated_vc * (risk_pct / 100.0) * 0.5, 2)
 
         actions: List[str] = []
-        if s1 >= 3:
+        if factor_scores.get("constraint_level", 0) >= 3:
             actions.append(
                 "Consider excluding variable consideration entirely until uncertainty resolves (IFRS 15.57)"
             )
@@ -1537,40 +2240,116 @@ class IFRS15ReversalRiskEngine:
             actions.append(
                 "Document basis for variable consideration estimate given limited track record"
             )
-        if refund == "full":
-            actions.append(
-                "Assess whether refund right creates a return obligation under IFRS 15.B20"
-            )
-        if term > 36:
+        if str(body.get("refund_type") or "none").lower() == "full":
+            actions.append("Assess whether refund right creates a return obligation under IFRS 15.B20")
+        if int(body.get("contract_term_months") or 0) > 36:
             actions.append(
                 "Monitor variable consideration constraint quarterly — long contracts have higher reversal exposure"
             )
-        if ext and dep == "high":
-            actions.append(
-                "Stress test revenue forecast against adverse external factor scenarios"
-            )
-
         if not actions:
             actions.append("Continue to monitor estimates and update when facts change.")
 
-        hi_sentence = ", ".join(highest_risk_factors) if highest_risk_factors else "none scoring the maximum 3 points"
-        explanation = (
-            f"This contract scores {risk_score}/24 ({risk_pct}%) on the reversal risk model, classified as {risk_level}. "
-            f"The highest risk factors are {hi_sentence}. "
-            f"For the variable consideration included in the transaction price, this profile suggests "
-            f"{'material' if risk_pct > 50 else 'limited'} exposure to revenue reversals if estimates or outcomes shift."
+        factors_text = (
+            "; ".join(VC_NAMED_FACTOR_LABELS[f] for f in factors_present)
+            if factors_present
+            else "none identified"
         )
+        named_score = sum(1 for v in named.values() if v)
+        explanation = (
+            f"Unified constraint assessment: {risk_level} ({risk_score}/{self.MAX_SCORE} points, {risk_pct}%). "
+            f"IFRS 15.56 factors flagged: {named_score}/5 ({factors_text}). "
+            f"Inclusion rate {inclusion_rate * 100:.0f}% — "
+            f"{format_ifrs15_currency(constrained, currency)} of "
+            f"{format_ifrs15_currency(estimated_vc, currency)} included in transaction price; "
+            f"{format_ifrs15_currency(excluded, currency)} excluded (reversal risk)."
+        )
+        reversal_explanation = (
+            f"This contract scores {risk_score}/{self.MAX_SCORE} ({risk_pct}%) on the reversal risk model, "
+            f"classified as {risk_level}. The highest risk factors are "
+            f"{', '.join(highest_risk_factors) if highest_risk_factors else 'none scoring the maximum 3 points'}."
+        )
+
+        constraint_warning = ""
+        if constraint_level in ("high", "very_high"):
+            constraint_warning = (
+                f"HIGH constraint applied ({inclusion_rate * 100:.0f}% of expected value included). "
+                f"Revenue at risk: {format_ifrs15_currency(excluded, currency)}. "
+                f"Consider whether variable consideration should be excluded entirely until "
+                f"uncertainty resolves (IFRS 15.57)."
+            )
+        elif constraint_level == "moderate":
+            constraint_warning = (
+                f"Moderate constraint applied. {format_ifrs15_currency(excluded, currency)} excluded "
+                f"from transaction price pending resolution of uncertainty."
+            )
 
         return {
             "risk_score": risk_score,
             "risk_pct": risk_pct,
             "risk_level": risk_level,
-            "reversal_watch": reversal_watch,
-            "estimated_reversal_amount": estimated_reversal_amount,
+            "constraint_score": risk_score,
+            "constraint_score_max": self.MAX_SCORE,
+            "named_factor_score": named_score,
+            "constraint_level": constraint_level,
+            "inclusion_rate_pct": round(inclusion_rate * 100.0, 2),
+            "constraint_multiplier": inclusion_rate,
+            "expected_amount": round(estimated_vc, 2),
+            "estimated_vc_before_constraint": round(estimated_vc, 2),
+            "constrained_amount": constrained,
+            "excluded_amount": excluded,
+            "reduction_amount": excluded,
+            "reduction_pct": reduction_pct,
+            "include_in_transaction_price": constrained,
+            "constraint_applied": excluded > 1e-6,
+            "factors_present": factors_present,
             "factor_scores": factor_scores,
             "highest_risk_factors": highest_risk_factors,
+            "reversal_watch": reversal_watch,
+            "estimated_reversal_amount": estimated_reversal_amount,
             "recommended_actions": actions,
             "explanation": explanation,
+            "reversal_explanation": reversal_explanation,
+            "constraint_warning": constraint_warning,
+            "risk_flag": reduction_pct > 25.0,
+            "risk_message": (
+                f"Constraint reduces variable consideration by {reduction_pct:.1f}%. "
+                "Consider whether the variable element should be excluded entirely until uncertainty resolves."
+                if reduction_pct > 25.0
+                else ""
+            ),
+            "currency": currency,
+            "ifrs_reference": "IFRS 15.56-58",
+            "engine": "unified_24_point",
+        }
+
+
+class IFRS15ReversalRiskEngine:
+    """Heuristic revenue reversal risk score linked to VC constraint and contract profile."""
+
+    _FACTOR_DISPLAY = {
+        "constraint_level": "VC Constraint Level",
+        "contract_term": "Contract Duration",
+        "customer_type": "Customer Risk Profile",
+        "variable_pct": "Variable Component %",
+        "refund_right": "Refund / Return Rights",
+        "recognition_timing": "Recognition Timeline",
+        "historical_attainment": "Historical Attainment",
+        "external_dependency": "External Dependencies",
+    }
+
+    def score(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        unified = IFRS15UnifiedVCConstraintEngine().assess(body)
+        return {
+            "risk_score": unified["risk_score"],
+            "risk_pct": unified["risk_pct"],
+            "risk_level": unified["risk_level"],
+            "reversal_watch": unified["reversal_watch"],
+            "estimated_reversal_amount": unified["estimated_reversal_amount"],
+            "factor_scores": unified["factor_scores"],
+            "highest_risk_factors": unified["highest_risk_factors"],
+            "recommended_actions": unified["recommended_actions"],
+            "explanation": unified["reversal_explanation"],
+            "unified_vc_assessment": unified,
         }
 
 
@@ -2578,76 +3357,57 @@ class IFRS15Calculator:
         estimated_vc: float,
         constraint_factors: Dict[str, Any],
         currency: str = "USD",
+        *,
+        contract_term_months: int = 12,
+        total_contract_value: float = 0.0,
+        historical_attainment_pct: Optional[Any] = None,
+        refund_type: str = "none",
+        recognition_type: str = "over_time",
+        customer_type: str = "",
+        has_external_dependency: bool = False,
+        dependency_level: str = "low",
     ) -> Dict[str, Any]:
         """
-        IFRS 15.56-58 — Constraining variable consideration.
-
-        constraint_factors keys:
-        - susceptible_to_external: bool
-        - long_resolution_period: bool
-        - wide_range_of_outcomes: bool
-        - limited_experience: bool
-        - broad_price_concession_practice: bool
+        IFRS 15.56-58 — Constraining variable consideration (unified 24-point engine).
         """
-        cur = (currency or "USD").strip().upper() or "USD"
-        norm = self._normalize_vc_constraint_factors(constraint_factors)
-        factors_present = [k for k, v in norm.items() if v]
-        score = len(factors_present)
-
-        if score <= 1:
-            risk = "Low"
-            inclusion_rate = 1.0
-        elif score == 2:
-            risk = "Medium"
-            inclusion_rate = 0.75
-        elif score == 3:
-            risk = "High"
-            inclusion_rate = 0.50
-        else:
-            risk = "Very High"
-            inclusion_rate = 0.0
-
-        constrained = round(float(estimated_vc) * inclusion_rate, 2)
-        excluded = round(float(estimated_vc) - constrained, 2)
-
-        factor_names = {
-            "susceptible_to_external": "highly susceptible to external factors",
-            "long_resolution_period": "uncertainty resolves over a long period",
-            "wide_range_of_outcomes": "wide range of possible outcomes",
-            "limited_experience": "limited experience with this contract type",
-            "broad_price_concession_practice": "history of broad price concessions",
+        unified = IFRS15UnifiedVCConstraintEngine().assess(
+            {
+                "estimated_vc": estimated_vc,
+                "constraint_factors": constraint_factors,
+                "currency": currency,
+                "contract_term_months": contract_term_months,
+                "total_contract_value": total_contract_value or estimated_vc,
+                "historical_attainment_pct": historical_attainment_pct,
+                "refund_type": refund_type,
+                "recognition_type": recognition_type,
+                "customer_type": customer_type,
+                "has_external_dependency": has_external_dependency,
+                "dependency_level": dependency_level,
+            }
+        )
+        risk_level_map = {
+            "LOW": "Low",
+            "MEDIUM": "Medium",
+            "HIGH": "High",
+            "CRITICAL": "Very High",
         }
-
-        factors_text = (
-            "; ".join(factor_names[f] for f in factors_present)
-            if factors_present
-            else "none identified"
-        )
-
-        explanation = (
-            f"Constraint risk: {risk} "
-            f"({score}/5 constraint factors present: "
-            f"{factors_text}). "
-            f"Under IFRS 15.57, {inclusion_rate * 100:.0f}% "
-            f"of the estimated variable consideration "
-            f"({self._fmt_contract_money(float(estimated_vc), cur)}) is included in the "
-            f"transaction price. "
-            f"Constrained amount included: {self._fmt_contract_money(constrained, cur)}. "
-            f"Excluded (risk of significant reversal): "
-            f"{self._fmt_contract_money(excluded, cur)}."
-        )
-
         return {
-            "constraint_score": score,
-            "risk_level": risk,
-            "inclusion_rate_pct": inclusion_rate * 100,
-            "estimated_vc_before_constraint": float(estimated_vc),
-            "constrained_amount": constrained,
-            "excluded_amount": excluded,
-            "currency": cur,
-            "factors_present": factors_present,
-            "explanation": explanation,
-            "ifrs_reference": "IFRS 15.56-58",
+            "constraint_score": unified["named_factor_score"],
+            "risk_score": unified["risk_score"],
+            "risk_pct": unified["risk_pct"],
+            "risk_level": risk_level_map.get(unified["risk_level"], unified["risk_level"]),
+            "inclusion_rate_pct": unified["inclusion_rate_pct"],
+            "estimated_vc_before_constraint": unified["estimated_vc_before_constraint"],
+            "constrained_amount": unified["constrained_amount"],
+            "excluded_amount": unified["excluded_amount"],
+            "currency": unified["currency"],
+            "factors_present": unified["factors_present"],
+            "factor_scores": unified["factor_scores"],
+            "highest_risk_factors": unified["highest_risk_factors"],
+            "explanation": unified["explanation"],
+            "ifrs_reference": unified["ifrs_reference"],
+            "unified_vc_assessment": unified,
+            "engine": "unified_24_point",
         }
 
     def assess_modification(self, mod: ContractModification) -> Dict[str, Any]:
@@ -2955,32 +3715,143 @@ class IFRS15Calculator:
             "ifrs_reference": "IFRS 15.116",
         }
 
+    def _empty_rpo_buckets(self) -> Dict[str, float]:
+        return {k: 0.0 for k in RPO_BUCKET_KEYS}
+
+    def _remaining_lines_from_schedule_rows(
+        self,
+        schedule_rows: List[Dict[str, Any]],
+        reporting_date: date,
+        *,
+        obligation_id: Optional[str] = None,
+        obligation_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Derive remaining RPO lines from revenue schedule rows (Date + unrecognised amount)."""
+        lines: List[Dict[str, Any]] = []
+        ob_id = (obligation_id or "").strip()
+        ob_name = (obligation_name or "").strip().lower()
+
+        for row in schedule_rows or []:
+            if not isinstance(row, dict):
+                continue
+            row_ob_id = str(row.get("Obligation_ID") or row.get("obligation_id") or "").strip()
+            row_ob_name = str(row.get("Obligation") or row.get("obligation") or row.get("name") or "").strip().lower()
+            if ob_id and row_ob_id and row_ob_id != ob_id:
+                continue
+            if not ob_id and ob_name and row_ob_name and ob_name not in row_ob_name and row_ob_name not in ob_name:
+                continue
+
+            scheduled = float(row.get("Scheduled_Revenue", row.get("scheduled_revenue", 0)) or 0)
+            recognised = float(row.get("Revenue", row.get("revenue", 0)) or 0)
+            remaining = scheduled - recognised
+            if remaining <= 1e-6:
+                continue
+
+            rec_date = parse_ifrs15_date(
+                row.get("expected_recognition_date")
+                or row.get("Date")
+                or row.get("date")
+                or row.get("recognition_date")
+            )
+            if not rec_date:
+                continue
+            if rec_date <= reporting_date and recognised >= scheduled - 1e-6:
+                continue
+
+            lines.append(
+                {
+                    "expected_recognition_date": rec_date.isoformat(),
+                    "amount": round(remaining, 2),
+                }
+            )
+        return lines
+
+    def _extract_po_remaining_schedule(
+        self,
+        po: Dict[str, Any],
+        reporting_date: date,
+        contract_schedule: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """
+        Return remaining schedule lines for a POB and a source tag.
+        Priority: explicit remaining_schedule → contract revenue_schedule → empty.
+        """
+        explicit = po.get("remaining_schedule") or po.get("remaining_schedule_lines")
+        if explicit:
+            normalised: List[Dict[str, Any]] = []
+            for raw in explicit:
+                if not isinstance(raw, dict):
+                    continue
+                rec_date = parse_ifrs15_date(
+                    raw.get("expected_recognition_date")
+                    or raw.get("date")
+                    or raw.get("Date")
+                )
+                amt = float(raw.get("amount", raw.get("scheduled_revenue", raw.get("Scheduled_Revenue", 0))) or 0)
+                if not rec_date or amt <= 1e-6:
+                    continue
+                normalised.append({"expected_recognition_date": rec_date.isoformat(), "amount": round(amt, 2)})
+            if normalised:
+                return normalised, "remaining_schedule"
+
+        ob_id = str(po.get("obligation_id") or po.get("Obligation_ID") or "").strip() or None
+        ob_name = str(po.get("name") or po.get("obligation_name") or po.get("obligation") or "").strip() or None
+        from_schedule = self._remaining_lines_from_schedule_rows(
+            list(contract_schedule or []),
+            reporting_date,
+            obligation_id=ob_id,
+            obligation_name=ob_name,
+        )
+        if from_schedule:
+            return from_schedule, "revenue_schedule"
+        return [], "none"
+
+    def _bucket_remaining_lines(
+        self, lines: List[Dict[str, Any]], reporting_date: date
+    ) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
+        buckets = self._empty_rpo_buckets()
+        detail: List[Dict[str, Any]] = []
+        for line in lines:
+            rec_date = parse_ifrs15_date(line.get("expected_recognition_date"))
+            amt = float(line.get("amount", 0) or 0)
+            if not rec_date or amt <= 1e-6:
+                continue
+            bucket = rpo_bucket_key_for_date(rec_date, reporting_date)
+            buckets[bucket] = round(buckets[bucket] + amt, 2)
+            detail.append(
+                {
+                    "expected_recognition_date": rec_date.isoformat(),
+                    "amount": round(amt, 2),
+                    "bucket": bucket,
+                }
+            )
+        return buckets, detail
+
     def calculate_rpo(self, contracts: List[Any]) -> Dict[str, Any]:
         """
         IFRS 15.120-122 — RPO Disclosure.
 
-        Calculates remaining performance obligations across all contracts and produces
-        the mandatory disclosure note in full.
+        Timing uses four fixed bands (within 1y / 1–2y / 2–5y / beyond 5y) anchored to
+        the reporting date. RPO per contract is derived from per-POB remaining schedule
+        lines; total_rpo is the sum of bucket amounts only.
 
-        Practical expedients (IFRS 15.121):
-        a) Contract with original duration <= 1 year → not required to disclose
-        b) Revenue recognised using right-to-invoice practical expedient → not required
-           to disclose (caller flags via practical_expedient_applied).
+        Contracts whose remaining_schedule shows all RPO within 12 months are auto-flagged
+        for the IFRS 15.121(a) practical expedient and excluded from aggregate totals.
         """
-        buckets = {
-            "within_1_year": 0.0,
-            "1_to_2_years": 0.0,
-            "2_to_5_years": 0.0,
-            "beyond_5_years": 0.0,
-        }
-
+        buckets = self._empty_rpo_buckets()
         contract_details: List[Dict[str, Any]] = []
         expedient_contracts: List[Dict[str, Any]] = []
-        total_rpo = 0.0
         expedient_count = 0
+        validation_issues: List[Dict[str, Any]] = []
+        missing_schedule_pobs: List[Dict[str, Any]] = []
+        aggregate_independent_rpo = 0.0
+        note_currency = "USD"
 
         for raw in contracts:
             c = self._normalize_rpo_contract(raw)
+            if (c.currency or "").strip():
+                note_currency = (c.currency or "USD").strip().upper()
+            reporting = parse_ifrs15_date(c.reporting_date) or date.today()
 
             if c.practical_expedient_applied:
                 expedient_count += 1
@@ -2992,42 +3863,176 @@ class IFRS15Calculator:
                         "total_transaction_price": float(c.total_transaction_price),
                         "revenue_recognised_to_date": float(c.revenue_recognised_to_date),
                         "practical_expedient_applied": True,
+                        "expedient_reason": "manual",
                     }
                 )
                 continue
 
-            rpo_this_contract = float(c.total_transaction_price) - float(c.revenue_recognised_to_date)
-            if rpo_this_contract < 0:
-                rpo_this_contract = 0.0
-
-            total_rpo += rpo_this_contract
+            legacy_contract_rpo = max(
+                0.0, float(c.total_transaction_price) - float(c.revenue_recognised_to_date)
+            )
+            pos = list(c.performance_obligations or [])
+            if not pos and legacy_contract_rpo > 1e-6:
+                pos = [
+                    {
+                        "name": "Contract",
+                        "obligation_id": "CONTRACT",
+                        "allocated_amount": float(c.total_transaction_price),
+                        "recognised_to_date": float(c.revenue_recognised_to_date),
+                    }
+                ]
 
             po_details: List[Dict[str, Any]] = []
-            for po_raw in c.performance_obligations or []:
-                po = po_raw if isinstance(po_raw, dict) else getattr(po_raw, "model_dump", lambda: {})()
-                if not isinstance(po, dict):
-                    continue
+            contract_buckets = self._empty_rpo_buckets()
+            contract_rpo = 0.0
+            independent_contract_rpo = 0.0
+
+            for po_raw in pos:
+                po = po_raw if isinstance(po_raw, dict) else {}
                 alloc = float(po.get("allocated_amount", 0) or 0)
-                rec = float(po.get("recognised_to_date", 0) or 0)
-                po_rpo = alloc - rec
-                if po_rpo < 0:
-                    po_rpo = 0.0
-
-                pattern = po.get("expected_recognition_pattern", "within_1_year")
-                if pattern in buckets:
-                    buckets[pattern] += po_rpo
-
+                rec = float(po.get("recognised_to_date", po.get("revenue_recognized", 0)) or 0)
                 po_name = po.get("name") or po.get("obligation_name") or "Performance obligation"
+                po_id = str(po.get("obligation_id") or po.get("Obligation_ID") or po_name).strip()
+                remaining_alloc = max(0.0, alloc - rec)
+                independent_contract_rpo += remaining_alloc
+
+                lines, schedule_source = self._extract_po_remaining_schedule(
+                    po, reporting, c.revenue_schedule
+                )
+                po_buckets, line_detail = self._bucket_remaining_lines(lines, reporting)
+                po_rpo = round(sum(po_buckets.values()), 2)
+                scheduled_line_total = round(sum(float(ln.get("amount", 0) or 0) for ln in line_detail), 2)
+
+                if remaining_alloc > RPO_RECONCILIATION_TOLERANCE_UNITS:
+                    if schedule_source == "none":
+                        missing_schedule_pobs.append(
+                            {
+                                "contract_id": c.contract_id,
+                                "obligation_id": po_id,
+                                "obligation_name": po_name,
+                                "reason": "missing_remaining_schedule",
+                                "remaining_alloc": round(remaining_alloc, 2),
+                            }
+                        )
+                    elif schedule_source == "fallback_end_date":
+                        missing_schedule_pobs.append(
+                            {
+                                "contract_id": c.contract_id,
+                                "obligation_id": po_id,
+                                "obligation_name": po_name,
+                                "reason": "incomplete_remaining_schedule",
+                                "remaining_alloc": round(remaining_alloc, 2),
+                            }
+                        )
+                    elif abs(remaining_alloc - scheduled_line_total) > RPO_RECONCILIATION_TOLERANCE_UNITS:
+                        missing_schedule_pobs.append(
+                            {
+                                "contract_id": c.contract_id,
+                                "obligation_id": po_id,
+                                "obligation_name": po_name,
+                                "reason": "schedule_amount_mismatch",
+                                "remaining_alloc": round(remaining_alloc, 2),
+                                "scheduled_total": scheduled_line_total,
+                            }
+                        )
+
+                if po_rpo <= 1e-6 and remaining_alloc > RPO_RECONCILIATION_TOLERANCE_UNITS:
+                    fallback_rpo = remaining_alloc
+                    end_s = (
+                        po.get("expected_end_date")
+                        or po.get("expected_completion_date")
+                        or c.contract_end
+                        or ""
+                    )
+                    end_dt = parse_ifrs15_date(end_s) or reporting
+                    bucket = rpo_bucket_key_for_date(end_dt, reporting)
+                    po_buckets[bucket] = round(po_buckets.get(bucket, 0.0) + fallback_rpo, 2)
+                    po_rpo = round(fallback_rpo, 2)
+                    line_detail = [
+                        {
+                            "expected_recognition_date": end_dt.isoformat(),
+                            "amount": po_rpo,
+                            "bucket": bucket,
+                            "fallback": True,
+                        }
+                    ]
+                    schedule_source = "fallback_end_date"
+                    validation_issues.append(
+                        {
+                            "severity": "warning",
+                            "contract_id": c.contract_id,
+                            "obligation": po_name,
+                            "code": "RPO_SCHEDULE_FALLBACK",
+                            "message": (
+                                f"No remaining_schedule lines for '{po_name}'; "
+                                f"bucketed {format_ifrs15_currency(po_rpo, c.currency)} using expected end date."
+                            ),
+                        }
+                    )
+
+                for k, v in po_buckets.items():
+                    contract_buckets[k] = round(contract_buckets.get(k, 0.0) + v, 2)
+                contract_rpo += po_rpo
+
+                pattern = max(po_buckets, key=lambda k: po_buckets[k]) if po_rpo > 1e-6 else "within_1_year"
                 po_details.append(
                     {
                         "name": po_name,
+                        "obligation_id": po_id,
                         "allocated_amount": alloc,
                         "recognised_to_date": rec,
-                        "rpo_amount": round(po_rpo, 2),
+                        "rpo_amount": po_rpo,
                         "recognition_pattern": pattern,
                         "recognition_type": po.get("recognition_type", "over_time"),
+                        "remaining_schedule": line_detail,
+                        "schedule_source": schedule_source,
                     }
                 )
+
+            contract_rpo = round(contract_rpo, 2)
+            independent_contract_rpo = round(independent_contract_rpo, 2)
+            term_months = rpo_contract_term_months(c)
+
+            if contract_rpo_within_twelve_months(
+                contract_buckets, contract_rpo, contract_term_months=term_months
+            ):
+                expedient_count += 1
+                expedient_contracts.append(
+                    {
+                        "contract_id": c.contract_id,
+                        "customer_name": c.customer_name,
+                        "contract_end": c.contract_end,
+                        "total_transaction_price": float(c.total_transaction_price),
+                        "revenue_recognised_to_date": float(c.revenue_recognised_to_date),
+                        "practical_expedient_applied": True,
+                        "expedient_reason": "auto_schedule_within_12_months",
+                        "excluded_rpo_amount": contract_rpo,
+                        "performance_obligations": po_details,
+                    }
+                )
+                continue
+
+            aggregate_independent_rpo += independent_contract_rpo
+
+            if abs(legacy_contract_rpo - contract_rpo) > RPO_RECONCILIATION_TOLERANCE_UNITS:
+                validation_issues.append(
+                    {
+                        "severity": "warning",
+                        "contract_id": c.contract_id,
+                        "code": "RPO_LEGACY_MISMATCH",
+                        "message": (
+                            f"Schedule-derived RPO {format_ifrs15_currency(contract_rpo, c.currency)} "
+                            f"differs from contract total minus recognised "
+                            f"{format_ifrs15_currency(legacy_contract_rpo, c.currency)}."
+                        ),
+                        "schedule_derived_rpo": contract_rpo,
+                        "legacy_contract_rpo": round(legacy_contract_rpo, 2),
+                        "variance": round(contract_rpo - legacy_contract_rpo, 2),
+                    }
+                )
+
+            for k, v in contract_buckets.items():
+                buckets[k] = round(buckets.get(k, 0.0) + v, 2)
 
             contract_details.append(
                 {
@@ -3036,9 +4041,31 @@ class IFRS15Calculator:
                     "contract_end": c.contract_end,
                     "total_transaction_price": float(c.total_transaction_price),
                     "revenue_recognised_to_date": float(c.revenue_recognised_to_date),
-                    "rpo_amount": round(rpo_this_contract, 2),
+                    "rpo_amount": contract_rpo,
+                    "independent_rpo": independent_contract_rpo,
+                    "practical_expedient_applied": False,
                     "performance_obligations": po_details,
                 }
+            )
+
+        bucket_sum = round(sum(buckets.values()), 2)
+        total_rpo = bucket_sum
+        independent_rounded = round_currency_unit(aggregate_independent_rpo)
+        bucket_rounded = round_currency_unit(bucket_sum)
+
+        if abs(independent_rounded - bucket_rounded) > RPO_RECONCILIATION_TOLERANCE_UNITS:
+            ui_message = build_rpo_reconciliation_ui_message(
+                aggregate_independent_rpo,
+                bucket_sum,
+                note_currency,
+                missing_schedule_pobs,
+            )
+            raise RPOReconciliationError(
+                ui_message,
+                total_rpo=float(independent_rounded),
+                bucket_sum=float(bucket_rounded),
+                currency=note_currency,
+                missing_schedule_pobs=missing_schedule_pobs,
             )
 
         disclosure_note = self._build_rpo_disclosure(
@@ -3046,16 +4073,26 @@ class IFRS15Calculator:
             buckets,
             len(contracts),
             expedient_count,
+            currency=note_currency,
         )
 
         return {
-            "total_rpo": round(total_rpo, 2),
+            "total_rpo": total_rpo,
             "buckets": {k: round(v, 2) for k, v in buckets.items()},
+            "bucket_definitions": dict(RPO_BUCKET_DEFINITIONS),
             "contract_count": len(contracts),
             "expedient_contracts_excluded": expedient_count,
             "expedient_contracts": expedient_contracts,
             "contract_details": contract_details,
             "disclosure_note": disclosure_note,
+            "disclosure_blocked": False,
+            "bucket_validation": {
+                "passed": True,
+                "total_rpo_equals_bucket_sum": True,
+                "independent_rpo": round(aggregate_independent_rpo, 2),
+                "issues": validation_issues,
+                "missing_schedule_pobs": missing_schedule_pobs,
+            },
             "ifrs_reference": "IFRS 15.120-122",
         }
 
@@ -3073,6 +4110,9 @@ class IFRS15Calculator:
                 revenue_recognised_to_date=float(raw.get("revenue_recognised_to_date", 0) or 0),
                 performance_obligations=list(pos),
                 practical_expedient_applied=bool(raw.get("practical_expedient_applied", False)),
+                currency=str(raw.get("currency", "USD") or "USD"),
+                reporting_date=str(raw.get("reporting_date", "") or ""),
+                revenue_schedule=list(raw.get("revenue_schedule") or []),
             )
         raise TypeError("RPO contract must be RPOContract or dict")
 
@@ -3082,22 +4122,24 @@ class IFRS15Calculator:
         buckets: Dict[str, float],
         total_contracts: int,
         expedient_count: int,
+        *,
+        currency: str = "USD",
     ) -> Dict[str, Any]:
         """Generates the complete IFRS 15.120 disclosure note in audit-ready text."""
         _ = total_contracts  # retained for signature parity with disclosure templates
         note_title = "Note: Remaining Performance Obligations"
+        fmt = lambda amt: format_ifrs15_currency(amt, currency)
 
         para_1 = (
             f"As at the reporting date, the aggregate amount of the transaction price allocated "
             f"to performance obligations that are unsatisfied or partially unsatisfied is "
-            f"${total_rpo:,.0f}."
+            f"{fmt(total_rpo)}."
         )
 
         if expedient_count > 0:
             para_1 += (
-                f" This amount excludes contracts with an original expected duration of one "
-                f"year or less, for which the entity has applied the practical expedient in "
-                f"IFRS 15.121(a) ({expedient_count} contract(s))."
+                f" This amount excludes {expedient_count} contract(s) for which the practical "
+                f"expedient in IFRS 15.121(a) has been applied (see below)."
             )
 
         para_2_lines = [
@@ -3109,9 +4151,9 @@ class IFRS15Calculator:
             "2_to_5_years": "2 to 5 years",
             "beyond_5_years": "Beyond 5 years",
         }
-        for k, label in bucket_labels.items():
-            para_2_lines.append(f"  {label}: ${buckets[k]:,.0f}")
-        para_2_lines.append(f"  Total: ${total_rpo:,.0f}")
+        for k in RPO_BUCKET_KEYS:
+            para_2_lines.append(f"  {bucket_labels[k]}: {fmt(buckets.get(k, 0.0))}")
+        para_2_lines.append(f"  Total: {fmt(total_rpo)}")
 
         para_3 = (
             "The amounts disclosed above include fixed consideration and variable consideration "
@@ -3119,12 +4161,21 @@ class IFRS15Calculator:
             "requirements of IFRS 15.56-58. Variable consideration that has been constrained is excluded."
         )
 
+        para_expedient = RPO_PRACTICAL_EXPEDIENT_NOTE if expedient_count > 0 else ""
+
+        full_parts = [note_title, para_1, "\n".join(para_2_lines), para_3]
+        if para_expedient:
+            full_parts.append(para_expedient)
+
         return {
             "title": note_title,
             "paragraph_1": para_1,
             "paragraph_2": "\n".join(para_2_lines),
             "paragraph_3": para_3,
-            "full_text": "\n\n".join([note_title, para_1, "\n".join(para_2_lines), para_3]),
+            "paragraph_expedient": para_expedient,
+            "full_text": "\n\n".join(full_parts),
+            "currency": (currency or "USD").strip().upper(),
+            "bucket_definitions": dict(RPO_BUCKET_DEFINITIONS),
         }
 
     def assess_principal_agent(self, data: PrincipalAgentInput) -> Dict[str, Any]:
@@ -3136,6 +4187,31 @@ class IFRS15Calculator:
         all indicators are considered together. Control is the key determinant — indicators
         are evidence of control, not a scoring system. Professional judgement is required.
         """
+        if not bool(data.third_party_involved):
+            return {
+                "conclusion": "NOT_APPLICABLE",
+                "assessment_status": "not_applicable",
+                "confidence": "N/A",
+                "revenue_treatment": "N/A",
+                "gross_contract_value": float(data.gross_contract_value),
+                "third_party_cost": float(data.third_party_cost or 0),
+                "net_margin": float(data.gross_contract_value),
+                "revenue_amount": float(data.gross_contract_value),
+                "cost_amount": 0.0,
+                "principal_indicators": 0,
+                "agent_indicators": 0,
+                "indicators": {},
+                "journal_entries": [],
+                "judgement_memo_required": False,
+                "explanation": (
+                    "Not applicable — no third party identified in this contract arrangement. "
+                    "Principal vs Agent assessment applies only when the entity arranges goods or "
+                    "services from a third party on behalf of the customer (IFRS 15.B34)."
+                ),
+                "ifrs_reference": "IFRS 15.B34-B38",
+            }
+
+        third_party_cost = float(data.third_party_cost or 0)
         indicators = {
             "controls_before_transfer": bool(data.controls_before_transfer),
             "primary_obligor": bool(data.primary_obligor),
@@ -3152,33 +4228,57 @@ class IFRS15Calculator:
             confidence = "HIGH"
             revenue_treatment = "GROSS"
             revenue_amount = float(data.gross_contract_value)
-            cost_amount = float(data.third_party_cost)
+            cost_amount = third_party_cost
         elif (not data.controls_before_transfer) and principal_indicators <= 1:
             conclusion = "AGENT"
             confidence = "HIGH"
             revenue_treatment = "NET"
-            revenue_amount = float(data.gross_contract_value) - float(data.third_party_cost)
+            revenue_amount = float(data.gross_contract_value) - third_party_cost
             cost_amount = 0.0
         elif principal_indicators >= 4:
             conclusion = "PRINCIPAL"
             confidence = "MEDIUM"
             revenue_treatment = "GROSS"
             revenue_amount = float(data.gross_contract_value)
-            cost_amount = float(data.third_party_cost)
+            cost_amount = third_party_cost
         elif agent_indicators >= 4:
             conclusion = "AGENT"
             confidence = "MEDIUM"
             revenue_treatment = "NET"
-            revenue_amount = float(data.gross_contract_value) - float(data.third_party_cost)
+            revenue_amount = float(data.gross_contract_value) - third_party_cost
             cost_amount = 0.0
         else:
             conclusion = "JUDGEMENT REQUIRED"
             confidence = "LOW"
             revenue_treatment = "UNCERTAIN"
             revenue_amount = float(data.gross_contract_value)
-            cost_amount = float(data.third_party_cost)
+            cost_amount = third_party_cost
 
-        net_margin = float(data.gross_contract_value) - float(data.third_party_cost)
+        if conclusion == "AGENT" and third_party_cost <= 1e-6:
+            return {
+                "conclusion": "BLOCKED",
+                "assessment_status": "blocked_missing_third_party_cost",
+                "confidence": "N/A",
+                "revenue_treatment": "N/A",
+                "gross_contract_value": float(data.gross_contract_value),
+                "third_party_cost": 0.0,
+                "net_margin": 0.0,
+                "revenue_amount": 0.0,
+                "cost_amount": 0.0,
+                "principal_indicators": principal_indicators,
+                "agent_indicators": agent_indicators,
+                "indicators": indicators,
+                "journal_entries": [],
+                "judgement_memo_required": True,
+                "explanation": (
+                    "Principal vs Agent assessment cannot produce meaningful NET revenue until "
+                    "third-party consideration is entered. Agent conclusion was indicated by "
+                    f"{agent_indicators}/5 indicators, but third-party cost is blank or zero."
+                ),
+                "ifrs_reference": "IFRS 15.B34-B38",
+            }
+
+        net_margin = float(data.gross_contract_value) - third_party_cost
 
         indicator_labels = {
             "controls_before_transfer": (
@@ -3199,15 +4299,16 @@ class IFRS15Calculator:
             explanation = (
                 f"The entity is acting as a PRINCIPAL. {principal_indicators} of 5 principal indicators are present, "
                 f"including the key indicator of control before transfer. Under IFRS 15.B35, revenue is recognised on "
-                f"a GROSS basis at the full contract value of ${data.gross_contract_value:,.2f}. The third-party cost of "
-                f"${data.third_party_cost:,.2f} is recognised as cost of sales."
+                f"a GROSS basis at the full contract value of {format_ifrs15_currency(float(data.gross_contract_value), data.currency)}. "
+                f"The third-party cost of {format_ifrs15_currency(float(data.third_party_cost), data.currency)} is recognised as cost of sales."
             )
         elif conclusion == "AGENT":
             explanation = (
                 f"The entity is acting as an AGENT. Only {principal_indicators} of 5 principal indicators are present "
                 f"and the entity does not control the good/service before transfer. Under IFRS 15.B36, revenue is recognised "
-                f"on a NET basis at the commission/margin of ${net_margin:,.2f} (${data.gross_contract_value:,.2f} less "
-                f"${data.third_party_cost:,.2f})."
+                f"on a NET basis at the commission/margin of {format_ifrs15_currency(net_margin, data.currency)} "
+                f"({format_ifrs15_currency(float(data.gross_contract_value), data.currency)} less "
+                f"{format_ifrs15_currency(float(data.third_party_cost), data.currency)})."
             )
         else:
             explanation = (
@@ -3296,6 +4397,24 @@ class IFRS15Calculator:
             if not isinstance(raw, ContractCostInput):
                 raise TypeError("calculate_contract_costs expects ContractCostInput instances")
             c = raw
+
+            if float(c.cost_amount) <= 1e-6:
+                results.append(
+                    {
+                        "cost_id": c.cost_id,
+                        "contract_id": c.contract_id,
+                        "description": c.description,
+                        "assessed": False,
+                        "treatment": "NOT_ASSESSED",
+                        "reason": "No contract costs assessed for this contract.",
+                        "cost_amount": 0.0,
+                        "asset_balance": 0.0,
+                        "total_amortised": 0.0,
+                        "amortisation_schedule": [],
+                        "journal_entries": [],
+                    }
+                )
+                continue
 
             start = datetime.strptime(c.contract_start[:10], "%Y-%m-%d").date()
             end = datetime.strptime(c.contract_end[:10], "%Y-%m-%d").date()
@@ -3439,7 +4558,13 @@ class IFRS15Calculator:
 
             results.append(item)
 
+        any_assessed = any(
+            r.get("treatment") not in ("NOT_ASSESSED",) and r.get("assessed") is not False
+            for r in results
+        )
+
         return {
+            "assessed": any_assessed,
             "costs": results,
             "summary": {
                 "total_costs_assessed": len(costs),
@@ -3453,6 +4578,37 @@ class IFRS15Calculator:
 
     def assess_license_ip(self, data: LicenseIPInput) -> Dict[str, Any]:
         """IFRS 15.B52-B63 — licences of intellectual property (right to use vs right to access)."""
+        combined = f"{data.license_description or ''} {data.product_name or ''}".lower()
+        non_ip_terms = (
+            "construction",
+            "management service",
+            "consulting",
+            "implementation",
+            "professional service",
+            "off-plan",
+            "residential",
+            "handover",
+        )
+        has_ip_signal = bool(
+            re.search(r"\b(software\s+)?licen[cs]e\b|intellectual\s+property|\bip\b|patent|copyright", combined)
+        )
+        if any(term in combined for term in non_ip_terms) and not has_ip_signal:
+            return {
+                "license_id": data.license_id,
+                "license_type": "NOT_APPLICABLE",
+                "assessment_status": "not_applicable",
+                "recognition": "N/A",
+                "license_fee": float(data.license_fee),
+                "revenue_amount": 0.0,
+                "recognition_schedule": [],
+                "journal_entries": [],
+                "explanation": (
+                    "Not applicable — no license obligation identified. "
+                    "Licence of IP assessment applies only when Step 2 identifies an IP/software licence performance obligation."
+                ),
+                "ifrs_reference": "IFRS 15.B52-B63",
+            }
+
         indicator_labels = {
             "entity_activities_affect_ip": (
                 "Entity's ongoing activities significantly affect the IP (IFRS 15.B58a)"
@@ -3963,6 +5119,55 @@ class IFRS15Calculator:
         If any criterion fails → DEFER REVENUE
         until physical delivery.
         """
+        combined = f"{data.product_description or ''}".lower()
+        service_only_terms = (
+            "construction",
+            "management service",
+            "site supervision",
+            "supervision",
+            "consulting",
+            "professional service",
+            "advisory",
+            "implementation",
+        )
+        goods_terms = (
+            "goods",
+            "equipment",
+            "inventory",
+            "materials",
+            "machinery",
+            "physical product",
+            "deliverable unit",
+        )
+        has_goods = any(t in combined for t in goods_terms) or bool(
+            re.search(r"\b(product|unit)s?\b", combined) and "service" not in combined
+        )
+
+        if not combined.strip() or (any(t in combined for t in service_only_terms) and not has_goods):
+            return {
+                "arrangement_id": data.arrangement_id,
+                "contract_id": data.contract_id,
+                "customer_name": data.customer_name,
+                "product_description": data.product_description,
+                "contract_value": float(data.contract_value),
+                "billing_date": data.billing_date,
+                "expected_delivery_date": data.expected_delivery_date,
+                "conclusion": "NOT_APPLICABLE",
+                "assessment_status": "not_applicable",
+                "criteria_met_count": 0,
+                "criteria": {},
+                "failed_criteria": [],
+                "journal_entries": [],
+                "explanation": (
+                    "Not applicable — bill-and-hold arrangements under IFRS 15.B79–B82 apply only "
+                    "when identifiable goods are produced but await physical transfer. "
+                    "Pure services arrangements (e.g. construction management, supervision, consulting) "
+                    "do not involve goods pending delivery."
+                ),
+                "disclosure_required": False,
+                "ifrs_reference": "IFRS 15.B79-B82",
+            }
+
         criteria: Dict[str, Dict[str, Any]] = {
             "a_reason_substantive": {
                 "met": data.reason_is_substantive,
@@ -4132,6 +5337,26 @@ class IFRS15Calculator:
             "ifrs_reference": "IFRS 15.B79-B82",
         }
 
+    def _schedule_has_periodic_recognition(self, revenue_schedule: List[Dict[str, Any]]) -> bool:
+        """
+        True when any single performance obligation has 2+ scheduled recognition dates.
+
+        Distinguishes recurring over-time recognition (block lump-sum financing PV)
+        from multiple point-in-time obligations each with one delivery date.
+        """
+        by_ob: Dict[str, set] = {}
+        for row in revenue_schedule or []:
+            if not isinstance(row, dict):
+                continue
+            scheduled = float(row.get("Scheduled_Revenue", row.get("scheduled_revenue", 0)) or 0)
+            if scheduled <= 1e-6:
+                continue
+            oid = str(row.get("Obligation_ID") or row.get("obligation_id") or "_CONTRACT")
+            d = str(row.get("Date") or row.get("date") or "")[:10]
+            if d:
+                by_ob.setdefault(oid, set()).add(d)
+        return any(len(periods) >= 2 for periods in by_ob.values())
+
     def calculate_financing_component(
         self, data: FinancingComponentInput
     ) -> Dict[str, Any]:
@@ -4146,6 +5371,33 @@ class IFRS15Calculator:
         5. Build amortisation schedule for
            interest recognition
         """
+        if self._schedule_has_periodic_recognition(list(data.revenue_schedule or [])):
+            cur = data.currency or "USD"
+            nominal = float(data.contract_value)
+            return {
+                "contract_id": data.contract_id,
+                "description": (data.description or "").strip(),
+                "assessment_status": "blocked_schedule_conflict",
+                "blocked": True,
+                "practical_expedient_applied": False,
+                "explanation": (
+                    "Significant financing component cannot be applied as a single lump-sum present value "
+                    "when the main revenue engine already uses periodic schedule-based recognition. "
+                    f"Discounting must be applied per billing/payment period aligned to the revenue schedule, "
+                    f"not as one deferred payment of {format_ifrs15_currency(nominal, cur)} at contract inception."
+                ),
+                "revenue_amount": 0.0,
+                "financing_amount": 0.0,
+                "financing_type": "NONE",
+                "pv_of_payment": 0.0,
+                "nominal_payment": nominal,
+                "transfer_date": data.transfer_date,
+                "payment_date": data.payment_date,
+                "amortisation_schedule": [],
+                "journal_entries": [],
+                "ifrs_reference": "IFRS 15.60-65",
+            }
+
         transfer_d = datetime.strptime(
             data.transfer_date.strip()[:10], "%Y-%m-%d"
         ).date()
@@ -4170,6 +5422,7 @@ class IFRS15Calculator:
 
         practical_expedient = period_months <= 12
         nominal = float(data.contract_value)
+        cur = data.currency or "USD"
 
         if practical_expedient:
             return {
@@ -4185,7 +5438,7 @@ class IFRS15Calculator:
                     f"payment ({data.payment_date}) is "
                     f"{period_months} months (≤ 12 months). "
                     f"No adjustment for financing component "
-                    f"required. Revenue = ${nominal:,.2f}."
+                    f"required. Revenue = {format_ifrs15_currency(nominal, cur)}."
                 ),
                 "revenue_amount": nominal,
                 "financing_amount": 0.0,
@@ -4221,16 +5474,16 @@ class IFRS15Calculator:
             financing_type = "INTEREST_EXPENSE"
             revenue_amount = pv
             explanation = (
-                f"The customer pays ${nominal:,.2f} "
+                f"The customer pays {format_ifrs15_currency(nominal, cur)} "
                 f"in ADVANCE ({data.payment_date}), "
                 f"{period_months} months before goods/services "
                 f"are transferred ({data.transfer_date}). "
                 f"The customer is providing financing to "
                 f"the entity. Under IFRS 15.62, revenue is "
                 f"recognised at the CASH EQUIVALENT selling "
-                f"price = PV of ${pv:,.2f}. "
+                f"price = PV of {format_ifrs15_currency(pv, cur)}. "
                 f"The financing benefit of "
-                f"${financing_amount:,.2f} is recognised as "
+                f"{format_ifrs15_currency(financing_amount, cur)} is recognised as "
                 f"INTEREST EXPENSE over the advance period "
                 f"using the {data.discount_rate}% discount rate."
             )
@@ -4238,16 +5491,16 @@ class IFRS15Calculator:
             financing_type = "INTEREST_INCOME"
             revenue_amount = pv
             explanation = (
-                f"The customer pays ${nominal:,.2f} "
+                f"The customer pays {format_ifrs15_currency(nominal, cur)} "
                 f"on a DEFERRED basis ({data.payment_date}), "
                 f"{period_months} months after goods/services "
                 f"are transferred ({data.transfer_date}). "
                 f"The entity is providing financing to "
                 f"the customer. Under IFRS 15.61, revenue is "
                 f"recognised at the PRESENT VALUE = "
-                f"${pv:,.2f}. "
+                f"{format_ifrs15_currency(pv, cur)}. "
                 f"The financing component of "
-                f"${financing_amount:,.2f} is recognised as "
+                f"{format_ifrs15_currency(financing_amount, cur)} is recognised as "
                 f"INTEREST INCOME over the payment period "
                 f"using the {data.discount_rate}% discount rate."
             )
@@ -4581,6 +5834,21 @@ class IFRS15Calculator:
         entry["notes"] = notes or ""
         return entry
 
+    def _vc_context_from_contract(self, contract: IFRS15Input) -> Dict[str, Any]:
+        methods = [str(ob.recognition_method or "").lower() for ob in contract.performance_obligations]
+        rec_type = "over_time" if any("over" in m for m in methods) else "point_in_time"
+        tp_est = float(contract.fixed_consideration + contract.variable_consideration)
+        return {
+            "contract_term_months": int(contract.contract_term_months or 12),
+            "total_contract_value": tp_est,
+            "recognition_type": rec_type,
+            "historical_attainment_pct": getattr(contract, "historical_attainment_pct", None),
+            "refund_type": getattr(contract, "refund_type", "none") or "none",
+            "customer_type": getattr(contract, "customer_type_profile", "") or "",
+            "has_external_dependency": bool(getattr(contract, "has_external_dependency", False)),
+            "dependency_level": getattr(contract, "dependency_level", "low") or "low",
+        }
+
     def calculate_transaction_price(self, contract: IFRS15Input) -> Decimal:
         """
         IFRS 15 Step 3: Determine transaction price.
@@ -4591,6 +5859,7 @@ class IFRS15Calculator:
             float(vc_raw),
             contract.vc_constraint_factors or {},
             currency=contract.currency,
+            **self._vc_context_from_contract(contract),
         )
         vc_from_factors = Decimal(str(factor_result["constrained_amount"])).quantize(
             Decimal("0.01")
@@ -5038,14 +6307,52 @@ class IFRS15Calculator:
     def _is_license_obligation(self, ob: PerformanceObligation) -> bool:
         d = (ob.description or "").lower()
         oid = (ob.obligation_id or "").lower()
+        non_ip = (
+            "construction",
+            "management service",
+            "consulting",
+            "implementation",
+            "professional service",
+            "off-plan",
+            "residential unit",
+            "handover",
+        )
+        if any(term in d for term in non_ip):
+            return False
         return bool(
             re.search(
-                r"\b(software\s+)?licen[cs]e\b|licence\s+of\s+ip|ip\s+licen[cs]e|perpetual\s+licen[cs]e|subscription\s+licen[cs]e",
+                r"\b(software\s+)?licen[cs]e\b|licence\s+of\s+ip|ip\s+licen[cs]e|perpetual\s+licen[cs]e|subscription\s+licen[cs]e|"
+                r"right\s+to\s+(use|access)\s+.*\b(ip|intellectual\s+property|software|patent|copyright)\b",
                 d,
             )
+            or re.search(r"\b(ip|software)\s+licen[cs]e\b", d)
             or "license" in oid
             or "licence" in oid
         )
+
+    @staticmethod
+    def _license_obligation_present(obligations: List[PerformanceObligation]) -> bool:
+        for ob in obligations:
+            d = (ob.description or "").lower()
+            oid = (ob.obligation_id or "").lower()
+            non_ip = (
+                "construction",
+                "management service",
+                "consulting",
+                "implementation",
+                "professional service",
+                "off-plan",
+                "residential unit",
+                "handover",
+            )
+            if any(term in d for term in non_ip):
+                continue
+            if re.search(
+                r"\b(software\s+)?licen[cs]e\b|licence\s+of\s+ip|ip\s+licen[cs]e",
+                d,
+            ) or "license" in oid or "licence" in oid:
+                return True
+        return False
 
     def _is_support_obligation(self, ob: PerformanceObligation) -> bool:
         d = (ob.description or "").lower()
@@ -5765,6 +7072,10 @@ class IFRS15Calculator:
             if rec_dt and recognition_method == "point_in_time":
                 po_row['recognition_date'] = rec_dt.strftime("%Y-%m-%d")
                 po_row['transfer_date'] = rec_dt.strftime("%Y-%m-%d")
+            if getattr(ob, "distinct_assessment", None):
+                po_row["distinct_assessment"] = ob.distinct_assessment
+            if getattr(ob, "ssp_allocation_method", None):
+                po_row["ssp_allocation_method"] = ob.ssp_allocation_method
             revenue_by_obligation.append(po_row)
         
         # Remaining performance obligations
@@ -5866,6 +7177,44 @@ class IFRS15Calculator:
         
         if not contract.performance_obligations:
             raise ValueError("No performance obligations defined")
+
+        raw_obs = [
+            {
+                "obligation_id": ob.obligation_id,
+                "description": ob.description,
+                "standalone_selling_price": float(ob.standalone_selling_price),
+                "recognition_method": ob.recognition_method,
+                "duration_months": ob.duration_months,
+                "is_distinct": getattr(ob, "is_distinct", None),
+                "bundled_with": getattr(ob, "bundled_with", None),
+                "distinct_assessment": ob.distinct_assessment,
+            }
+            for ob in contract.performance_obligations
+        ]
+        prior_by_id = {ob.obligation_id: ob for ob in contract.performance_obligations}
+        tp_preview = float(
+            contract.fixed_consideration + contract.variable_consideration - contract.discounts - contract.rebates
+        )
+        normalized_obs, obligation_normalization_audit = normalize_implicit_performance_obligations(
+            raw_obs,
+            tp_preview,
+            contract_term_months=int(contract.contract_term_months or 12),
+        )
+        contract.performance_obligations = [
+            PerformanceObligation(
+                obligation_id=str(o["obligation_id"]),
+                description=str(o["description"]),
+                standalone_selling_price=Decimal(str(o.get("standalone_selling_price", 0))),
+                recognition_method=str(o.get("recognition_method") or "over_time"),
+                duration_months=int(o.get("duration_months") or 12),
+                transfer_date=getattr(prior_by_id.get(str(o["obligation_id"])), "transfer_date", None),
+                is_distinct=o.get("is_distinct"),
+                bundled_with=o.get("bundled_with"),
+                distinct_assessment=o.get("distinct_assessment"),
+                ssp_allocation_method=o.get("ssp_allocation_method"),
+            )
+            for o in normalized_obs
+        ]
         
         # Contract-type revenue engine and overlays
         revenue_engine_result = self.calculate_revenue_by_type(contract)
@@ -5893,6 +7242,7 @@ class IFRS15Calculator:
             float(contract.variable_consideration),
             contract.vc_constraint_factors or {},
             currency=contract.currency,
+            **self._vc_context_from_contract(contract),
         )
         vc_from_factors = Decimal(str(constraint_result["constrained_amount"])).quantize(
             Decimal("0.01")
@@ -5975,7 +7325,7 @@ class IFRS15Calculator:
         revenue_schedule = self._schedule_df_to_records(recognition_schedule)
         journal_entries_list = self.flatten_journal_entries(journal_entries)
 
-        return {
+        results_payload = {
             'total_contract_value': float(transaction_price),
             'total_recognised': total_recognised,
             'total_deferred': total_deferred_val,
@@ -5987,6 +7337,13 @@ class IFRS15Calculator:
             'performance_obligations': performance_obligations,
             'ssp_allocation_table': ssp_allocation_table,
             'revenue_recognition_audit_trail': revenue_recognition_audit_trail,
+            'obligation_normalization': obligation_normalization_audit,
+            'recognition_pattern_label': recognition_pattern_label_from_results(
+                {
+                    "revenue_schedule": revenue_schedule,
+                    "performance_obligations": performance_obligations,
+                }
+            ),
             'disclosure_notes': {
                 'accounting_policy': 'Revenue is recognised when control of promised goods or services transfers to the customer.',
                 'disaggregation_of_revenue': f"Revenue recognised to date: {float(balances.get('revenue_recognized_to_date', 0)):,.2f}.",
@@ -5997,6 +7354,7 @@ class IFRS15Calculator:
             },
             'transaction_price': float(transaction_price),
             'vc_constraint_result': constraint_result,
+            'unified_vc_assessment': constraint_result.get("unified_vc_assessment") or constraint_result,
             'variable_consideration_analysis': {
                 'raw_variable_consideration': float(contract.variable_consideration),
                 'constraint_method': contract.constraint_method,
@@ -6006,6 +7364,7 @@ class IFRS15Calculator:
                 'amount_excluded': float(vc_reversed),
                 'constraint_applied': vc_reversed > 0,
                 'vc_constraint_result': constraint_result,
+            'unified_vc_assessment': constraint_result.get("unified_vc_assessment") or constraint_result,
             },
             'allocations': {k: float(v) for k, v in allocations.items()},
             'recognition_schedule': recognition_schedule,
@@ -6027,6 +7386,16 @@ class IFRS15Calculator:
                 'standard': 'IFRS 15'
             }
         }
+        try:
+            results_payload["rpo_result"] = build_default_rpo_result(contract, results_payload)
+        except Exception:
+            def_rev = float(balances.get("contract_liability_amount", 0) or total_deferred_val)
+            results_payload["rpo_result"] = {
+                "total_rpo": round(def_rev, 2),
+                "auto_computed": True,
+                "source": "deferred_fallback",
+            }
+        return results_payload
     
     def export_to_json(self, results: Dict, filename: str):
         """Export results to JSON file"""
