@@ -8,6 +8,7 @@ import {
   type CountryMode,
 } from './lease-form-shared';
 import { FieldLabelWithExtraction } from './FieldLabelWithExtraction';
+import { ContextHelpCallout, TintedSectionCard } from './lease-form-ui';
 
 const LEASE_TYPES = [
   'Building',
@@ -59,25 +60,36 @@ export function AssetsLocationsTab({
     const nextCountry = countryForMode(mode);
     setForm((p) => ({
       ...p,
-      country: mode === 'OTHER' && p.country && !['India', 'UK', 'UAE'].includes(p.country) ? p.country : nextCountry,
-      ...(mode === 'UAE' ? { currency: p.currency || 'AED', emirate: p.emirate || 'Dubai', freeZone: p.freeZone || 'Not applicable' } : {}),
+      country:
+        mode === 'OTHER' && p.country && !['India', 'UK', 'UAE'].includes(p.country)
+          ? p.country
+          : nextCountry,
+      ...(mode === 'UAE'
+        ? { currency: p.currency || 'AED', emirate: p.emirate || 'Dubai', freeZone: p.freeZone || 'Not applicable' }
+        : {}),
     }));
     markDirty('assets');
   };
 
   return (
     <>
-      <section className="mb-6">
-        <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">
-          Asset details
-        </h4>
+      <TintedSectionCard
+        title="Asset details"
+        icon={<span className="text-violet-500">🏢</span>}
+        tintClass="bg-violet-50/50"
+        borderClass="border-violet-100"
+      >
+        <ContextHelpCallout>
+          <strong>Lease type</strong> and <strong>asset description</strong> drive ROU classification, depreciation
+          method defaults, and IBR benchmarking. Required before running Calculate.
+        </ContextHelpCallout>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
           <div>
-            <FieldLabelWithExtraction field="leaseType" extractedConfidences={extractedConfidences}>
+            <FieldLabelWithExtraction field="leaseType" extractedConfidences={extractedConfidences} required>
               Lease type
             </FieldLabelWithExtraction>
             <select
-              value={form.leaseType}
+              value={form.leaseType ?? 'Office'}
               onChange={(e) => {
                 setForm((p) => ({ ...p, leaseType: e.target.value }));
                 markDirty('assets');
@@ -91,12 +103,12 @@ export function AssetsLocationsTab({
             </select>
           </div>
           <div className="md:col-span-2">
-            <FieldLabelWithExtraction field="assetDescription" extractedConfidences={extractedConfidences}>
+            <FieldLabelWithExtraction field="assetDescription" extractedConfidences={extractedConfidences} required>
               Asset description
             </FieldLabelWithExtraction>
             <input
               type="text"
-              value={form.assetDescription}
+              value={form.assetDescription ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, assetDescription: e.target.value }));
                 markDirty('assets');
@@ -109,7 +121,7 @@ export function AssetsLocationsTab({
             <label className={labelClass}>Contract reference</label>
             <input
               type="text"
-              value={form.contractReference}
+              value={form.contractReference ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, contractReference: e.target.value }));
                 markDirty('assets');
@@ -121,7 +133,7 @@ export function AssetsLocationsTab({
             <label className={labelClass}>Brand</label>
             <input
               type="text"
-              value={form.brand}
+              value={form.brand ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, brand: e.target.value }));
                 markDirty('assets');
@@ -130,8 +142,15 @@ export function AssetsLocationsTab({
             />
           </div>
         </div>
+      </TintedSectionCard>
 
-        <p className="text-[10px] uppercase tracking-[0.05em] text-[#64748b] font-medium mb-2">Country</p>
+      <TintedSectionCard
+        title="Country & location"
+        icon={<span className="text-emerald-500">📍</span>}
+        tintClass="bg-emerald-50/40"
+        borderClass="border-emerald-100"
+      >
+        <p className="text-[10px] uppercase tracking-[0.05em] text-[#64748b] font-semibold mb-2">Country</p>
         <div className="flex flex-wrap gap-1.5 mb-3">
           {(
             [
@@ -157,23 +176,26 @@ export function AssetsLocationsTab({
         </div>
 
         {countryMode === 'UAE' && (
-          <div className="text-xs text-[#64748b] bg-amber-50 border-l-[3px] border-amber-400 rounded-r-md px-3 py-2 mb-4">
+          <ContextHelpCallout variant="tip">
             <span className="font-medium text-[#1e293b]">UAE selected: </span>
-            Currency defaults to AED. Emirate + free zone fields shown. IBR benchmark uses UAE market rates.
-          </div>
+            Currency defaults to AED. Emirate and free zone drive IBR benchmark selection and disclosure
+            geography. RERA number is required for Dubai real estate leases.
+          </ContextHelpCallout>
         )}
 
         {countryMode === 'UAE' && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
             <div className="flex flex-col gap-1">
-              <label className="text-[10px] font-medium uppercase text-[#64748b]">Emirate *</label>
+              <label className="text-[10px] font-bold uppercase text-gray-800">
+                Emirate <span className="text-[#DC2626] font-bold text-sm">*</span>
+              </label>
               <select
                 value={form.emirate || 'Dubai'}
                 onChange={(e) => {
                   setForm((p) => ({ ...p, emirate: e.target.value }));
                   markDirty('assets');
                 }}
-                className="text-xs border border-[#e2e8f0] rounded-lg p-2"
+                className={inputClass}
               >
                 {EMIRATES.map((e) => (
                   <option key={e}>{e}</option>
@@ -181,27 +203,27 @@ export function AssetsLocationsTab({
               </select>
             </div>
             <div className="flex flex-col gap-1">
-              <label className="text-[10px] font-medium uppercase text-[#64748b]">Area / district</label>
+              <label className={labelClass}>Area / district</label>
               <input
                 type="text"
                 placeholder="e.g. Downtown Dubai, DIFC, Business Bay"
-                value={form.areaDistrict || ''}
+                value={form.areaDistrict ?? ''}
                 onChange={(e) => {
                   setForm((p) => ({ ...p, areaDistrict: e.target.value }));
                   markDirty('assets');
                 }}
-                className="text-xs border border-[#e2e8f0] rounded-lg p-2"
+                className={inputClass}
               />
             </div>
             <div className="flex flex-col gap-1">
-              <label className="text-[10px] font-medium uppercase text-[#64748b]">Free zone</label>
+              <label className={labelClass}>Free zone</label>
               <select
                 value={form.freeZone || 'Not applicable'}
                 onChange={(e) => {
                   setForm((p) => ({ ...p, freeZone: e.target.value }));
                   markDirty('assets');
                 }}
-                className="text-xs border border-[#e2e8f0] rounded-lg p-2"
+                className={inputClass}
               >
                 {FREE_ZONES.map((fz) => (
                   <option key={fz}>{fz}</option>
@@ -209,18 +231,16 @@ export function AssetsLocationsTab({
               </select>
             </div>
             <div className="flex flex-col gap-1">
-              <label className="text-[10px] font-medium uppercase text-[#64748b]">
-                RERA registration no
-              </label>
+              <label className={labelClass}>RERA registration no</label>
               <input
                 type="text"
                 placeholder="e.g. DLD-2022-001234"
-                value={form.reraRegistrationNo || ''}
+                value={form.reraRegistrationNo ?? ''}
                 onChange={(e) => {
                   setForm((p) => ({ ...p, reraRegistrationNo: e.target.value }));
                   markDirty('assets');
                 }}
-                className="text-xs border border-[#e2e8f0] rounded-lg p-2"
+                className={inputClass}
               />
               <span className="text-[10px] text-[#64748b]">Dubai Land Dept / RERA number</span>
             </div>
@@ -233,7 +253,7 @@ export function AssetsLocationsTab({
               <label className={labelClass}>Country name</label>
               <input
                 type="text"
-                value={form.country || ''}
+                value={form.country ?? ''}
                 onChange={(e) => {
                   setForm((p) => ({ ...p, country: e.target.value }));
                   markDirty('assets');
@@ -248,7 +268,7 @@ export function AssetsLocationsTab({
             </FieldLabelWithExtraction>
             <input
               type="text"
-              value={form.city}
+              value={form.city ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, city: e.target.value }));
                 markDirty('assets');
@@ -263,7 +283,7 @@ export function AssetsLocationsTab({
             </FieldLabelWithExtraction>
             <input
               type="text"
-              value={form.location}
+              value={form.location ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, location: e.target.value }));
                 markDirty('assets');
@@ -276,7 +296,7 @@ export function AssetsLocationsTab({
             <label className={labelClass}>Floor / unit no</label>
             <input
               type="text"
-              value={form.floorUnit}
+              value={form.floorUnit ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, floorUnit: e.target.value }));
                 markDirty('assets');
@@ -285,18 +305,21 @@ export function AssetsLocationsTab({
             />
           </div>
         </div>
-      </section>
+      </TintedSectionCard>
 
-      <details className="mb-6 border border-[#e2e8f0] rounded-lg overflow-hidden">
-        <summary className="px-4 py-3 bg-[#f8fafc] text-sm font-medium cursor-pointer">
+      <details className="mb-6 border border-[#e2e8f0] rounded-xl overflow-hidden bg-slate-50">
+        <summary className="px-4 py-3 bg-white/60 text-sm font-semibold text-[#1e293b] cursor-pointer">
           Additional details
+          <span className="block text-[10px] font-normal text-[#64748b] mt-0.5">
+            GL codes, useful life & depreciation method
+          </span>
         </summary>
-        <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 border-t border-[#e2e8f0] bg-white/50">
           <div>
             <label className={labelClass}>Useful life (months)</label>
             <input
               type="number"
-              value={form.usefulLifeMonths}
+              value={form.usefulLifeMonths ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, usefulLifeMonths: e.target.value }));
                 markDirty('assets');
@@ -307,7 +330,7 @@ export function AssetsLocationsTab({
           <div>
             <label className={labelClass}>Depreciation method</label>
             <select
-              value={form.depreciationMethod}
+              value={form.depreciationMethod ?? 'Straight Line'}
               onChange={(e) => {
                 setForm((p) => ({ ...p, depreciationMethod: e.target.value }));
                 markDirty('assets');
@@ -323,7 +346,7 @@ export function AssetsLocationsTab({
             <label className={labelClass}>ROU asset GL code</label>
             <input
               type="text"
-              value={form.rouGlCode}
+              value={form.rouGlCode ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, rouGlCode: e.target.value }));
                 markDirty('assets');
@@ -335,7 +358,7 @@ export function AssetsLocationsTab({
             <label className={labelClass}>Lease liability GL code</label>
             <input
               type="text"
-              value={form.liabilityGlCode}
+              value={form.liabilityGlCode ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, liabilityGlCode: e.target.value }));
                 markDirty('assets');
@@ -347,7 +370,7 @@ export function AssetsLocationsTab({
             <label className={labelClass}>Interest expense GL code</label>
             <input
               type="text"
-              value={form.interestGlCode}
+              value={form.interestGlCode ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, interestGlCode: e.target.value }));
                 markDirty('assets');
@@ -359,7 +382,7 @@ export function AssetsLocationsTab({
             <label className={labelClass}>Depreciation GL code</label>
             <input
               type="text"
-              value={form.depreciationGlCode}
+              value={form.depreciationGlCode ?? ''}
               onChange={(e) => {
                 setForm((p) => ({ ...p, depreciationGlCode: e.target.value }));
                 markDirty('assets');

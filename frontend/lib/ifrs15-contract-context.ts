@@ -160,15 +160,153 @@ export function buildIfrs15ContractFromCalculate(input: {
         (results.contract_balances as Record<string, unknown> | undefined)?.contract_liability_amount ??
         0,
     ),
-    performance_obligations: Array.isArray(payload.performance_obligations)
-      ? (payload.performance_obligations as Array<Record<string, unknown>>)
-      : [],
+    performance_obligations: Array.isArray(results?.performance_obligations)
+      ? (results.performance_obligations as Array<Record<string, unknown>>)
+      : Array.isArray(payload.performance_obligations)
+        ? (payload.performance_obligations as Array<Record<string, unknown>>)
+        : [],
     core_results: results,
     extraction_raw: extractedData ?? null,
     saved_at: new Date().toISOString(),
     source: 'calculate',
     assessments: {},
   };
+}
+
+function buildRemainingScheduleLines(
+  schedule: Array<Record<string, unknown>>,
+  po: { obligation_id?: string; name?: string },
+): { expected_recognition_date: string; amount: number }[] {
+  const poId = String(po.obligation_id || '').trim();
+  const poName = String(po.name || '').trim().toLowerCase();
+  const lines: { expected_recognition_date: string; amount: number }[] = [];
+
+  for (const row of schedule) {
+    const rowObId = String(row.Obligation_ID || row.obligation_id || '').trim();
+    const rowOb = String(row.Obligation || row.obligation || '').trim().toLowerCase();
+    const matches =
+      (poId && rowObId === poId) ||
+      (!poId && poName && rowOb && (rowOb.includes(poName) || poName.includes(rowOb)));
+    if (!matches) continue;
+
+    const scheduled = Number(row.Scheduled_Revenue ?? row.scheduled_revenue ?? 0) || 0;
+    const recognised = Number(row.Revenue ?? row.revenue ?? 0) || 0;
+    const remaining = scheduled - recognised;
+    if (remaining <= 0.01) continue;
+
+    const dateStr = String(row.Date || row.date || row.expected_recognition_date || '').slice(0, 10);
+    if (!dateStr) continue;
+
+    lines.push({
+      expected_recognition_date: dateStr,
+      amount: Math.round(remaining * 100) / 100,
+    });
+  }
+  return lines;
+}
+
+/** Build RPO 120 performance-obligation rows from Step 5 calculate results (multi-POB safe). */
+export function buildRpo120PerformanceObligationsFromResults(
+  results?: Record<string, unknown> | null,
+  schedule: Array<Record<string, unknown>> = [],
+): Array<Record<string, unknown>> {
+  const perfObs = Array.isArray(results?.performance_obligations)
+    ? (results.performance_obligations as Array<Record<string, unknown>>)
+    : [];
+  if (!perfObs.length) return [];
+
+  return perfObs.map((p, i) => {
+    const poId = String(p.obligation_id || `PO-${i + 1}`);
+    const poName = String(p.obligation || p.description || poId);
+    const recMethod = String(p.recognition_method || '').toLowerCase();
+    return {
+      name: poName,
+      obligation_id: poId,
+      allocated_amount: Number(p.allocated_amount ?? 0),
+      recognised_to_date: Number(
+        p.revenue_recognized ?? p.revenue_recognised ?? p.recognised_to_date ?? 0,
+      ),
+      expected_recognition_pattern: 'within_1_year',
+      recognition_type: recMethod.includes('point') ? 'point_in_time' : 'over_time',
+      remaining_schedule: buildRemainingScheduleLines(schedule, { obligation_id: poId, name: poName }),
+    };
+  });
+}
+
+const MOD_TYPE_NAMES: Record<string, string> = {
+  TYPE_1: 'New Separate Contract',
+  TYPE_2: 'Prospective Modification',
+  TYPE_3: 'Cumulative Catch-Up',
+};
+
+/** Sync modification module from extraction when main calc already reflects a modification. */
+export function buildModificationAssessmentFromExtraction(
+  extractedData?: Record<string, unknown> | null,
+  results?: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  const mods = (extractedData as { contract_modifications?: Record<string, unknown> } | null)
+    ?.contract_modifications;
+  if (!mods?.modifications_present) return null;
+
+  const details = mods.modification_details;
+  if (!Array.isArray(details) || details.length === 0) return null;
+
+  const perfCount = Array.isArray(results?.performance_obligations)
+    ? results.performance_obligations.length
+    : 0;
+  const primary =
+    details.find(
+      (d: Record<string, unknown>) => d.accounting_treatment === 'separate_contract',
+    ) || details[0];
+
+  const treatmentMap: Record<string, string> = {
+    separate_contract: 'TYPE_1',
+    prospective: 'TYPE_2',
+    cumulative_catch_up: 'TYPE_3',
+  };
+  const modType =
+    treatmentMap[String((primary as Record<string, unknown>).accounting_treatment || '')] || 'TYPE_1';
+
+  return {
+    modification_type: modType,
+    modification_type_name: MOD_TYPE_NAMES[modType] || 'Contract Modification',
+    auto_computed: true,
+    source: 'main_calculation',
+    explanation: String((primary as Record<string, unknown>).description || ''),
+    price_change: Number((primary as Record<string, unknown>).price_change ?? 0),
+    scope_change: String((primary as Record<string, unknown>).scope_change || ''),
+    modification_date: String((primary as Record<string, unknown>).modification_date || ''),
+    modifications_in_contract: details.length,
+    applied_in_schedule: perfCount > 1,
+  };
+}
+
+/** Bill-and-hold applies to goods pending physical transfer — not pure services contracts. */
+export function contractInvolvesBillAndHoldGoods(
+  extractedData?: Record<string, unknown> | null,
+): boolean {
+  const obligations =
+    (extractedData as { step2_performance_obligations?: { identified_obligations?: Array<Record<string, unknown>> } })
+      ?.step2_performance_obligations?.identified_obligations || [];
+  if (!obligations.length) return false;
+
+  const goodsPattern =
+    /\b(goods?|equipment|inventory|materials?|machinery|vehicles?|appliances?|physical\s+product|deliverable\s+units?)\b/i;
+  return obligations.some((ob) => goodsPattern.test(String(ob?.description || '')));
+}
+
+export function contractCostsBatchNotAssessed(batch: Record<string, unknown> | null | undefined): boolean {
+  if (!batch) return true;
+  if (batch.assessed === false) return true;
+  const costs = batch.costs;
+  if (!Array.isArray(costs) || costs.length === 0) return true;
+  return costs.every(
+    (c) =>
+      c &&
+      typeof c === 'object' &&
+      ((c as Record<string, unknown>).assessed === false ||
+        (c as Record<string, unknown>).treatment === 'NOT_ASSESSED'),
+  );
 }
 
 export function buildIfrs15ContractFromPortfolio(row: Record<string, unknown>): Ifrs15ContractContext {

@@ -767,6 +767,7 @@ class IFRS15ContractCostsRequest(BaseModel):
     contract_term_months: Optional[int] = None
     contract_total_value: Optional[float] = None
     contract_id: Optional[str] = None
+    currency: str = "USD"
     costs: List[ContractCostLineRequest] = Field(default_factory=list)
 
 
@@ -3252,12 +3253,16 @@ async def ifrs15_contract_costs(request: IFRS15ContractCostsRequest):
             result = calculator.calculate_contract_costs(inputs)
             cid = request.costs[0].contract_id if request.costs else "MULTI"
             summ = result.get("summary") or {}
+            batch_currency = str(
+                (request.costs[0].currency if request.costs else None) or request.currency or "USD"
+            )
             _ifrs15_audit_append(
                 "CONTRACT_COSTS",
                 cid,
                 (
-                    f"Contract costs assessed — capitalised ${float(summ.get('total_capitalised', 0) or 0):,.2f}, "
-                    f"expensed ${float(summ.get('total_expensed_immediately', 0) or 0):,.2f}"
+                    f"Contract costs assessed — capitalised "
+                    f"{format_ifrs15_currency(float(summ.get('total_capitalised', 0) or 0), batch_currency)}, "
+                    f"expensed {format_ifrs15_currency(float(summ.get('total_expensed_immediately', 0) or 0), batch_currency)}"
                 ),
                 {},
                 dict(summ),
@@ -3276,12 +3281,14 @@ async def ifrs15_contract_costs(request: IFRS15ContractCostsRequest):
                 detail="Provide either costs[] (IFRS 15.91–95 batch) or commission_amount, contract_term_months, and contract_total_value (legacy).",
             )
 
-        from ifrs15_calculator import IFRS15ContractCostsEngine
+        from ifrs15_calculator import IFRS15ContractCostsEngine, format_ifrs15_currency
 
+        cc_currency = str(request.currency or "USD")
         body = {
             "commission_amount": request.commission_amount,
             "contract_term_months": request.contract_term_months,
             "contract_total_value": request.contract_total_value,
+            "currency": cc_currency,
         }
         legacy = IFRS15ContractCostsEngine().calculate(body)
         _ifrs15_audit_append(
@@ -3289,7 +3296,7 @@ async def ifrs15_contract_costs(request: IFRS15ContractCostsRequest):
             request.contract_id or "N/A",
             (
                 f"Legacy commission asset — capitalise={legacy.get('capitalise')}, "
-                f"amount ${float(legacy.get('commission_amount', 0) or 0):,.2f}"
+                f"amount {format_ifrs15_currency(float(legacy.get('commission_amount', 0) or 0), cc_currency)}"
             ),
             {},
             {"capitalise": legacy.get("capitalise"), "commission_amount": legacy.get("commission_amount")},

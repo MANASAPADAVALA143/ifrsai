@@ -83,6 +83,7 @@ import {
 } from '@/lib/ifrs16-lease-extraction';
 import { LeasePdfUploadBar } from '@/components/ifrs16/LeasePdfUploadBar';
 import { FieldLabelWithExtraction } from '@/components/ifrs16/FieldLabelWithExtraction';
+import { CollapsibleFormSection, ContextHelpCallout } from '@/components/ifrs16/lease-form-ui';
 
 // ---------------------------------------------------------------------------
 // ERP push buttons (inline)
@@ -196,11 +197,10 @@ function TallyPushButton({ leaseId, calcResults, period }: { leaseId: string; ca
 }
 // ---------------------------------------------------------------------------
 
-const TAB_IDS = ['contract', 'financial', 'modifications', 'assets', 'schedules', 'disclosures', 'review'] as const;
+const TAB_IDS = ['contract', 'financial', 'assets', 'schedules', 'disclosures', 'review'] as const;
 const TABS: { id: typeof TAB_IDS[number]; label: string; icon: any }[] = [
   { id: 'contract', label: 'Contract Details', icon: FileText },
   { id: 'financial', label: 'Financial Management', icon: DollarSign },
-  { id: 'modifications', label: 'Lease Modifications', icon: RefreshCw },
   { id: 'assets', label: 'Assets & Locations', icon: MapPin },
   { id: 'schedules', label: 'Schedules', icon: BarChart3 },
   { id: 'disclosures', label: 'Disclosures', icon: FileCheck },
@@ -1239,7 +1239,258 @@ function getReportingDateForFY(fy: string): Date {
   const allocationTotal = form.costCenterTags.reduce((s: number, t: string) => s + (form.costCenterAllocation[t] ?? 0), 0);
   const displayTitle = form.title || form.assetDescription || (isNew ? 'New Lease' : form.leaseId);
   const statusLabel = form.leaseStatus || 'Draft';
+  const assetPrerequisites = [
+    { label: 'Commencement date', complete: Boolean(form.startDate) },
+    { label: 'End date', complete: Boolean(form.endDate) },
+    { label: 'Base rent amount', complete: Boolean(form.baseRentAmount && parseFloat(String(form.baseRentAmount)) > 0) },
+    { label: 'IBR / Discount Rate', complete: Boolean(form.discountRate && parseFloat(String(form.discountRate)) > 0) },
+    { label: 'Currency', complete: Boolean(form.currency) },
+  ];
+  const missingAssetPrerequisites = assetPrerequisites.filter((item) => !item.complete);
+  const assetsTabEnabled = missingAssetPrerequisites.length === 0;
 
+  const renderLeaseModificationsSection = () => {
+            const mods = form.modifications || [];
+            const liability = calcResults?.lease_liability ?? existingLease?.liability ?? 0;
+            const rou = calcResults?.rou_asset ?? existingLease?.rou ?? 0;
+            const restorationNum = parseFloat(String(form.restorationCost || '0')) || 0;
+            const ibrPct = parseFloat(String(form.discountRate || '0')) || 0;
+            const currentEndDate = form.endDate || '';
+            const currentTermMonths = form.lease_term_months ? parseInt(form.lease_term_months, 10) : schedule.length;
+            const currentMonthly = parseFloat(String(form.baseRentAmount || '0')) || 0;
+            const lastApplied = mods.filter((m: any) => m.status === 'applied').sort((a: any, b: any) => (b.appliedAt || '').localeCompare(a.appliedAt || ''))[0];
+            const priorLLBase = lastApplied ? (lastApplied.newLL ?? 0) : liability;
+            const priorROUBase = lastApplied ? (lastApplied.newROU ?? 0) : rou;
+            const priorRCBase = lastApplied ? (lastApplied.newRC ?? 0) : restorationNum;
+            const modDate = modificationForm.date || modificationForm.effectiveDate || '';
+            const priorLL = modDate && schedule.length ? getPriorLLFromSchedule(schedule, scheduleRow, modDate) : priorLLBase;
+            const newEnd = modificationForm.newEndDate || currentEndDate;
+            const newEndTime = newEnd ? Date.parse(newEnd) : 0;
+            const modDateTime = modDate ? Date.parse(modDate) : 0;
+            const newTerm = newEnd && modDate ? Math.max(0, Math.ceil((newEndTime - modDateTime) / (1000 * 60 * 60 * 24 * 30))) : (modificationForm.newTermMonths ? parseInt(String(modificationForm.newTermMonths), 10) : currentTermMonths);
+            const newMonthly = parseFloat(String(modificationForm.newMonthlyPayment || modificationForm.newMonthlyPayment === 0 ? modificationForm.newMonthlyPayment : form.baseRentAmount || '0')) || currentMonthly;
+            const newIBR = modificationForm.newIBR !== '' && modificationForm.newIBR !== undefined ? parseFloat(String(modificationForm.newIBR)) : ibrPct;
+            const revisedLL = pvOfAnnuity(newMonthly, newIBR, newTerm);
+            const llAdjustment = revisedLL - priorLL;
+            const isScopeIncrease = modificationForm.type === 'scope_increase' || modificationForm.type === 'extension';
+            const isScopeDecrease = modificationForm.type === 'scope_decrease' || modificationForm.type === 'termination';
+            const rouAdjustment = isScopeIncrease ? llAdjustment : isScopeDecrease ? (priorROUBase * (Math.abs(llAdjustment) / (priorLLBase || 1))) : llAdjustment;
+            const gainLoss = isScopeDecrease ? (rouAdjustment - llAdjustment) : 0;
+            const newROU = priorROUBase + (isScopeIncrease ? llAdjustment : modificationForm.type !== 'termination' ? llAdjustment : -priorROUBase);
+            const newRC = parseFloat(String(modificationForm.newRestoration || '0')) || priorRCBase;
+            const rcAdjustment = newRC - priorRCBase;
+            const journalEntries: { dr: string; cr: string; amount: number }[] = [];
+            if (modificationForm.type === 'termination') {
+              journalEntries.push({ dr: 'Lease Liability (full balance)', cr: 'Right-of-Use Asset (cost)', amount: priorLL });
+              journalEntries.push({ dr: 'Accumulated Depreciation', cr: 'Right-of-Use Asset (cost)', amount: 0 });
+              if (gainLoss !== 0) journalEntries.push({ dr: 'Lease Liability', cr: 'Gain on Termination', amount: Math.abs(gainLoss) });
+            } else if (isScopeDecrease && gainLoss > 0) {
+              journalEntries.push({ dr: 'Lease Liability', cr: 'Right-of-Use Asset', amount: Math.abs(llAdjustment) });
+              journalEntries.push({ dr: 'Lease Liability', cr: 'Gain on Lease Modification (P&L)', amount: gainLoss });
+            } else if (llAdjustment !== 0) {
+              if (llAdjustment > 0) journalEntries.push({ dr: 'Right-of-Use Asset', cr: 'Lease Liability', amount: llAdjustment });
+              else journalEntries.push({ dr: 'Lease Liability', cr: 'Right-of-Use Asset', amount: Math.abs(llAdjustment) });
+            }
+            const typeBadge = (m: any) => {
+              const opt = MODIFICATION_TYPE_OPTIONS.find((o) => o.value === (m.type || '')) || MODIFICATION_TYPE_OPTIONS[0];
+              const label = opt?.label?.split('—')[0]?.trim() || m.type || '—';
+              return <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${opt?.badge || 'bg-gray-100 text-gray-700'}`}>{label}</span>;
+            };
+            const statusBadge = (s: string) => {
+              if (s === 'applied') return <span className="px-2 py-0.5 rounded-full text-xs font-bold text-orange-700 bg-orange-100">Applied</span>;
+              if (s === 'calculated') return <span className="px-2 py-0.5 rounded-full text-xs font-medium text-green-700 bg-green-100">Calculated</span>;
+              return <span className="px-2 py-0.5 rounded-full text-xs font-medium text-gray-600 bg-gray-100">Draft</span>;
+            };
+
+            return (
+              <>
+                {modificationPanel === 'list' ? (
+                  <>
+                    <div className="flex justify-end mb-4">
+                      <Button className="bg-[#f97316] hover:bg-[#ea580c] text-white" onClick={() => { setModificationFormIndex(null); setModificationForm({ date: '', effectiveDate: '', type: 'extension', reason: '', notes: '', newEndDate: form.endDate || '', newMonthlyPayment: form.baseRentAmount || '', paymentFrequency: form.paymentFrequency || 'Monthly', paymentEffectiveFrom: '', indexType: 'CPI', newIndexRatePct: '', adjustmentCapPct: '', floorRatePct: '', newIBR: form.discountRate || '', newRestoration: form.restorationCost || '' }); setModificationPanel('form'); }}>
+                        <Plus className="w-4 h-4 mr-2" /> Add Modification
+                      </Button>
+                    </div>
+                    {mods.length === 0 ? (
+                      <div className="py-16 rounded-xl border-2 border-dashed border-[#e2e8f0] bg-[#fafafa] text-center">
+                        <p className="text-4xl mb-3">🔄</p>
+                        <p className="font-medium text-[#1e293b] mb-1">No modifications recorded</p>
+                        <p className="text-sm text-[#64748b] mb-4">Add a modification when lease terms change — extension, termination, rent review, or scope change</p>
+                        <Button className="bg-[#f97316] text-white" onClick={() => { setModificationFormIndex(null); setModificationForm({ date: '', effectiveDate: '', type: 'extension', reason: '', notes: '', newEndDate: form.endDate || '', newMonthlyPayment: form.baseRentAmount || '', paymentFrequency: form.paymentFrequency || 'Monthly', paymentEffectiveFrom: '', indexType: 'CPI', newIndexRatePct: '', adjustmentCapPct: '', floorRatePct: '', newIBR: form.discountRate || '', newRestoration: form.restorationCost || '' }); setModificationPanel('form'); }}><Plus className="w-4 h-4 mr-2" /> Add First Modification</Button>
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-[#e2e8f0] bg-white overflow-hidden mb-6">
+                        <table className="w-full text-sm">
+                          <thead className="bg-[#f9fafb]"><tr><th className="text-left py-3 px-4 font-semibold text-[#64748b]">#</th><th className="text-left py-3 px-4 font-semibold text-[#64748b]">Modification Date</th><th className="text-left py-3 px-4 font-semibold text-[#64748b]">Type</th><th className="text-left py-3 px-4 font-semibold text-[#64748b]">Reason</th><th className="text-right py-3 px-4 font-semibold text-[#64748b]">New LL</th><th className="text-right py-3 px-4 font-semibold text-[#64748b]">ROU Adj</th><th className="text-right py-3 px-4 font-semibold text-[#64748b]">Gain/Loss</th><th className="text-center py-3 px-4 font-semibold text-[#64748b]">Status</th><th className="text-center py-3 px-4 font-semibold text-[#64748b]">Actions</th></tr></thead>
+                          <tbody>
+                            {mods.map((m: any, i: number) => (
+                              <tr key={i} className="border-t border-[#e2e8f0] hover:bg-[#fafafa]">
+                                <td className="py-3 px-4 font-mono">{i + 1}</td>
+                                <td className="py-3 px-4">{m.date ?? m.effectiveDate ?? '—'}</td>
+                                <td className="py-3 px-4">{typeBadge(m)}</td>
+                                <td className="py-3 px-4 text-[#64748b]">{(m.reason || m.notes || '').slice(0, 40)}{(m.reason || m.notes || '').length > 40 ? '…' : ''}</td>
+                                <td className="py-3 px-4 text-right font-mono">{fmt(m.newLL ?? 0)}</td>
+                                <td className="py-3 px-4 text-right font-mono">{fmt(m.rouAdjustment ?? 0)}</td>
+                                <td className={`py-3 px-4 text-right font-mono ${(m.gainLoss ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(m.gainLoss ?? 0)}</td>
+                                <td className="py-3 px-4 text-center">{statusBadge(m.status || 'draft')}</td>
+                                <td className="py-3 px-4">
+                                  <div className="flex items-center justify-center gap-1">
+                                    <button type="button" onClick={() => { setModificationModalIndex(i); }} className="text-[#f97316] hover:underline text-xs font-medium">View</button>
+                                    {m.status !== 'applied' && <button type="button" onClick={() => { setModificationFormIndex(i); setModificationForm({ date: m.date, effectiveDate: m.effectiveDate, type: m.type || 'extension', reason: m.reason, notes: m.notes, newEndDate: m.newEndDate, newMonthlyPayment: m.newMonthlyPayment, newIBR: m.newIBR, newRestoration: m.newRestoration, ...m }); setModificationPanel('form'); }} className="text-[#f97316] hover:underline text-xs font-medium">Edit</button>}
+                                    {m.status !== 'applied' && <button type="button" onClick={() => setModificationModalIndex(i)} className="text-[#64748b] hover:underline text-xs">Recalculate</button>}
+                                    {m.status !== 'applied' && <button type="button" onClick={() => { if (confirm('Delete this modification?')) { const next = mods.filter((_: any, j: number) => j !== i); setForm((p) => ({ ...p, modifications: next })); markDirty('contract'); } }} className="text-red-600 hover:underline text-xs">Delete</button>}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    <details className="mb-6 rounded-xl border border-[#e2e8f0] bg-white overflow-hidden">
+                      <summary className="px-4 py-3 bg-[#f9fafb] font-medium text-[#1e293b] cursor-pointer">Modification History & Audit Trail</summary>
+                      <div className="px-4 py-4 border-t border-[#e2e8f0]">
+                        {mods.length === 0 ? <p className="text-sm text-[#64748b]">No history yet.</p> : mods.filter((m: any) => m.status === 'applied').map((m: any) => {
+                          const fullIndex = mods.indexOf(m);
+                          return (
+                          <div key={fullIndex} className="flex gap-3 mb-4">
+                            <span className="text-[#f97316] font-bold">●</span>
+                            <div>
+                              <p className="font-medium text-[#1e293b]">[{m.date}] Modification {fullIndex + 1} — {MODIFICATION_TYPE_OPTIONS.find((o) => o.value === m.type)?.label?.split('—')[0] || m.type} — Applied{m.appliedBy ? ` by ${m.appliedBy}` : ''}</p>
+                              <p className="text-sm text-[#64748b] ml-4">↓ Lease liability: {fmt(m.priorLL ?? 0)} → {fmt(m.newLL ?? 0)}</p>
+                              <p className="text-sm text-[#64748b] ml-4">↓ ROU adjustment: {fmt(m.rouAdjustment ?? 0)}</p>
+                            </div>
+                          </div>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  </>
+                ) : (
+                  <div className="space-y-6">
+                    <Button variant="secondary" className="mb-2" onClick={() => { setModificationPanel('list'); setModificationFormIndex(null); }}>← Back to list</Button>
+                    <h4 className="text-lg font-semibold text-[#1e293b]">{modificationFormIndex === null ? 'New Modification' : `Edit Modification ${(modificationFormIndex ?? 0) + 1}`}</h4>
+
+                    <ModificationAIAdvisor
+                      extractorHints={contractData}
+                      formOverlay={modificationAdvisorFormOverlay}
+                      modificationInputs={{
+                        modification_type: modificationForm.type,
+                        new_payment: newMonthly,
+                        original_payment: currentMonthly,
+                        new_lease_term_months: newTerm,
+                        original_lease_term_months: currentTermMonths,
+                      }}
+                      currentModificationType={modificationForm.type}
+                      onAccept={(type) => setModificationForm((p) => ({ ...p, type }))}
+                    />
+
+                    <section className="rounded-xl border border-[#e2e8f0] p-6 bg-white">
+                      <h5 className="text-sm font-semibold text-[#64748b] uppercase mb-4">Part A — Modification Details</h5>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <div><label className={labelClass}>Modification Date</label><input type="date" className={inputClass} value={modificationForm.date} onChange={(e) => setModificationForm((p) => ({ ...p, date: e.target.value }))} /></div>
+                        <div><label className={labelClass}>Effective Date</label><input type="date" className={inputClass} value={modificationForm.effectiveDate} onChange={(e) => setModificationForm((p) => ({ ...p, effectiveDate: e.target.value }))} /></div>
+                        <div><label className={labelClass}>Modification Type</label><select className={inputClass} value={modificationForm.type} onChange={(e) => setModificationForm((p) => ({ ...p, type: e.target.value }))}>{MODIFICATION_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
+                        <div><label className={labelClass}>Modification Reason</label><input type="text" className={inputClass} value={modificationForm.reason} onChange={(e) => setModificationForm((p) => ({ ...p, reason: e.target.value }))} placeholder="Brief reason" /></div>
+                      </div>
+                      <label className={labelClass}>Modification Notes (audit trail)</label>
+                      <textarea className={inputClass + ' min-h-[80px]'} value={modificationForm.notes} onChange={(e) => setModificationForm((p) => ({ ...p, notes: e.target.value }))} placeholder="Describe the change..." />
+                    </section>
+
+                    <section className="rounded-xl border border-[#e2e8f0] p-6 bg-white">
+                      <h5 className="text-sm font-semibold text-[#64748b] uppercase mb-4">Part B — Revised Lease Terms</h5>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <div><label className={labelClass}>Current End Date</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={currentEndDate} /></div>
+                        <div><label className={labelClass}>New End Date</label><input type="date" className={inputClass} value={modificationForm.newEndDate} onChange={(e) => setModificationForm((p) => ({ ...p, newEndDate: e.target.value }))} /></div>
+                        <div><label className={labelClass}>Current Term (months)</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={currentTermMonths} /></div>
+                        <div><label className={labelClass}>New Term (months)</label><input type="text" className={inputClass + ' bg-gray-100 font-mono'} readOnly value={newTerm} /></div>
+                        <div><label className={labelClass}>Current Monthly Payment</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={fmt(currentMonthly)} /></div>
+                        <div><label className={labelClass}>New Monthly Payment</label><input type="number" className={inputClass} value={modificationForm.newMonthlyPayment} onChange={(e) => setModificationForm((p) => ({ ...p, newMonthlyPayment: e.target.value }))} /></div>
+                        <div><label className={labelClass}>Current IBR %</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={ibrPct} /></div>
+                        <div><label className={labelClass}>New IBR %</label><input type="number" className={inputClass} value={modificationForm.newIBR} onChange={(e) => setModificationForm((p) => ({ ...p, newIBR: e.target.value }))} placeholder={String(ibrPct)} /></div>
+                        {restorationNum > 0 && <><div><label className={labelClass}>Current Restoration</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={fmt(priorRCBase)} /></div><div><label className={labelClass}>New Restoration</label><input type="number" className={inputClass} value={modificationForm.newRestoration} onChange={(e) => setModificationForm((p) => ({ ...p, newRestoration: e.target.value }))} /></div></>}
+                      </div>
+                    </section>
+
+                    <section className="rounded-xl border-2 border-dashed border-[#f97316] bg-[#fff7ed]/30 p-6">
+                      <h5 className="text-sm font-semibold text-[#f97316] mb-4">Part C — Remeasurement Calculation</h5>
+                      <div className="space-y-2 text-sm font-mono mb-4">
+                        <p><strong>Step 1 — Revised Lease Liability:</strong> PV of remaining payments at new IBR = {fmt(revisedLL)}</p>
+                        <p><strong>Step 2 — Previous Lease Liability:</strong> Carrying amount on modification date = {fmt(priorLL)}</p>
+                        <p><strong>Step 3 — Adjustment to Lease Liability:</strong> = {fmt(revisedLL)} − {fmt(priorLL)} = <span className={llAdjustment >= 0 ? 'text-green-600' : 'text-red-600'}>{fmt(llAdjustment)}</span></p>
+                        <p><strong>Step 4 — ROU Asset Adjustment:</strong> {fmt(rouAdjustment)}</p>
+                        {restorationNum > 0 && <p><strong>Step 5 — Restoration Cost Adjustment:</strong> {fmt(rcAdjustment)}</p>}
+                      </div>
+                      <div className="rounded-lg border border-[#e2e8f0] bg-white p-4">
+                        <p className="text-xs font-semibold text-[#64748b] uppercase mb-2">Summary</p>
+                        <table className="w-full text-sm"><thead><tr><th className="text-left py-1 font-medium text-[#64748b]">Description</th><th className="text-right py-1 font-medium text-[#64748b]">Prior</th><th className="text-right py-1 font-medium text-[#f97316]">After</th></tr></thead><tbody>
+                          <tr><td className="py-1">ROU</td><td className="py-1 text-right font-mono text-[#64748b]">{fmt(priorROUBase)}</td><td className="py-1 text-right font-mono text-[#f97316]">{fmt(newROU)}</td></tr>
+                          <tr><td className="py-1">Lease Liability</td><td className="py-1 text-right font-mono text-[#64748b]">{fmt(priorLL)}</td><td className="py-1 text-right font-mono text-[#f97316]">{fmt(revisedLL)}</td></tr>
+                          <tr><td className="py-1">Restoration Cost</td><td className="py-1 text-right font-mono text-[#64748b]">{fmt(priorRCBase)}</td><td className="py-1 text-right font-mono text-[#f97316]">{fmt(newRC)}</td></tr>
+                          <tr className="font-bold border-t border-[#e2e8f0]"><td className="py-2">Increase in Liability</td><td colSpan={2} className="py-2 text-right font-mono">{fmt(llAdjustment)}</td></tr>
+                          {rcAdjustment !== 0 && <tr><td className="py-1">Gain on RC modification</td><td colSpan={2} className="py-1 text-right font-mono text-[#f97316]">{fmt(rcAdjustment)}</td></tr>}
+                        </tbody></table>
+                      </div>
+                    </section>
+
+                    <section className="rounded-xl border border-[#e2e8f0] p-6 bg-white">
+                      <h5 className="text-sm font-semibold text-[#64748b] uppercase mb-4">Part D — Journal Entries</h5>
+                      <div className="space-y-2 mb-4">
+                        {journalEntries.length === 0 ? <p className="text-sm text-[#64748b]">No journal entry (no adjustment).</p> : journalEntries.map((je, idx) => (<div key={idx} className="flex justify-between items-center py-2 border-b border-[#e2e8f0]"><span className="text-sm">Dr {je.dr} / Cr {je.cr}</span><span className="font-mono font-semibold">{fmt(je.amount)}</span></div>))}
+                      </div>
+                      <Button variant="secondary" size="sm" onClick={() => { const text = journalEntries.map((je) => `Dr ${je.dr}  Cr ${je.cr}  ${fmt(je.amount)}`).join('\n'); navigator.clipboard.writeText(text); toast.success('Copied'); }}>Copy Journal Entries</Button>
+                    </section>
+
+                    <div className="flex flex-wrap gap-3">
+                      <Button className="bg-[#f97316] text-white" onClick={() => { const newMod = { id: `MOD-${String(Date.now()).slice(-6)}`, date: modificationForm.date, effectiveDate: modificationForm.effectiveDate || modificationForm.date, type: modificationForm.type, reason: modificationForm.reason, notes: modificationForm.notes, priorLL, newLL: revisedLL, priorROU: priorROUBase, newROU, priorRC: priorRCBase, newRC, llAdjustment, rouAdjustment, gainLoss, journalEntries, status: 'draft', newEndDate: modificationForm.newEndDate, newMonthlyPayment: newMonthly, newIBR: newIBR }; const next = modificationFormIndex === null ? [...mods, newMod] : mods.map((m: any, j: number) => j === modificationFormIndex ? { ...m, ...newMod } : m); setForm((p) => ({ ...p, modifications: next })); setModificationPanel('list'); setModificationFormIndex(null); markDirty('contract'); toast.success('Saved as draft'); }}>💾 Save Draft</Button>
+                      <Button className="bg-green-600 text-white hover:bg-green-700" onClick={() => { const newMod = { id: modificationFormIndex !== null && mods[modificationFormIndex]?.id ? mods[modificationFormIndex].id : `MOD-${String(Date.now()).slice(-6)}`, date: modificationForm.date, effectiveDate: modificationForm.effectiveDate || modificationForm.date, type: modificationForm.type, reason: modificationForm.reason, notes: modificationForm.notes, priorLL, newLL: revisedLL, priorROU: priorROUBase, newROU, priorRC: priorRCBase, newRC, llAdjustment, rouAdjustment, gainLoss, journalEntries, status: 'applied', appliedAt: new Date().toISOString(), appliedBy: 'User', newEndDate: modificationForm.newEndDate, newMonthlyPayment: newMonthly, newIBR: newIBR }; const next = modificationFormIndex === null ? [...mods, newMod] : mods.map((m: any, j: number) => j === modificationFormIndex ? { ...m, ...newMod } : m); setForm((p) => ({ ...p, modifications: next })); setModificationPanel('list'); setModificationFormIndex(null); markDirty('contract'); toast.success('Modification applied. All schedules recalculated.'); }}>🧮 Apply Modification</Button>
+                      <Button variant="secondary" onClick={() => { setModificationPanel('list'); setModificationFormIndex(null); }}>Cancel</Button>
+                    </div>
+                  </div>
+                )}
+
+                <section className="mb-6">
+                  <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Variable Lease Payments</h4>
+                <label className="flex items-center gap-2 mb-2"><input type="checkbox" checked={form.variablePayments} onChange={(e) => { setForm((p) => ({ ...p, variablePayments: e.target.checked })); markDirty('contract'); }} /> Variable Payments Exist</label>
+                {form.variablePayments && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div><label className={labelClass}>Description</label><input type="text" value={form.variableDescription} onChange={(e) => { setForm((p) => ({ ...p, variableDescription: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
+                    <div><label className={labelClass}>Estimated annual amount{financialSym ? ` (${financialSym})` : ''}</label><input type="number" value={form.variableAnnualAmount} onChange={(e) => { setForm((p) => ({ ...p, variableAnnualAmount: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
+                    <div><label className={labelClass}>Basis</label><input type="text" value={form.variableBasis} onChange={(e) => { setForm((p) => ({ ...p, variableBasis: e.target.value })); markDirty('contract'); }} className={inputClass} placeholder="Sales %, Usage-based, Index-linked" /></div>
+                  </div>
+                )}
+              </section>
+              <section className="mb-6">
+                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">CPI / Index Adjustments</h4>
+                <label className="flex items-center gap-2 mb-2"><input type="checkbox" checked={form.cpiAdjustments} onChange={(e) => { setForm((p) => ({ ...p, cpiAdjustments: e.target.checked })); markDirty('contract'); }} /> CPI Adjustments Apply</label>
+                {form.cpiAdjustments && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div><label className={labelClass}>Base Index Value</label><input type="number" value={form.baseIndexValue} onChange={(e) => { setForm((p) => ({ ...p, baseIndexValue: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
+                    <div><label className={labelClass}>Current Index Value</label><input type="number" value={form.currentIndexValue} onChange={(e) => { setForm((p) => ({ ...p, currentIndexValue: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
+                    <div><label className={labelClass}>CPI review every (months)</label><input type="number" min="1" step="1" value={form.cpiAdjustmentFrequencyMonths} onChange={(e) => { setForm((p) => ({ ...p, cpiAdjustmentFrequencyMonths: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
+                    <div><label className={labelClass}>Last Adjustment Date</label><input type="date" value={form.lastAdjustmentDate} onChange={(e) => { setForm((p) => ({ ...p, lastAdjustmentDate: e.target.value })); markDirty('contract'); }} className={inputClass} /></div>
+                  </div>
+                )}
+                {form.cpiAdjustments && calcResults && (
+                  <CpiRemeasurementPanel
+                    leaseId={String(params?.id || '')}
+                    originalPayment={parseFloat(String(form.baseRentAmount)) || 0}
+                    ibrPct={parseFloat(String(form.discountRate)) || 0}
+                    remainingMonths={12}
+                    currentLiability={Number(calcResults.lease_liability ?? 0)}
+                    currentRou={Number(calcResults.rou_asset ?? 0)}
+                    baseIndex={parseFloat(String(form.baseIndexValue)) || 100}
+                    currentIndex={parseFloat(String(form.currentIndexValue)) || 100}
+                    currency={displayCurrency}
+                  />
+                )}
+              </section>
+            </>
+            );
+  };
+
+          
   return (
     <SidebarLayout
       pageTitle={isNew ? 'New Lease' : displayTitle}
@@ -1360,13 +1611,28 @@ function getReportingDateForFY(fy: string): Date {
               const active = activeTab === t.id;
               const dirty = dirtyTabs.has(t.id);
               const hasExtracted = extractedTabs.has(t.id);
+              const disabled = t.id === 'assets' && !assetsTabEnabled;
               return (
                 <button
                   key={t.id}
+                  type="button"
+                  disabled={disabled}
+                  title={disabled ? 'Complete Contract Details and Financial Management first' : undefined}
                   onClick={() => setActiveTab(t.id)}
-                  className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${active ? 'border-[#f97316] text-[#f97316]' : 'border-transparent text-[#64748b] hover:bg-[#fff7ed]'} ${dirty || hasExtracted ? ' relative' : ''}`}
+                  className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
+                    disabled
+                      ? 'border-transparent text-[#94a3b8] bg-[#f8fafc] cursor-not-allowed'
+                      : active
+                        ? 'border-[#f97316] text-[#f97316]'
+                        : 'border-transparent text-[#64748b] hover:bg-[#fff7ed]'
+                  } ${dirty || hasExtracted ? ' relative' : ''}`}
                 >
                   <Icon className="w-4 h-4" /> {t.label}
+                  {disabled && (
+                    <span className="text-[10px] font-semibold text-[#94a3b8] bg-white border border-[#e2e8f0] rounded-full px-1.5 py-0.5">
+                      Locked
+                    </span>
+                  )}
                   {hasExtracted && <span className="absolute top-1.5 right-1 w-2 h-2 rounded-full bg-[#f97316]" title="AI extracted data" />}
                   {dirty && !hasExtracted && <span className="absolute top-1.5 right-1 w-2 h-2 rounded-full bg-[#f97316]" />}
                 </button>
@@ -1449,6 +1715,13 @@ function getReportingDateForFY(fy: string): Date {
                   </div>
                 </div>
               </details>
+              <CollapsibleFormSection
+                title="Lease Modifications"
+                subtitle="Remeasurement when terms change — optional for new leases"
+                tintClass="bg-orange-50/40"
+              >
+                {renderLeaseModificationsSection()}
+              </CollapsibleFormSection>
               <div className="flex justify-end">
                 <Button onClick={() => { handleSaveToRepo(); setDirtyTabs((s) => { const n = new Set(s); n.delete('contract'); return n; }); }} className="bg-[#f97316] text-white">Save Tab</Button>
               </div>
@@ -1528,6 +1801,10 @@ function getReportingDateForFY(fy: string): Date {
               </section>
               <section className="mb-6">
                 <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Escalation & Terms</h4>
+                <ContextHelpCallout>
+                  <strong>IBR (Incremental Borrowing Rate)</strong> is the rate the lessee would pay to borrow funds for a similar term, security, and currency — IFRS 16 para 26.
+                  It discounts lease payments to present value. Use AI Suggest for market benchmarks by country and asset type.
+                </ContextHelpCallout>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                   <div>
                     <FieldLabelWithExtraction field="escalationType" extractedConfidences={extractedConfidences}>
@@ -1701,268 +1978,58 @@ function getReportingDateForFY(fy: string): Date {
             </>
           )}
 
-          {activeTab === 'modifications' && (() => {
-            const mods = form.modifications || [];
-            const liability = calcResults?.lease_liability ?? existingLease?.liability ?? 0;
-            const rou = calcResults?.rou_asset ?? existingLease?.rou ?? 0;
-            const restorationNum = parseFloat(String(form.restorationCost || '0')) || 0;
-            const ibrPct = parseFloat(String(form.discountRate || '0')) || 0;
-            const currentEndDate = form.endDate || '';
-            const currentTermMonths = form.lease_term_months ? parseInt(form.lease_term_months, 10) : schedule.length;
-            const currentMonthly = parseFloat(String(form.baseRentAmount || '0')) || 0;
-            const lastApplied = mods.filter((m: any) => m.status === 'applied').sort((a: any, b: any) => (b.appliedAt || '').localeCompare(a.appliedAt || ''))[0];
-            const priorLLBase = lastApplied ? (lastApplied.newLL ?? 0) : liability;
-            const priorROUBase = lastApplied ? (lastApplied.newROU ?? 0) : rou;
-            const priorRCBase = lastApplied ? (lastApplied.newRC ?? 0) : restorationNum;
-            const modDate = modificationForm.date || modificationForm.effectiveDate || '';
-            const priorLL = modDate && schedule.length ? getPriorLLFromSchedule(schedule, scheduleRow, modDate) : priorLLBase;
-            const newEnd = modificationForm.newEndDate || currentEndDate;
-            const newEndTime = newEnd ? Date.parse(newEnd) : 0;
-            const modDateTime = modDate ? Date.parse(modDate) : 0;
-            const newTerm = newEnd && modDate ? Math.max(0, Math.ceil((newEndTime - modDateTime) / (1000 * 60 * 60 * 24 * 30))) : (modificationForm.newTermMonths ? parseInt(String(modificationForm.newTermMonths), 10) : currentTermMonths);
-            const newMonthly = parseFloat(String(modificationForm.newMonthlyPayment || modificationForm.newMonthlyPayment === 0 ? modificationForm.newMonthlyPayment : form.baseRentAmount || '0')) || currentMonthly;
-            const newIBR = modificationForm.newIBR !== '' && modificationForm.newIBR !== undefined ? parseFloat(String(modificationForm.newIBR)) : ibrPct;
-            const revisedLL = pvOfAnnuity(newMonthly, newIBR, newTerm);
-            const llAdjustment = revisedLL - priorLL;
-            const isScopeIncrease = modificationForm.type === 'scope_increase' || modificationForm.type === 'extension';
-            const isScopeDecrease = modificationForm.type === 'scope_decrease' || modificationForm.type === 'termination';
-            const rouAdjustment = isScopeIncrease ? llAdjustment : isScopeDecrease ? (priorROUBase * (Math.abs(llAdjustment) / (priorLLBase || 1))) : llAdjustment;
-            const gainLoss = isScopeDecrease ? (rouAdjustment - llAdjustment) : 0;
-            const newROU = priorROUBase + (isScopeIncrease ? llAdjustment : modificationForm.type !== 'termination' ? llAdjustment : -priorROUBase);
-            const newRC = parseFloat(String(modificationForm.newRestoration || '0')) || priorRCBase;
-            const rcAdjustment = newRC - priorRCBase;
-            const journalEntries: { dr: string; cr: string; amount: number }[] = [];
-            if (modificationForm.type === 'termination') {
-              journalEntries.push({ dr: 'Lease Liability (full balance)', cr: 'Right-of-Use Asset (cost)', amount: priorLL });
-              journalEntries.push({ dr: 'Accumulated Depreciation', cr: 'Right-of-Use Asset (cost)', amount: 0 });
-              if (gainLoss !== 0) journalEntries.push({ dr: 'Lease Liability', cr: 'Gain on Termination', amount: Math.abs(gainLoss) });
-            } else if (isScopeDecrease && gainLoss > 0) {
-              journalEntries.push({ dr: 'Lease Liability', cr: 'Right-of-Use Asset', amount: Math.abs(llAdjustment) });
-              journalEntries.push({ dr: 'Lease Liability', cr: 'Gain on Lease Modification (P&L)', amount: gainLoss });
-            } else if (llAdjustment !== 0) {
-              if (llAdjustment > 0) journalEntries.push({ dr: 'Right-of-Use Asset', cr: 'Lease Liability', amount: llAdjustment });
-              else journalEntries.push({ dr: 'Lease Liability', cr: 'Right-of-Use Asset', amount: Math.abs(llAdjustment) });
-            }
-            const typeBadge = (m: any) => {
-              const opt = MODIFICATION_TYPE_OPTIONS.find((o) => o.value === (m.type || '')) || MODIFICATION_TYPE_OPTIONS[0];
-              const label = opt?.label?.split('—')[0]?.trim() || m.type || '—';
-              return <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${opt?.badge || 'bg-gray-100 text-gray-700'}`}>{label}</span>;
-            };
-            const statusBadge = (s: string) => {
-              if (s === 'applied') return <span className="px-2 py-0.5 rounded-full text-xs font-bold text-orange-700 bg-orange-100">Applied</span>;
-              if (s === 'calculated') return <span className="px-2 py-0.5 rounded-full text-xs font-medium text-green-700 bg-green-100">Calculated</span>;
-              return <span className="px-2 py-0.5 rounded-full text-xs font-medium text-gray-600 bg-gray-100">Draft</span>;
-            };
-
-            return (
-              <>
-                <h3 className="text-lg font-semibold text-[#1e293b] mb-2 flex items-center gap-2"><RefreshCw className="w-5 h-5 text-[#f97316]" /> Lease Modifications</h3>
-                <p className="text-sm text-[#64748b] mb-4">Remeasure lease liability when terms change</p>
-
-                {modificationPanel === 'list' ? (
-                  <>
-                    <div className="flex justify-end mb-4">
-                      <Button className="bg-[#f97316] hover:bg-[#ea580c] text-white" onClick={() => { setModificationFormIndex(null); setModificationForm({ date: '', effectiveDate: '', type: 'extension', reason: '', notes: '', newEndDate: form.endDate || '', newMonthlyPayment: form.baseRentAmount || '', paymentFrequency: form.paymentFrequency || 'Monthly', paymentEffectiveFrom: '', indexType: 'CPI', newIndexRatePct: '', adjustmentCapPct: '', floorRatePct: '', newIBR: form.discountRate || '', newRestoration: form.restorationCost || '' }); setModificationPanel('form'); }}>
-                        <Plus className="w-4 h-4 mr-2" /> Add Modification
-                      </Button>
-                    </div>
-                    {mods.length === 0 ? (
-                      <div className="py-16 rounded-xl border-2 border-dashed border-[#e2e8f0] bg-[#fafafa] text-center">
-                        <p className="text-4xl mb-3">🔄</p>
-                        <p className="font-medium text-[#1e293b] mb-1">No modifications recorded</p>
-                        <p className="text-sm text-[#64748b] mb-4">Add a modification when lease terms change — extension, termination, rent review, or scope change</p>
-                        <Button className="bg-[#f97316] text-white" onClick={() => { setModificationFormIndex(null); setModificationForm({ date: '', effectiveDate: '', type: 'extension', reason: '', notes: '', newEndDate: form.endDate || '', newMonthlyPayment: form.baseRentAmount || '', paymentFrequency: form.paymentFrequency || 'Monthly', paymentEffectiveFrom: '', indexType: 'CPI', newIndexRatePct: '', adjustmentCapPct: '', floorRatePct: '', newIBR: form.discountRate || '', newRestoration: form.restorationCost || '' }); setModificationPanel('form'); }}><Plus className="w-4 h-4 mr-2" /> Add First Modification</Button>
-                      </div>
-                    ) : (
-                      <div className="rounded-xl border border-[#e2e8f0] bg-white overflow-hidden mb-6">
-                        <table className="w-full text-sm">
-                          <thead className="bg-[#f9fafb]"><tr><th className="text-left py-3 px-4 font-semibold text-[#64748b]">#</th><th className="text-left py-3 px-4 font-semibold text-[#64748b]">Modification Date</th><th className="text-left py-3 px-4 font-semibold text-[#64748b]">Type</th><th className="text-left py-3 px-4 font-semibold text-[#64748b]">Reason</th><th className="text-right py-3 px-4 font-semibold text-[#64748b]">New LL</th><th className="text-right py-3 px-4 font-semibold text-[#64748b]">ROU Adj</th><th className="text-right py-3 px-4 font-semibold text-[#64748b]">Gain/Loss</th><th className="text-center py-3 px-4 font-semibold text-[#64748b]">Status</th><th className="text-center py-3 px-4 font-semibold text-[#64748b]">Actions</th></tr></thead>
-                          <tbody>
-                            {mods.map((m: any, i: number) => (
-                              <tr key={i} className="border-t border-[#e2e8f0] hover:bg-[#fafafa]">
-                                <td className="py-3 px-4 font-mono">{i + 1}</td>
-                                <td className="py-3 px-4">{m.date ?? m.effectiveDate ?? '—'}</td>
-                                <td className="py-3 px-4">{typeBadge(m)}</td>
-                                <td className="py-3 px-4 text-[#64748b]">{(m.reason || m.notes || '').slice(0, 40)}{(m.reason || m.notes || '').length > 40 ? '…' : ''}</td>
-                                <td className="py-3 px-4 text-right font-mono">{fmt(m.newLL ?? 0)}</td>
-                                <td className="py-3 px-4 text-right font-mono">{fmt(m.rouAdjustment ?? 0)}</td>
-                                <td className={`py-3 px-4 text-right font-mono ${(m.gainLoss ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(m.gainLoss ?? 0)}</td>
-                                <td className="py-3 px-4 text-center">{statusBadge(m.status || 'draft')}</td>
-                                <td className="py-3 px-4">
-                                  <div className="flex items-center justify-center gap-1">
-                                    <button type="button" onClick={() => { setModificationModalIndex(i); }} className="text-[#f97316] hover:underline text-xs font-medium">View</button>
-                                    {m.status !== 'applied' && <button type="button" onClick={() => { setModificationFormIndex(i); setModificationForm({ date: m.date, effectiveDate: m.effectiveDate, type: m.type || 'extension', reason: m.reason, notes: m.notes, newEndDate: m.newEndDate, newMonthlyPayment: m.newMonthlyPayment, newIBR: m.newIBR, newRestoration: m.newRestoration, ...m }); setModificationPanel('form'); }} className="text-[#f97316] hover:underline text-xs font-medium">Edit</button>}
-                                    {m.status !== 'applied' && <button type="button" onClick={() => setModificationModalIndex(i)} className="text-[#64748b] hover:underline text-xs">Recalculate</button>}
-                                    {m.status !== 'applied' && <button type="button" onClick={() => { if (confirm('Delete this modification?')) { const next = mods.filter((_: any, j: number) => j !== i); setForm((p) => ({ ...p, modifications: next })); markDirty('modifications'); } }} className="text-red-600 hover:underline text-xs">Delete</button>}
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-
-                    <details className="mb-6 rounded-xl border border-[#e2e8f0] bg-white overflow-hidden">
-                      <summary className="px-4 py-3 bg-[#f9fafb] font-medium text-[#1e293b] cursor-pointer">Modification History & Audit Trail</summary>
-                      <div className="px-4 py-4 border-t border-[#e2e8f0]">
-                        {mods.length === 0 ? <p className="text-sm text-[#64748b]">No history yet.</p> : mods.filter((m: any) => m.status === 'applied').map((m: any) => {
-                          const fullIndex = mods.indexOf(m);
-                          return (
-                          <div key={fullIndex} className="flex gap-3 mb-4">
-                            <span className="text-[#f97316] font-bold">●</span>
-                            <div>
-                              <p className="font-medium text-[#1e293b]">[{m.date}] Modification {fullIndex + 1} — {MODIFICATION_TYPE_OPTIONS.find((o) => o.value === m.type)?.label?.split('—')[0] || m.type} — Applied{m.appliedBy ? ` by ${m.appliedBy}` : ''}</p>
-                              <p className="text-sm text-[#64748b] ml-4">↓ Lease liability: {fmt(m.priorLL ?? 0)} → {fmt(m.newLL ?? 0)}</p>
-                              <p className="text-sm text-[#64748b] ml-4">↓ ROU adjustment: {fmt(m.rouAdjustment ?? 0)}</p>
-                            </div>
-                          </div>
-                          );
-                        })}
-                      </div>
-                    </details>
-                  </>
-                ) : (
-                  <div className="space-y-6">
-                    <Button variant="secondary" className="mb-2" onClick={() => { setModificationPanel('list'); setModificationFormIndex(null); }}>← Back to list</Button>
-                    <h4 className="text-lg font-semibold text-[#1e293b]">{modificationFormIndex === null ? 'New Modification' : `Edit Modification ${(modificationFormIndex ?? 0) + 1}`}</h4>
-
-                    <ModificationAIAdvisor
-                      extractorHints={contractData}
-                      formOverlay={modificationAdvisorFormOverlay}
-                      modificationInputs={{
-                        modification_type: modificationForm.type,
-                        new_payment: newMonthly,
-                        original_payment: currentMonthly,
-                        new_lease_term_months: newTerm,
-                        original_lease_term_months: currentTermMonths,
-                      }}
-                      currentModificationType={modificationForm.type}
-                      onAccept={(type) => setModificationForm((p) => ({ ...p, type }))}
-                    />
-
-                    <section className="rounded-xl border border-[#e2e8f0] p-6 bg-white">
-                      <h5 className="text-sm font-semibold text-[#64748b] uppercase mb-4">Part A — Modification Details</h5>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                        <div><label className={labelClass}>Modification Date</label><input type="date" className={inputClass} value={modificationForm.date} onChange={(e) => setModificationForm((p) => ({ ...p, date: e.target.value }))} /></div>
-                        <div><label className={labelClass}>Effective Date</label><input type="date" className={inputClass} value={modificationForm.effectiveDate} onChange={(e) => setModificationForm((p) => ({ ...p, effectiveDate: e.target.value }))} /></div>
-                        <div><label className={labelClass}>Modification Type</label><select className={inputClass} value={modificationForm.type} onChange={(e) => setModificationForm((p) => ({ ...p, type: e.target.value }))}>{MODIFICATION_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
-                        <div><label className={labelClass}>Modification Reason</label><input type="text" className={inputClass} value={modificationForm.reason} onChange={(e) => setModificationForm((p) => ({ ...p, reason: e.target.value }))} placeholder="Brief reason" /></div>
-                      </div>
-                      <label className={labelClass}>Modification Notes (audit trail)</label>
-                      <textarea className={inputClass + ' min-h-[80px]'} value={modificationForm.notes} onChange={(e) => setModificationForm((p) => ({ ...p, notes: e.target.value }))} placeholder="Describe the change..." />
-                    </section>
-
-                    <section className="rounded-xl border border-[#e2e8f0] p-6 bg-white">
-                      <h5 className="text-sm font-semibold text-[#64748b] uppercase mb-4">Part B — Revised Lease Terms</h5>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                        <div><label className={labelClass}>Current End Date</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={currentEndDate} /></div>
-                        <div><label className={labelClass}>New End Date</label><input type="date" className={inputClass} value={modificationForm.newEndDate} onChange={(e) => setModificationForm((p) => ({ ...p, newEndDate: e.target.value }))} /></div>
-                        <div><label className={labelClass}>Current Term (months)</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={currentTermMonths} /></div>
-                        <div><label className={labelClass}>New Term (months)</label><input type="text" className={inputClass + ' bg-gray-100 font-mono'} readOnly value={newTerm} /></div>
-                        <div><label className={labelClass}>Current Monthly Payment</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={fmt(currentMonthly)} /></div>
-                        <div><label className={labelClass}>New Monthly Payment</label><input type="number" className={inputClass} value={modificationForm.newMonthlyPayment} onChange={(e) => setModificationForm((p) => ({ ...p, newMonthlyPayment: e.target.value }))} /></div>
-                        <div><label className={labelClass}>Current IBR %</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={ibrPct} /></div>
-                        <div><label className={labelClass}>New IBR %</label><input type="number" className={inputClass} value={modificationForm.newIBR} onChange={(e) => setModificationForm((p) => ({ ...p, newIBR: e.target.value }))} placeholder={String(ibrPct)} /></div>
-                        {restorationNum > 0 && <><div><label className={labelClass}>Current Restoration</label><input type="text" className={inputClass + ' bg-gray-100'} readOnly value={fmt(priorRCBase)} /></div><div><label className={labelClass}>New Restoration</label><input type="number" className={inputClass} value={modificationForm.newRestoration} onChange={(e) => setModificationForm((p) => ({ ...p, newRestoration: e.target.value }))} /></div></>}
-                      </div>
-                    </section>
-
-                    <section className="rounded-xl border-2 border-dashed border-[#f97316] bg-[#fff7ed]/30 p-6">
-                      <h5 className="text-sm font-semibold text-[#f97316] mb-4">Part C — Remeasurement Calculation</h5>
-                      <div className="space-y-2 text-sm font-mono mb-4">
-                        <p><strong>Step 1 — Revised Lease Liability:</strong> PV of remaining payments at new IBR = {fmt(revisedLL)}</p>
-                        <p><strong>Step 2 — Previous Lease Liability:</strong> Carrying amount on modification date = {fmt(priorLL)}</p>
-                        <p><strong>Step 3 — Adjustment to Lease Liability:</strong> = {fmt(revisedLL)} − {fmt(priorLL)} = <span className={llAdjustment >= 0 ? 'text-green-600' : 'text-red-600'}>{fmt(llAdjustment)}</span></p>
-                        <p><strong>Step 4 — ROU Asset Adjustment:</strong> {fmt(rouAdjustment)}</p>
-                        {restorationNum > 0 && <p><strong>Step 5 — Restoration Cost Adjustment:</strong> {fmt(rcAdjustment)}</p>}
-                      </div>
-                      <div className="rounded-lg border border-[#e2e8f0] bg-white p-4">
-                        <p className="text-xs font-semibold text-[#64748b] uppercase mb-2">Summary</p>
-                        <table className="w-full text-sm"><thead><tr><th className="text-left py-1 font-medium text-[#64748b]">Description</th><th className="text-right py-1 font-medium text-[#64748b]">Prior</th><th className="text-right py-1 font-medium text-[#f97316]">After</th></tr></thead><tbody>
-                          <tr><td className="py-1">ROU</td><td className="py-1 text-right font-mono text-[#64748b]">{fmt(priorROUBase)}</td><td className="py-1 text-right font-mono text-[#f97316]">{fmt(newROU)}</td></tr>
-                          <tr><td className="py-1">Lease Liability</td><td className="py-1 text-right font-mono text-[#64748b]">{fmt(priorLL)}</td><td className="py-1 text-right font-mono text-[#f97316]">{fmt(revisedLL)}</td></tr>
-                          <tr><td className="py-1">Restoration Cost</td><td className="py-1 text-right font-mono text-[#64748b]">{fmt(priorRCBase)}</td><td className="py-1 text-right font-mono text-[#f97316]">{fmt(newRC)}</td></tr>
-                          <tr className="font-bold border-t border-[#e2e8f0]"><td className="py-2">Increase in Liability</td><td colSpan={2} className="py-2 text-right font-mono">{fmt(llAdjustment)}</td></tr>
-                          {rcAdjustment !== 0 && <tr><td className="py-1">Gain on RC modification</td><td colSpan={2} className="py-1 text-right font-mono text-[#f97316]">{fmt(rcAdjustment)}</td></tr>}
-                        </tbody></table>
-                      </div>
-                    </section>
-
-                    <section className="rounded-xl border border-[#e2e8f0] p-6 bg-white">
-                      <h5 className="text-sm font-semibold text-[#64748b] uppercase mb-4">Part D — Journal Entries</h5>
-                      <div className="space-y-2 mb-4">
-                        {journalEntries.length === 0 ? <p className="text-sm text-[#64748b]">No journal entry (no adjustment).</p> : journalEntries.map((je, idx) => (<div key={idx} className="flex justify-between items-center py-2 border-b border-[#e2e8f0]"><span className="text-sm">Dr {je.dr} / Cr {je.cr}</span><span className="font-mono font-semibold">{fmt(je.amount)}</span></div>))}
-                      </div>
-                      <Button variant="secondary" size="sm" onClick={() => { const text = journalEntries.map((je) => `Dr ${je.dr}  Cr ${je.cr}  ${fmt(je.amount)}`).join('\n'); navigator.clipboard.writeText(text); toast.success('Copied'); }}>Copy Journal Entries</Button>
-                    </section>
-
-                    <div className="flex flex-wrap gap-3">
-                      <Button className="bg-[#f97316] text-white" onClick={() => { const newMod = { id: `MOD-${String(Date.now()).slice(-6)}`, date: modificationForm.date, effectiveDate: modificationForm.effectiveDate || modificationForm.date, type: modificationForm.type, reason: modificationForm.reason, notes: modificationForm.notes, priorLL, newLL: revisedLL, priorROU: priorROUBase, newROU, priorRC: priorRCBase, newRC, llAdjustment, rouAdjustment, gainLoss, journalEntries, status: 'draft', newEndDate: modificationForm.newEndDate, newMonthlyPayment: newMonthly, newIBR: newIBR }; const next = modificationFormIndex === null ? [...mods, newMod] : mods.map((m: any, j: number) => j === modificationFormIndex ? { ...m, ...newMod } : m); setForm((p) => ({ ...p, modifications: next })); setModificationPanel('list'); setModificationFormIndex(null); markDirty('modifications'); toast.success('Saved as draft'); }}>💾 Save Draft</Button>
-                      <Button className="bg-green-600 text-white hover:bg-green-700" onClick={() => { const newMod = { id: modificationFormIndex !== null && mods[modificationFormIndex]?.id ? mods[modificationFormIndex].id : `MOD-${String(Date.now()).slice(-6)}`, date: modificationForm.date, effectiveDate: modificationForm.effectiveDate || modificationForm.date, type: modificationForm.type, reason: modificationForm.reason, notes: modificationForm.notes, priorLL, newLL: revisedLL, priorROU: priorROUBase, newROU, priorRC: priorRCBase, newRC, llAdjustment, rouAdjustment, gainLoss, journalEntries, status: 'applied', appliedAt: new Date().toISOString(), appliedBy: 'User', newEndDate: modificationForm.newEndDate, newMonthlyPayment: newMonthly, newIBR: newIBR }; const next = modificationFormIndex === null ? [...mods, newMod] : mods.map((m: any, j: number) => j === modificationFormIndex ? { ...m, ...newMod } : m); setForm((p) => ({ ...p, modifications: next })); setModificationPanel('list'); setModificationFormIndex(null); markDirty('modifications'); toast.success('Modification applied. All schedules recalculated.'); }}>🧮 Apply Modification</Button>
-                      <Button variant="secondary" onClick={() => { setModificationPanel('list'); setModificationFormIndex(null); }}>Cancel</Button>
-                    </div>
-                  </div>
-                )}
-
-                <section className="mb-6">
-                  <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Variable Lease Payments</h4>
-                <label className="flex items-center gap-2 mb-2"><input type="checkbox" checked={form.variablePayments} onChange={(e) => { setForm((p) => ({ ...p, variablePayments: e.target.checked })); markDirty('modifications'); }} /> Variable Payments Exist</label>
-                {form.variablePayments && (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div><label className={labelClass}>Description</label><input type="text" value={form.variableDescription} onChange={(e) => { setForm((p) => ({ ...p, variableDescription: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
-                    <div><label className={labelClass}>Estimated annual amount{financialSym ? ` (${financialSym})` : ''}</label><input type="number" value={form.variableAnnualAmount} onChange={(e) => { setForm((p) => ({ ...p, variableAnnualAmount: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
-                    <div><label className={labelClass}>Basis</label><input type="text" value={form.variableBasis} onChange={(e) => { setForm((p) => ({ ...p, variableBasis: e.target.value })); markDirty('modifications'); }} className={inputClass} placeholder="Sales %, Usage-based, Index-linked" /></div>
-                  </div>
-                )}
-              </section>
-              <section className="mb-6">
-                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">CPI / Index Adjustments</h4>
-                <label className="flex items-center gap-2 mb-2"><input type="checkbox" checked={form.cpiAdjustments} onChange={(e) => { setForm((p) => ({ ...p, cpiAdjustments: e.target.checked })); markDirty('modifications'); }} /> CPI Adjustments Apply</label>
-                {form.cpiAdjustments && (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div><label className={labelClass}>Base Index Value</label><input type="number" value={form.baseIndexValue} onChange={(e) => { setForm((p) => ({ ...p, baseIndexValue: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
-                    <div><label className={labelClass}>Current Index Value</label><input type="number" value={form.currentIndexValue} onChange={(e) => { setForm((p) => ({ ...p, currentIndexValue: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
-                    <div><label className={labelClass}>CPI review every (months)</label><input type="number" min="1" step="1" value={form.cpiAdjustmentFrequencyMonths} onChange={(e) => { setForm((p) => ({ ...p, cpiAdjustmentFrequencyMonths: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
-                    <div><label className={labelClass}>Last Adjustment Date</label><input type="date" value={form.lastAdjustmentDate} onChange={(e) => { setForm((p) => ({ ...p, lastAdjustmentDate: e.target.value })); markDirty('modifications'); }} className={inputClass} /></div>
-                  </div>
-                )}
-                {form.cpiAdjustments && calcResults && (
-                  <CpiRemeasurementPanel
-                    leaseId={String(params?.id || '')}
-                    originalPayment={parseFloat(String(form.baseRentAmount)) || 0}
-                    ibrPct={parseFloat(String(form.discountRate)) || 0}
-                    remainingMonths={12}
-                    currentLiability={Number(calcResults.lease_liability ?? 0)}
-                    currentRou={Number(calcResults.rou_asset ?? 0)}
-                    baseIndex={parseFloat(String(form.baseIndexValue)) || 100}
-                    currentIndex={parseFloat(String(form.currentIndexValue)) || 100}
-                    currency={displayCurrency}
-                  />
-                )}
-              </section>
-              <div className="flex justify-end">
-                <Button onClick={() => { handleSaveToRepo(); setDirtyTabs((s) => { const n = new Set(s); n.delete('modifications'); return n; }); }} className="bg-[#f97316] text-white">Save Tab</Button>
-              </div>
-            </>
-            );
-          })()}
-
           {activeTab === 'assets' && (
             <>
               <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2"><MapPin className="w-5 h-5 text-[#f97316]" /> Assets & Locations</h3>
-              <AssetsLocationsTab
-                form={form}
-                setForm={setForm}
-                markDirty={markDirty}
-                inputClass={inputClass}
-                labelClass={labelClass}
-                extractedConfidences={extractedConfidences}
-                onClearExtractedField={clearExtractedField}
-              />
-              <div className="flex justify-end">
-                <Button onClick={() => { handleSaveToRepo(); setDirtyTabs((s) => { const n = new Set(s); n.delete('assets'); return n; }); }} className="bg-[#f97316] text-white">Save Tab</Button>
-              </div>
+              {!assetsTabEnabled ? (
+                <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-6">
+                  <div className="flex items-start gap-3">
+                    <Info className="w-5 h-5 text-[#64748b] mt-0.5 shrink-0" />
+                    <div>
+                      <h4 className="text-sm font-semibold text-[#1e293b] mb-1">
+                        Complete Contract Details and Financial Management first
+                      </h4>
+                      <p className="text-sm text-[#64748b] mb-4">
+                        Assets & Locations depends on the lease dates and basic financial inputs so ROU mapping,
+                        IBR benchmarks, and location defaults are based on the right lease context.
+                      </p>
+                      <div className="flex flex-wrap gap-2 mb-4">
+                        {missingAssetPrerequisites.map((item) => (
+                          <span
+                            key={item.label}
+                            className="px-2 py-1 rounded-full bg-white border border-[#e2e8f0] text-xs font-medium text-[#64748b]"
+                          >
+                            Missing: {item.label}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button variant="secondary" className="border border-[#e2e8f0] bg-white" onClick={() => setActiveTab('contract')}>
+                          Go to Contract Details
+                        </Button>
+                        <Button variant="secondary" className="border border-[#e2e8f0] bg-white" onClick={() => setActiveTab('financial')}>
+                          Go to Financial Management
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <AssetsLocationsTab
+                    form={form}
+                    setForm={setForm}
+                    markDirty={markDirty}
+                    inputClass={inputClass}
+                    labelClass={labelClass}
+                    extractedConfidences={extractedConfidences}
+                    onClearExtractedField={clearExtractedField}
+                  />
+                  <div className="flex justify-end">
+                    <Button onClick={() => { handleSaveToRepo(); setDirtyTabs((s) => { const n = new Set(s); n.delete('assets'); return n; }); }} className="bg-[#f97316] text-white">Save Tab</Button>
+                  </div>
+                </>
+              )}
             </>
           )}
 

@@ -7,34 +7,11 @@ import {
   monthsBetweenDates,
 } from './lease-form-shared';
 import { FieldLabelWithExtraction } from './FieldLabelWithExtraction';
-
-function SectionTitle({
-  label,
-  subtitle,
-  underline,
-}: {
-  label: string;
-  subtitle?: string;
-  underline: 'orange' | 'grey' | 'gold';
-}) {
-  const colors = { orange: '#E05A28', grey: '#94a3b8', gold: '#C9A84C' };
-  return (
-    <div className="mb-4">
-      <p className="text-[11px] uppercase tracking-[0.05em] text-gray-600 font-semibold">{label}</p>
-      {subtitle && <p className="text-[10px] text-[#64748b] mt-0.5">{subtitle}</p>}
-      <div className="h-0.5 mt-1.5 rounded-full" style={{ backgroundColor: colors[underline] }} />
-    </div>
-  );
-}
-
-function RequiredLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600 mb-1">
-      {children}
-      <span className="text-red-500 ml-0.5">*</span>
-    </label>
-  );
-}
+import {
+  CollapsibleFormSection,
+  ContextHelpCallout,
+  TintedSectionCard,
+} from './lease-form-ui';
 
 function HelperText({ children }: { children: React.ReactNode }) {
   return <p className="text-[10px] text-[#64748b] mt-1">{children}</p>;
@@ -85,11 +62,12 @@ export function ContractDetailsTab({
   return (
     <section className="mb-6 space-y-4">
       {/* Group A — Parties & identification */}
-      <div className="bg-white border border-gray-200 rounded-xl p-5 mb-4">
-        <div className="flex items-center gap-2 mb-4">
-          <span className="text-orange-500">📋</span>
-          <h3 className="text-sm font-semibold text-gray-800">Parties & identification</h3>
-        </div>
+      <TintedSectionCard
+        title="Parties & identification"
+        icon={<span className="text-orange-500">📋</span>}
+        tintClass="bg-slate-50"
+        borderClass="border-slate-200"
+      >
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div>
             <label className={labelClass}>Transaction type</label>
@@ -98,7 +76,9 @@ export function ContractDetailsTab({
               onChange={(e) => patch({ transactionType: e.target.value })}
               className={inputClassFilled(inputClass, form.transactionType)}
             >
-              {TRANSACTION_TYPES.map((o) => <option key={o}>{o}</option>)}
+              {TRANSACTION_TYPES.map((o) => (
+                <option key={o}>{o}</option>
+              ))}
             </select>
           </div>
           <div>
@@ -112,7 +92,13 @@ export function ContractDetailsTab({
           </div>
           <div>
             <label className={labelClass}>Lease ID</label>
-            <input type="text" value={form.leaseId || ''} readOnly className={inputClassFilled(inputClass, form.leaseId)} />
+            <input
+              type="text"
+              value={form.leaseId || ''}
+              readOnly
+              className={inputClassFilled(inputClass, form.leaseId)}
+            />
+            <HelperText>Auto-generated — used in repository & reports</HelperText>
           </div>
           <div>
             <FieldLabelWithExtraction field="title" extractedConfidences={extractedConfidences}>
@@ -134,7 +120,9 @@ export function ContractDetailsTab({
               onChange={(e) => patch({ leaseStatus: e.target.value })}
               className={inputClassFilled(inputClass, form.leaseStatus)}
             >
-              {LEASE_STATUS_OPTIONS.map((o) => <option key={o}>{o}</option>)}
+              {LEASE_STATUS_OPTIONS.map((o) => (
+                <option key={o}>{o}</option>
+              ))}
             </select>
           </div>
           <div>
@@ -145,21 +133,23 @@ export function ContractDetailsTab({
               onChange={(e) => patch({ modificationDate: e.target.value })}
               className={inputClassFilled(inputClass, form.modificationDate)}
             />
+            <HelperText>Only if terms changed after commencement</HelperText>
           </div>
         </div>
-      </div>
+      </TintedSectionCard>
 
       {/* Group B — Core lease dates */}
-      <div className="bg-blue-50 border border-blue-100 rounded-xl p-5 mb-4">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <span className="text-blue-500">📅</span>
-            <h3 className="text-sm font-semibold text-gray-800">Core lease dates</h3>
-          </div>
-          <span className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded">
+      <TintedSectionCard
+        title="Core lease dates"
+        icon={<span className="text-blue-500">📅</span>}
+        badge={
+          <span className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded font-medium">
             Required for IFRS 16 calculation
           </span>
-        </div>
+        }
+        tintClass="bg-blue-50"
+        borderClass="border-blue-100"
+      >
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
             <FieldLabelWithExtraction field="startDate" extractedConfidences={extractedConfidences} required>
@@ -222,21 +212,21 @@ export function ContractDetailsTab({
             />
           </div>
         </div>
-      </div>
+      </TintedSectionCard>
 
-      {/* Section B — Modification & exit dates */}
-      <div>
-        <SectionTitle label="Modification & exit dates" underline="grey" />
-        <div
-          className="text-xs text-[#1e293b] rounded-r-md px-3 py-2.5 mb-4 border-l-[3px]"
-          style={{ background: '#E6F1FB', borderLeftColor: '#378ADD' }}
-        >
+      {/* Section — Modification & exit dates (collapsed) */}
+      <CollapsibleFormSection
+        title="Modification & exit dates"
+        subtitle="Only if modified, terminated early, extended or renewed"
+        tintClass="bg-gray-50"
+      >
+        <ContextHelpCallout>
           Complete these only if this lease has been modified, terminated early, extended or renewed. Leave
           blank for a standard active lease.
-        </div>
+        </ContextHelpCallout>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {modCards.map((card) => (
-            <div key={card.key} className="rounded-lg p-3 bg-[#f8fafc] border border-[#e2e8f0]">
+            <div key={card.key} className="rounded-lg p-3 bg-white border border-[#e2e8f0]">
               <div className="flex justify-between items-start gap-2 mb-2">
                 <span className="text-sm font-medium text-[#1e293b]">{card.label}</span>
                 <span className="text-[10px] text-[#64748b] shrink-0">{MOD_HINTS[card.key]}</span>
@@ -250,11 +240,19 @@ export function ContractDetailsTab({
             </div>
           ))}
         </div>
-      </div>
+      </CollapsibleFormSection>
 
-      {/* Section C — UAE-specific details */}
-      <div>
-        <SectionTitle label="UAE-specific details" underline="gold" />
+      {/* Section — UAE-specific details (collapsed) */}
+      <CollapsibleFormSection
+        title="UAE-specific details"
+        subtitle="Dubai / RERA real estate leases"
+        tintClass="bg-amber-50/60"
+      >
+        <ContextHelpCallout variant="tip">
+          <strong>RERA registration</strong> links the lease to Dubai Land Department records — required for UAE
+          real estate audits and escrow compliance. Contract sealing date/location support legal enforceability
+          under UAE property law.
+        </ContextHelpCallout>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
             <label className={labelClass}>RERA registration no</label>
@@ -288,11 +286,18 @@ export function ContractDetailsTab({
             />
           </div>
         </div>
-      </div>
+      </CollapsibleFormSection>
 
-      {/* Residual / purchase options (preserved from prior layout) */}
-      <div>
-        <SectionTitle label="Other contract amounts" underline="grey" />
+      {/* Section — Other contract amounts (collapsed) */}
+      <CollapsibleFormSection
+        title="Other contract amounts"
+        subtitle="Residual value, purchase options & contract reduction"
+        tintClass="bg-slate-50"
+      >
+        <ContextHelpCallout>
+          Include residual value guarantees and purchase options only if they affect lease classification or
+          liability measurement under IFRS 16 paras 26–27.
+        </ContextHelpCallout>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
             <label className={labelClass}>Residual value</label>
@@ -321,7 +326,7 @@ export function ContractDetailsTab({
           />
           Enable contract reduction
         </label>
-      </div>
+      </CollapsibleFormSection>
     </section>
   );
 }

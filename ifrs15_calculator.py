@@ -567,6 +567,7 @@ class ContractModification:
     remaining_transaction_price: float
     remaining_performance_obligations: List[str]
     original_ssps: Dict[str, float]
+    currency: str = "USD"
 
 
 @dataclass
@@ -1049,21 +1050,6 @@ class IFRS15VariableConsiderationEngine:
             "most_likely": round(most_likely, 2),
             "variance": round(variance, 2),
         }
-
-        constraint_warning = ""
-        if constraint_level == "high":
-            inc_pct = (constrained_amount / expected_amount * 100.0) if abs(expected_amount) > 1e-12 else constraint_multiplier * 100.0
-            constraint_warning = (
-                f"HIGH constraint applied ({inc_pct:.0f}% of expected value included). "
-                f"Revenue at risk: ${revenue_at_risk:,.0f}. "
-                f"Consider whether variable consideration should be excluded entirely until "
-                f"uncertainty resolves (IFRS 15.57)."
-            )
-        elif constraint_level == "moderate":
-            constraint_warning = (
-                f"Moderate constraint applied. ${revenue_at_risk:,.0f} excluded "
-                f"from transaction price pending resolution of uncertainty."
-            )
 
         return {
             "method": method,
@@ -3163,8 +3149,8 @@ class IFRS15Calculator:
             "expected_loss": float(expected_loss),
             "formula": (
                 f"POC {poc_pct*100:.1f}% × "
-                f"${float(total_contract):,.0f} = "
-                f"${float(cumulative_revenue):,.0f}"
+                f"{format_ifrs15_currency(float(total_contract), c.currency)} = "
+                f"{format_ifrs15_currency(float(cumulative_revenue), c.currency)}"
             ),
         }
 
@@ -3425,6 +3411,7 @@ class IFRS15Calculator:
             "before_modification": {},
             "after_modification": {},
         }
+        cur = str(mod.currency or "USD")
 
         new_ssp_total = sum(
             float(mod.original_ssps.get(g, 0) or 0)
@@ -3441,7 +3428,7 @@ class IFRS15Calculator:
                 f"This modification adds distinct goods/services "
                 f"({', '.join(mod.new_goods_services)}) at a price "
                 f"commensurate with their standalone selling price "
-                f"(${new_ssp_total:,.0f}). "
+                f"({format_ifrs15_currency(new_ssp_total, cur)}). "
                 f"Under IFRS 15.18, this is accounted for as a "
                 f"separate contract. The original contract recognition "
                 f"schedule is unchanged."
@@ -3467,9 +3454,9 @@ class IFRS15Calculator:
                 f"performance obligations which are distinct. "
                 f"Under IFRS 15.20(b), the modification is "
                 f"treated prospectively. The new transaction "
-                f"price is ${new_tp:,.2f} (remaining "
-                f"${float(mod.remaining_transaction_price):,.2f} "
-                f"+ change ${float(mod.price_change):,.2f}), "
+                f"price is {format_ifrs15_currency(new_tp, cur)} (remaining "
+                f"{format_ifrs15_currency(float(mod.remaining_transaction_price), cur)} "
+                f"+ change {format_ifrs15_currency(float(mod.price_change), cur)}), "
                 f"allocated to the remaining "
                 f"{len(mod.remaining_performance_obligations)} "
                 f"performance obligations using updated SSPs."
@@ -3530,7 +3517,7 @@ class IFRS15Calculator:
                 f"Under IFRS 15.21, the modification is "
                 f"treated as if it existed from inception. "
                 f"A catch-up adjustment of "
-                f"${abs(catch_up):,.2f} is recognised "
+                f"{format_ifrs15_currency(abs(catch_up), cur)} is recognised "
                 f"in the current period "
                 f"({'increase' if catch_up > 0 else 'decrease'}"
                 f" to revenue)."
@@ -3554,6 +3541,7 @@ class IFRS15Calculator:
 
     def deferred_revenue_rollforward(self, data: DeferredRevenueInput) -> Dict[str, Any]:
         """IFRS 15.116 — Contract liabilities roll-forward reconciliation."""
+        cur = str(data.currency or "USD")
         calculated_closing = (
             float(data.opening_balance)
             + float(data.new_bookings)
@@ -3582,9 +3570,9 @@ class IFRS15Calculator:
                     ),
                     "description": (
                         f"Calculated closing balance "
-                        f"(${calculated_closing:,.2f}) differs from "
-                        f"GL balance (${gl_cb:,.2f}) "
-                        f"by ${variance:,.2f} "
+                        f"({format_ifrs15_currency(calculated_closing, cur)}) differs from "
+                        f"GL balance ({format_ifrs15_currency(gl_cb, cur)}) "
+                        f"by {format_ifrs15_currency(variance, cur)} "
                         f"({variance_pct:.2f}%). Investigation required."
                     ),
                     "action": (
@@ -4690,16 +4678,18 @@ class IFRS15Calculator:
                 current = current + relativedelta(months=1)
             revenue_amount = monthly
 
+        cur = str(data.currency or "USD")
         if license_type == "RIGHT_TO_ACCESS":
             explanation = (
                 f"'{data.product_name}' is a RIGHT TO ACCESS licence. All three IFRS 15.B58 criteria are met: the entity's ongoing activities "
                 f"significantly affect the IP, the customer is exposed to those effects, and the IP lacks standalone utility. Revenue of "
-                f"${data.license_fee:,.2f} is recognised OVER TIME — straight-line over the licence period ({len(schedule)} months)."
+                f"{format_ifrs15_currency(float(data.license_fee), cur)} is recognised OVER TIME — straight-line over the licence period ({len(schedule)} months)."
             )
         elif license_type == "RIGHT_TO_USE":
             explanation = (
                 f"'{data.product_name}' is a RIGHT TO USE licence. The entity's ongoing activities do not significantly affect the IP after delivery. "
-                f"The customer receives a static right to use the IP as it exists at the grant date. Revenue of ${data.license_fee:,.2f} is recognised at the "
+                f"The customer receives a static right to use the IP as it exists at the grant date. Revenue of "
+                f"{format_ifrs15_currency(float(data.license_fee), cur)} is recognised at the "
                 f"POINT IN TIME when the licence is made accessible to the customer (IFRS 15.B56)."
             )
         else:
@@ -4762,6 +4752,7 @@ class IFRS15Calculator:
 
     def assess_material_right(self, data: CustomerOptionInput) -> Dict[str, Any]:
         """IFRS 15.B40–B43 — customer options; material right vs incremental discount proxy."""
+        cur = str(data.currency or "USD")
         prob = min(1.0, max(0.0, float(data.exercise_probability or 0.0)))
         option_ssp = float(data.option_ssp or 0.0)
         option_price = float(data.option_price or 0.0)
@@ -4785,7 +4776,7 @@ class IFRS15Calculator:
                 "exercise_probability_pct": round(prob * 100.0, 1),
                 "explanation": (
                     f"No material right identified. The option discount of {discount_pct:.1f}% "
-                    f"(${discount_amount:,.2f}) does not represent an incremental benefit beyond discounts available to "
+                    f"({format_ifrs15_currency(discount_amount, cur)}) does not represent an incremental benefit beyond discounts available to "
                     f"similar customers in the market. This option is NOT a separate performance obligation. Account "
                     f"for any renewal or exercise if and when it occurs."
                 ),
@@ -4805,14 +4796,14 @@ class IFRS15Calculator:
         allocated_option = round(float(data.original_contract_value) * alloc_ratio_option, 2)
 
         explanation = (
-            f"A material right EXISTS. The renewal/option price of ${option_price:,.2f} represents a {discount_pct:.1f}% "
-            f"discount below the standalone selling price of ${option_ssp:,.2f} — a discount the customer would not receive "
+            f"A material right EXISTS. The renewal/option price of {format_ifrs15_currency(option_price, cur)} represents a {discount_pct:.1f}% "
+            f"discount below the standalone selling price of {format_ifrs15_currency(option_ssp, cur)} — a discount the customer would not receive "
             f"without entering the original contract (IFRS 15.B40).\n\n"
-            f"The option is a SEPARATE PERFORMANCE OBLIGATION. Its SSP is estimated at ${option_ssp_estimated:,.2f} "
-            f"(discount of ${discount_amount:,.2f} × exercise probability of {prob * 100:.0f}% per IFRS 15.B42).\n\n"
-            f"Of the ${float(data.original_contract_value):,.2f} original transaction price:\n"
-            f"  ${allocated_original:,.2f} allocated to original performance obligations\n"
-            f"  ${allocated_option:,.2f} allocated to the option (contract liability until exercised or expired)"
+            f"The option is a SEPARATE PERFORMANCE OBLIGATION. Its SSP is estimated at {format_ifrs15_currency(option_ssp_estimated, cur)} "
+            f"(discount of {format_ifrs15_currency(discount_amount, cur)} × exercise probability of {prob * 100:.0f}% per IFRS 15.B42).\n\n"
+            f"Of the {format_ifrs15_currency(float(data.original_contract_value), cur)} original transaction price:\n"
+            f"  {format_ifrs15_currency(allocated_original, cur)} allocated to original performance obligations\n"
+            f"  {format_ifrs15_currency(allocated_option, cur)} allocated to the option (contract liability until exercised or expired)"
         )
 
         journals = [
@@ -4835,7 +4826,8 @@ class IFRS15Calculator:
                 "credit_account": "Revenue",
                 "amount": option_price + allocated_option,
                 "note": (
-                    f"Revenue = ${option_price:,.2f} cash received + ${allocated_option:,.2f} released from contract liability"
+                    f"Revenue = {format_ifrs15_currency(option_price, cur)} cash received + "
+                    f"{format_ifrs15_currency(allocated_option, cur)} released from contract liability"
                 ),
                 "reference": "IFRS 15.B43",
             },
@@ -4898,6 +4890,7 @@ class IFRS15Calculator:
         Warranty > 24 months → strong service-type
         signal (IFRS 15.B31)
         """
+        cur = str(data.currency or "USD")
         if data.required_by_law and data.covers_specs_only:
             warranty_type = "ASSURANCE"
             confidence = "HIGH"
@@ -4954,7 +4947,7 @@ class IFRS15Calculator:
                 f"assurance warranties are NOT performance "
                 f"obligations. Account for under IAS 37: "
                 f"recognise a provision of "
-                f"${data.warranty_value:,.2f} at the "
+                f"{format_ifrs15_currency(float(data.warranty_value), cur)} at the "
                 f"point of sale. Warranty costs are "
                 f"presented in cost of sales, not as a "
                 f"deduction from revenue."
@@ -4972,10 +4965,10 @@ class IFRS15Calculator:
                 f"This is a SERVICE-TYPE warranty — a "
                 f"separate performance obligation under "
                 f"IFRS 15.B30. Allocate "
-                f"${allocated:,.2f} of the transaction "
+                f"{format_ifrs15_currency(allocated, cur)} of the transaction "
                 f"price to this warranty. Recognise "
                 f"straight-line over {data.warranty_period_months}"
-                f" months (${monthly:,.2f}/month)."
+                f" months ({format_ifrs15_currency(monthly, cur)}/month)."
             )
             provision_required = False
             deferred_revenue = float(allocated)
@@ -5008,10 +5001,10 @@ class IFRS15Calculator:
                     else "It provides services beyond "
                     "specification assurance. "
                 )
-                + f"${allocated:,.2f} of the transaction "
+                + f"{format_ifrs15_currency(allocated, cur)} of the transaction "
                 f"price is allocated and recognised over "
                 f"{data.warranty_period_months} months "
-                f"(${monthly:,.2f}/month). This creates a "
+                f"({format_ifrs15_currency(monthly, cur)}/month). This creates a "
                 f"CONTRACT LIABILITY, not an IAS 37 provision."
             )
 
@@ -5119,6 +5112,7 @@ class IFRS15Calculator:
         If any criterion fails → DEFER REVENUE
         until physical delivery.
         """
+        cur = str(data.currency or "USD")
         combined = f"{data.product_description or ''}".lower()
         service_only_terms = (
             "construction",
@@ -5249,7 +5243,7 @@ class IFRS15Calculator:
                 f"Control has transferred to "
                 f"{data.customer_name} even though the "
                 f"product has not been physically delivered. "
-                f"Revenue of ${data.contract_value:,.2f} "
+                f"Revenue of {format_ifrs15_currency(float(data.contract_value), cur)} "
                 f"may be recognised on the billing date "
                 f"({data.billing_date}). "
                 f"Disclose the bill-and-hold arrangement "
@@ -5278,7 +5272,7 @@ class IFRS15Calculator:
                 f"Revenue CANNOT be recognised on the "
                 f"billing date. Control has not yet "
                 f"transferred to {data.customer_name}. "
-                f"Revenue of ${data.contract_value:,.2f} "
+                f"Revenue of {format_ifrs15_currency(float(data.contract_value), cur)} "
                 f"must be DEFERRED until physical delivery "
                 f"on or after {data.expected_delivery_date}. "
                 f"\nFailed criteria: "
@@ -5630,13 +5624,14 @@ class IFRS15Calculator:
             fv = float(item.fair_value or 0)
             ssp = float(item.fallback_ssp or 0)
             ctype = (item.consideration_type or "other").strip().lower()
+            cur = str(item.currency or "USD")
 
             if fv_ok:
                 tp_addition = round(fv, 2)
                 method = "FAIR_VALUE"
                 explanation = (
                     f"Non-cash consideration ({ctype}) measured at fair value of "
-                    f"${tp_addition:,.2f} at contract inception per IFRS 15.66. "
+                    f"{format_ifrs15_currency(tp_addition, cur)} at contract inception per IFRS 15.66. "
                     f"Included in transaction price."
                 )
             else:
@@ -5645,7 +5640,7 @@ class IFRS15Calculator:
                 explanation = (
                     f"Fair value of non-cash consideration ({ctype}) cannot be "
                     f"reliably estimated. Per IFRS 15.67, using the standalone selling "
-                    f"price of the promised goods/services as a proxy: ${tp_addition:,.2f}."
+                    f"price of the promised goods/services as a proxy: {format_ifrs15_currency(tp_addition, cur)}."
                 )
 
             total_tp_adjustment += tp_addition
@@ -5694,13 +5689,14 @@ class IFRS15Calculator:
             fv_ben = float(item.fair_value_of_benefit or 0)
             distinct = bool(item.distinct_benefit_received)
             ptype = (item.payment_type or "cash").strip().lower()
+            cur = str(item.currency or "USD")
 
             if not distinct:
                 revenue_reduction = round(amt, 2)
                 cost_recognition = 0.0
                 treatment = "REVENUE_REDUCTION"
                 explanation = (
-                    f"${amt:,.2f} payable to the customer ({item.description}) reduces the "
+                    f"{format_ifrs15_currency(amt, cur)} payable to the customer ({item.description}) reduces the "
                     f"transaction price. No distinct benefit is received by the entity in return. "
                     f"Per IFRS 15.70, this is NOT a cost — it is a reduction of revenue. "
                     f"Recognised when the later of: (a) entity recognises revenue, or "
@@ -5723,8 +5719,8 @@ class IFRS15Calculator:
                     treatment = "COST_FULL"
                     explanation = (
                         f"The entity receives a distinct benefit from the customer with "
-                        f"fair value ${fv_ben:,.2f} ≥ payment of ${amt:,.2f}. "
-                        f"Per IFRS 15.72, the full ${amt:,.2f} is recognised as a COST, "
+                        f"fair value {format_ifrs15_currency(fv_ben, cur)} ≥ payment of {format_ifrs15_currency(amt, cur)}. "
+                        f"Per IFRS 15.72, the full {format_ifrs15_currency(amt, cur)} is recognised as a COST, "
                         f"not a revenue reduction."
                     )
                     journals = [
@@ -5742,9 +5738,9 @@ class IFRS15Calculator:
                     revenue_reduction = round(amt - fv_ben, 2)
                     treatment = "COST_PLUS_REVENUE_REDUCTION"
                     explanation = (
-                        f"Fair value of benefit received (${fv_ben:,.2f}) is less than the "
-                        f"payment (${amt:,.2f}). Per IFRS 15.72: ${fv_ben:,.2f} recognised as COST; "
-                        f"excess ${revenue_reduction:,.2f} reduces revenue."
+                        f"Fair value of benefit received ({format_ifrs15_currency(fv_ben, cur)}) is less than the "
+                        f"payment ({format_ifrs15_currency(amt, cur)}). Per IFRS 15.72: {format_ifrs15_currency(fv_ben, cur)} recognised as COST; "
+                        f"excess {format_ifrs15_currency(revenue_reduction, cur)} reduces revenue."
                     )
                     journals = [
                         {

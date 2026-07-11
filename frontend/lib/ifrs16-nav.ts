@@ -69,19 +69,17 @@ export function ifrs16NavHref(id: Ifrs16NavId): string | undefined {
 }
 
 export const IFRS16_LEASE_STEPS = [
-  { id: 1, label: 'Contract Details', description: 'Parties, dates & terms' },
+  { id: 1, label: 'Contract Details', description: 'Parties, dates, terms & modifications' },
   { id: 2, label: 'Financial Management', description: 'Payments, IBR & costs' },
-  { id: 3, label: 'Modifications', description: 'Remeasurement & changes' },
-  { id: 4, label: 'Assets & Locations', description: 'ROU asset mapping' },
-  { id: 5, label: 'Schedules', description: 'Liability & depreciation' },
-  { id: 6, label: 'Disclosures', description: 'IFRS 16 notes' },
-  { id: 7, label: 'Review & Export', description: 'Journals, PDF & Excel' },
+  { id: 3, label: 'Assets & Locations', description: 'ROU asset mapping' },
+  { id: 4, label: 'Schedules', description: 'Liability & depreciation' },
+  { id: 5, label: 'Disclosures', description: 'IFRS 16 notes' },
+  { id: 6, label: 'Review & Export', description: 'Journals, PDF & Excel' },
 ];
 
 export type Ifrs16LeaseTabId =
   | 'contract'
   | 'financial'
-  | 'modifications'
   | 'assets'
   | 'schedules'
   | 'disclosures'
@@ -90,7 +88,6 @@ export type Ifrs16LeaseTabId =
 const IFRS16_TAB_STEP_ORDER: Ifrs16LeaseTabId[] = [
   'contract',
   'financial',
-  'modifications',
   'assets',
   'schedules',
   'disclosures',

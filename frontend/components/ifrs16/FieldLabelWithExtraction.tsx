@@ -21,9 +21,17 @@ export function FieldLabelWithExtraction({
   const confidence = extractedConfidences?.[field];
   return (
     <div className={`flex flex-wrap items-center gap-1.5 mb-1 ${className}`}>
-      <label className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600">
+      <label
+        className={`block text-[11px] uppercase tracking-wide ${
+          required ? 'font-bold text-gray-800' : 'font-semibold text-gray-600'
+        }`}
+      >
         {children}
-        {required && <span className="text-red-500 ml-0.5">*</span>}
+        {required && (
+          <span className="text-[#DC2626] font-bold ml-0.5 text-sm leading-none" aria-hidden>
+            *
+          </span>
+        )}
       </label>
       <ExtractedFieldBadge confidence={confidence} />
     </div>

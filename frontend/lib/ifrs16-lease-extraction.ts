@@ -287,7 +287,7 @@ export function buildLeaseExtractionResult(raw: unknown): LeaseExtractionResult 
   if (assetDescription || leaseType || country || city || location) {
     tabsWithData.add('assets');
   }
-  if (renewalOptions || terminationClauses) tabsWithData.add('modifications');
+  if (renewalOptions || terminationClauses) tabsWithData.add('contract');
 
   const scores = Object.values(confidences);
   const fieldCount = scores.length;

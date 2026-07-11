@@ -464,3 +464,44 @@ export function toLegacySpaExtracted(data: Record<string, unknown>): Record<stri
     payment_schedule: Array.isArray(plan) ? plan : [],
   };
 }
+
+/** Raw VC from step3 component fields (bonuses, rebates, penalties, etc.) — not EV-adjusted. */
+export function variableConsiderationComponentSum(varCons: Record<string, unknown> | null | undefined): number {
+  const vc = varCons || {};
+  return (
+    toFiniteNumber(vc.performance_bonuses) +
+    toFiniteNumber(vc.volume_discounts) -
+    toFiniteNumber(vc.discounts) -
+    toFiniteNumber(vc.rebates) -
+    toFiniteNumber(vc.penalties)
+  );
+}
+
+/**
+ * Canonical VC for calculate: prefer probability-weighted EV narrative when extraction provides it
+ * (IFRS 15.53 expected value); otherwise fall back to the raw component sum.
+ */
+export function resolveVariableConsiderationFromExtraction(extracted: unknown): number {
+  const ext = extracted as Record<string, unknown> | null | undefined;
+  const summary = (ext?.validation as Record<string, unknown> | undefined)?.variable_consideration_summary as
+    | Record<string, unknown>
+    | undefined;
+  const net = summary?.net_variable_consideration_included;
+  if (net !== undefined && net !== null && net !== '') {
+    const v = Number(net);
+    if (Number.isFinite(v)) return v;
+  }
+  const varCons = ((ext?.step3_transaction_price as Record<string, unknown> | undefined)?.variable_consideration ||
+    {}) as Record<string, unknown>;
+  return variableConsiderationComponentSum(varCons);
+}
+
+/** Transaction price = fixed consideration + canonical variable consideration (single source). */
+export function resolveTransactionPriceFromExtraction(extracted: unknown): number {
+  const ext = extracted as Record<string, unknown> | null | undefined;
+  const step1 = ((ext?.step1_identify_contract as Record<string, unknown> | undefined)?.contract_details ||
+    {}) as Record<string, unknown>;
+  const step3 = (ext?.step3_transaction_price as Record<string, unknown> | undefined) || {};
+  const fixed = toFiniteNumber(step3.fixed_consideration ?? step1.total_contract_value, 0);
+  return fixed + resolveVariableConsiderationFromExtraction(extracted);
+}

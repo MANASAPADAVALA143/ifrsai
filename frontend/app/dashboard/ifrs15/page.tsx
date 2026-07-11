@@ -14,6 +14,8 @@ import {
 import {
   isUaeSpaExtraction,
   mapUaeSpaToCalculatePayload,
+  resolveTransactionPriceFromExtraction,
+  resolveVariableConsiderationFromExtraction,
   sanitizeIfrs15CalculatePayload,
   toFiniteNumber,
 } from '@/lib/ifrs15-contract-extraction';
@@ -50,6 +52,10 @@ import {
 import {
   buildIfrs15ContractFromCalculate,
   buildIfrs15ContractFromPortfolio,
+  buildModificationAssessmentFromExtraction,
+  buildRpo120PerformanceObligationsFromResults,
+  contractCostsBatchNotAssessed,
+  contractInvolvesBillAndHoldGoods,
   getActiveIfrs15Contract,
   getActiveIfrs15ContractId,
   getIfrs15Contract,
@@ -270,18 +276,15 @@ function mapExtractionToContract(extracted: any): any {
       duration_months: rec.duration_months ?? durationFromDesc ?? 12,
       transfer_date: rec.transfer_date || null,
       obligation_start_date: rec.obligation_start_date || rec.go_live_date || null,
+      is_distinct: ob.is_distinct ?? undefined,
+      bundled_with: Array.isArray(ob.bundled_with) ? ob.bundled_with : undefined,
     };
   });
 
   const varCons = step3.variable_consideration || {};
-  const fixed = step3.fixed_consideration ?? step3.total_transaction_price ?? step1.total_contract_value ?? 0;
-  const variable =
-    toFiniteNumber(varCons.performance_bonuses) +
-    toFiniteNumber(varCons.volume_discounts) -
-    toFiniteNumber(varCons.discounts) -
-    toFiniteNumber(varCons.rebates) -
-    toFiniteNumber(varCons.penalties);
-  const totalPrice = step3.total_transaction_price ?? step1.total_contract_value ?? fixed;
+  const fixed = step3.fixed_consideration ?? step1.total_contract_value ?? 0;
+  const variable = resolveVariableConsiderationFromExtraction(extracted);
+  const totalPrice = resolveTransactionPriceFromExtraction(extracted);
 
   return {
     contract_id: step1.contract_id || `CONTRACT-${Date.now()}`,
@@ -409,7 +412,41 @@ type Rpo120PoForm = {
   recognised_to_date: number;
   expected_recognition_pattern: Rpo120Pattern;
   recognition_type: 'over_time' | 'point_in_time';
+  obligation_id?: string;
+  remaining_schedule?: { expected_recognition_date: string; amount: number }[];
 };
+
+function buildRemainingScheduleForPo(
+  schedule: Record<string, unknown>[],
+  po: { obligation_id?: string; obligation?: string; name?: string },
+): { expected_recognition_date: string; amount: number }[] {
+  const poId = String(po.obligation_id || '').trim();
+  const poName = String(po.obligation || po.name || '').trim().toLowerCase();
+  const lines: { expected_recognition_date: string; amount: number }[] = [];
+
+  for (const row of schedule) {
+    const rowObId = String(row.Obligation_ID || row.obligation_id || '').trim();
+    const rowOb = String(row.Obligation || row.obligation || '').trim().toLowerCase();
+    const matches =
+      (poId && rowObId === poId) ||
+      (!poId && poName && rowOb && (rowOb.includes(poName) || poName.includes(rowOb)));
+    if (!matches) continue;
+
+    const scheduled = Number(row.Scheduled_Revenue ?? row.scheduled_revenue ?? 0) || 0;
+    const recognised = Number(row.Revenue ?? row.revenue ?? 0) || 0;
+    const remaining = scheduled - recognised;
+    if (remaining <= 0.01) continue;
+
+    const dateStr = String(row.Date || row.date || row.expected_recognition_date || '').slice(0, 10);
+    if (!dateStr) continue;
+
+    lines.push({
+      expected_recognition_date: dateStr,
+      amount: Math.round(remaining * 100) / 100,
+    });
+  }
+  return lines;
+}
 
 type Rpo120ContractForm = {
   id: string;
@@ -583,11 +620,13 @@ export default function IFRS15Page() {
   const [paPrimary, setPaPrimary] = useState(false);
   const [paTp, setPaTp] = useState('');
   const [paCost, setPaCost] = useState('');
+  const [paThirdPartyInvolved, setPaThirdPartyInvolved] = useState(false);
   const [paResult, setPaResult] = useState<Record<string, unknown> | null>(null);
   const [paAssessment, setPaAssessment] = useState<Record<string, unknown> | null>(null);
   const [isPaLoading, setIsPaLoading] = useState(false);
   const [rpo120Contracts, setRpo120Contracts] = useState<Rpo120ContractForm[]>([]);
   const [rpo120Result, setRpo120Result] = useState<Record<string, unknown> | null>(null);
+  const [rpoReconciliationError, setRpoReconciliationError] = useState<Record<string, unknown> | null>(null);
   const [rpo120Loading, setRpo120Loading] = useState(false);
   const [rpo120Expanded, setRpo120Expanded] = useState<Record<string, boolean>>({});
   const [paExtHistory, setPaExtHistory] = useState<PaExtHistoryRow[]>([]);
@@ -596,6 +635,7 @@ export default function IFRS15Page() {
     description: '',
     gross_contract_value: 0,
     third_party_cost: 0,
+    third_party_involved: false,
     controls_before_transfer: false,
     primary_obligor: false,
     inventory_risk: false,
@@ -837,11 +877,9 @@ export default function IFRS15Page() {
 
   const step1 = extractedData?.step1_identify_contract?.contract_details || {};
   const extractedVarCons = extractedData?.step3_transaction_price?.variable_consideration || {};
-  const extractedVariableAmount =
-    (Number(extractedVarCons.performance_bonuses ?? 0) + Number(extractedVarCons.volume_discounts ?? 0))
-    - Number(extractedVarCons.discounts ?? 0)
-    - Number(extractedVarCons.rebates ?? 0)
-    - Number(extractedVarCons.penalties ?? 0);
+  const extractedVariableAmount = extractedData
+    ? resolveVariableConsiderationFromExtraction(extractedData)
+    : 0;
   const vc1556ExtractionPreview = applyVc1556Preview(Number(extractedVariableAmount) || 0, vc1556Factors);
   const applyClauseDetectionFromResponse = (cd: Record<string, unknown> | null | undefined) => {
     setClauseAcknowledged({});
@@ -939,16 +977,45 @@ export default function IFRS15Page() {
       setResults(data?.results);
       setCalculateStep(3);
       setActiveNavId('revenue-calculate');
-      setVcResult(null);
-      setVcAssessment(null);
-      setRpoResult(null);
-      setRpoAssessment(null);
+      const vca = data?.results?.variable_consideration_analysis as Record<string, unknown> | undefined;
+      const rawVc = Number(vca?.raw_variable_consideration ?? 0);
+      const unifiedVc =
+        (data?.results?.unified_vc_assessment as Record<string, unknown>) ||
+        (data?.results?.vc_constraint_result as Record<string, unknown>);
+      if (unifiedVc && (rawVc > 0 || Number(unifiedVc.constrained_amount ?? 0) > 0)) {
+        const vcPayload = {
+          ...unifiedVc,
+          expected_amount: rawVc || Number(unifiedVc.expected_amount ?? unifiedVc.estimated_vc_before_constraint ?? 0),
+          auto_computed: true,
+          manual_override: false,
+        };
+        setVcResult(vcPayload);
+        setVcAssessment(vcPayload);
+        setReversalRisk(vcPayload);
+      } else {
+        setVcResult(null);
+        setVcAssessment(null);
+        setReversalRisk(null);
+      }
+      const autoRpo = data?.results?.rpo_result as Record<string, unknown> | undefined;
+      setRpoResult(autoRpo ?? null);
+      setRpoAssessment(autoRpo ?? null);
+      const rpo120FromCalc =
+        (autoRpo?.rpo_120 as Record<string, unknown> | undefined) || autoRpo || null;
+      setRpo120Result(rpo120FromCalc);
+      setRpoReconciliationError(null);
       setCcResult(null);
       setCcAssessment(null);
+      setCcBatchResult(null);
       setPaResult(null);
       setPaAssessment(null);
+      setPaExtLatest(null);
+      setFcResult(null);
+      setBahResult(null);
       setLicResult(null);
       setLicAssessment(null);
+      const autoMod = buildModificationAssessmentFromExtraction(extractedData, data?.results);
+      setModAssessment(autoMod);
       setMasterReport(null);
       setMasterModalOpen(false);
       setModForm((prev) => ({
@@ -1252,7 +1319,9 @@ export default function IFRS15Page() {
       typeof displayTp === 'number' && !Number.isNaN(displayTp) ? displayTp : Number(results?.total_contract_value) || 0;
     const recognised = typeof rec === 'number' && !Number.isNaN(rec) ? rec : Number(results?.total_recognised) || 0;
     const deferredAmt = typeof def === 'number' && !Number.isNaN(def) ? def : Number(results?.total_deferred) || 0;
-    const rpoAmt = rpo120Result ? Number((rpo120Result as Record<string, unknown>).total_rpo) || 0 : 0;
+    const rpoAmt =
+      Number((results?.rpo_result as Record<string, unknown> | undefined)?.total_rpo) ||
+      (rpo120Result ? Number((rpo120Result as Record<string, unknown>).total_rpo) || 0 : 0);
     setPortfolioAddForm((f) => ({
       ...f,
       contract_id: tid,
@@ -1282,15 +1351,34 @@ export default function IFRS15Page() {
       setVcAssessment(a.variable_consideration);
       setVcResult(a.variable_consideration);
     }
-    if (a.principal_agent) setPaExtLatest(a.principal_agent);
+    if (a.principal_agent) {
+      setPaExtLatest(a.principal_agent);
+      setPaAssessment(a.principal_agent);
+    }
     if (a.financing_component) setFcResult(a.financing_component);
     if (a.contract_costs) setCcBatchResult(a.contract_costs);
     if (a.bill_and_hold) setBahResult(a.bill_and_hold);
     if (a.warranties) setWarResult(a.warranties);
     if (a.licenses) setLicIpResult(a.licenses);
-    if (a.modifications) setModAssessment(a.modifications);
+    if (a.modifications) {
+      setModAssessment(a.modifications);
+    } else {
+      const autoMod = buildModificationAssessmentFromExtraction(ctx.extraction_raw, ctx.core_results);
+      if (autoMod) setModAssessment(autoMod);
+    }
     if (a.tp_adjustments) setTpChangeResult(a.tp_adjustments);
-    if (a.rpo) setRpo120Result(a.rpo);
+    if (a.rpo) {
+      setRpo120Result(a.rpo);
+      setRpoResult(a.rpo);
+      setRpoAssessment(a.rpo);
+    } else {
+      const coreRpo = ctx.core_results?.rpo_result as Record<string, unknown> | undefined;
+      if (coreRpo) {
+        setRpoResult(coreRpo);
+        setRpoAssessment(coreRpo);
+        setRpo120Result((coreRpo.rpo_120 as Record<string, unknown> | undefined) || coreRpo);
+      }
+    }
   };
 
   const resolveSelectedContractContext = (): Ifrs15ContractContext | null => {
@@ -1335,9 +1423,17 @@ export default function IFRS15Page() {
     const val = ctx.contract_value || 0;
 
     if (mode === 'modification') {
+      const core = ctx.core_results;
+      const autoMod = buildModificationAssessmentFromExtraction(ctx.extraction_raw, core);
+      if (autoMod) setModAssessment(autoMod);
       setModForm((prev) => ({
         ...prev,
         remaining_transaction_price: ctx.deferred_balance ?? prev.remaining_transaction_price,
+        modification_date:
+          String(autoMod?.modification_date || '').slice(0, 10) || prev.modification_date,
+        modification_description:
+          String(autoMod?.explanation || '').slice(0, 500) || prev.modification_description,
+        price_change: Number(autoMod?.price_change ?? prev.price_change ?? 0),
       }));
       return;
     }
@@ -1382,21 +1478,7 @@ export default function IFRS15Page() {
     });
 
     setCcRows((rows) => {
-      const base = {
-        id: newUid(),
-        cost_id: 'COST-001',
-        contract_id: ctx.contract_id,
-        description: '',
-        cost_type: 'incremental_obtaining',
-        cost_amount: 0,
-        incurred_date: start,
-        contract_start: start,
-        contract_end: end,
-        expected_renewal: false,
-        expected_renewal_months: 0,
-        currency: cur,
-      };
-      if (rows.length === 0) return [base];
+      if (rows.length === 0) return [];
       return rows.map((r, i) =>
         i === 0
           ? { ...r, contract_id: ctx.contract_id, contract_start: start, contract_end: end, currency: cur }
@@ -1425,6 +1507,7 @@ export default function IFRS15Page() {
     });
 
     setBahRows((rows) => {
+      if (!contractInvolvesBillAndHoldGoods(ctx.extraction_raw)) return [];
       const base = {
         id: newUid(),
         arrangement_id: 'BAH-001',
@@ -1455,6 +1538,13 @@ export default function IFRS15Page() {
     });
 
     setLicRows((rows) => {
+      const rawObligations =
+        (extractedData as any)?.step2_performance_obligations?.identified_obligations || [];
+      const hasLicensePo = (Array.isArray(rawObligations) ? rawObligations : []).some((ob: any) => {
+        const t = String(ob?.description || '').toLowerCase();
+        return /\b(software\s+)?licen[cs]e\b|intellectual\s+property|\bip\b/.test(t);
+      });
+      if (!hasLicensePo) return [];
       const base = {
         id: newUid(),
         license_id: 'LIC-001',
@@ -1496,6 +1586,24 @@ export default function IFRS15Page() {
     );
 
     setRpo120Contracts((contracts) => {
+      const core = ctx.core_results;
+      const sched = Array.isArray(core?.revenue_schedule)
+        ? (core.revenue_schedule as Array<Record<string, unknown>>)
+        : [];
+      const poRows = buildRpo120PerformanceObligationsFromResults(core, sched).map((po) => ({
+        id: newUid(),
+        name: String(po.name || ''),
+        obligation_id: String(po.obligation_id || ''),
+        allocated_amount: Number(po.allocated_amount ?? 0),
+        recognised_to_date: Number(po.recognised_to_date ?? 0),
+        expected_recognition_pattern: 'within_1_year' as Rpo120Pattern,
+        recognition_type: (po.recognition_type === 'point_in_time' ? 'point_in_time' : 'over_time') as
+          | 'over_time'
+          | 'point_in_time',
+        remaining_schedule: Array.isArray(po.remaining_schedule)
+          ? (po.remaining_schedule as Rpo120PoForm['remaining_schedule'])
+          : [],
+      }));
       const base = {
         ...newRpo120Contract(),
         contract_id: ctx.contract_id,
@@ -1504,6 +1612,7 @@ export default function IFRS15Page() {
         contract_end: end,
         total_transaction_price: val,
         revenue_recognised_to_date: ctx.revenue_recognised_to_date ?? 0,
+        performance_obligations: poRows.length > 0 ? poRows : [newRpo120Po()],
       };
       if (contracts.length === 0) return [base];
       return contracts.map((c, i) =>
@@ -1515,6 +1624,9 @@ export default function IFRS15Page() {
               contract_start: start,
               contract_end: end,
               total_transaction_price: val,
+              revenue_recognised_to_date: ctx.revenue_recognised_to_date ?? 0,
+              performance_obligations:
+                poRows.length > 0 ? poRows : c.performance_obligations,
             }
           : c,
       );
@@ -1566,9 +1678,16 @@ export default function IFRS15Page() {
       bill_and_hold: bahResult,
       warranties: warResult,
       licenses: licIpResult,
-      modifications: modAssessment,
+      modifications:
+        modAssessment || buildModificationAssessmentFromExtraction(extractedData, results),
       tp_adjustments: tpChangeResult || tpAdjResult,
-      rpo: rpo120Result,
+      rpo:
+        rpo120Result ||
+        ((results?.rpo_result as Record<string, unknown> | undefined)?.rpo_120 as
+          | Record<string, unknown>
+          | undefined) ||
+        (results?.rpo_result as Record<string, unknown> | undefined) ||
+        null,
     });
     if (updated) setActiveContractContext(updated);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1586,6 +1705,8 @@ export default function IFRS15Page() {
     tpAdjResult,
     rpo120Result,
     contractId,
+    extractedData,
+    results,
   ]);
 
   const runRpo120Cal = async () => {
@@ -1594,6 +1715,7 @@ export default function IFRS15Page() {
       return;
     }
     setRpo120Loading(true);
+    setRpoReconciliationError(null);
     try {
       const response = (await ifrs15Api.rpo({
         contracts: rpo120Contracts.map((c) => ({
@@ -1604,25 +1726,55 @@ export default function IFRS15Page() {
           total_transaction_price: Number(c.total_transaction_price) || 0,
           revenue_recognised_to_date: Number(c.revenue_recognised_to_date) || 0,
           practical_expedient_applied: c.practical_expedient_applied,
+          currency,
+          reporting_date: new Date().toISOString().slice(0, 10),
+          revenue_schedule: schedule,
           performance_obligations: c.practical_expedient_applied
             ? []
             : (c.performance_obligations.length ? c.performance_obligations : [newRpo120Po()]).map((po) => ({
                 name: po.name || 'PO',
+                obligation_id: po.obligation_id,
                 allocated_amount: Number(po.allocated_amount) || 0,
                 recognised_to_date: Number(po.recognised_to_date) || 0,
                 expected_recognition_pattern: po.expected_recognition_pattern,
                 recognition_type: po.recognition_type,
+                remaining_schedule:
+                  po.remaining_schedule && po.remaining_schedule.length > 0
+                    ? po.remaining_schedule
+                    : buildRemainingScheduleForPo(schedule, {
+                        obligation_id: po.obligation_id,
+                        name: po.name,
+                      }),
               })),
         })),
       })) as { data?: Record<string, unknown>; error?: string };
-      if (response.error) throw new Error(response.error);
+      if (response.error) {
+        try {
+          const parsed = JSON.parse(response.error) as Record<string, unknown>;
+          if (parsed?.code === 'RPO_RECONCILIATION_FAILED') {
+            setRpoReconciliationError(parsed);
+            setRpo120Result(null);
+            toast.error('RPO disclosure blocked — reconciliation failed');
+            return;
+          }
+        } catch {
+          /* plain-text error */
+        }
+        throw new Error(response.error);
+      }
       const data = response.data || {};
       if (data.success && data.rpo) {
         setRpo120Result(data.rpo as Record<string, unknown>);
       } else {
         setRpo120Result(data as Record<string, unknown>);
       }
-      toast.success('RPO disclosure calculated');
+      const rpoPayload = (data.rpo || data) as Record<string, unknown>;
+      const validation = rpoPayload.bucket_validation as Record<string, unknown> | undefined;
+      if (validation?.issues && Array.isArray(validation.issues) && validation.issues.length > 0) {
+        toast('RPO calculated with schedule warnings — review bucket validation', { icon: '⚠️' });
+      } else {
+        toast.success('RPO disclosure calculated');
+      }
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'RPO calculation failed');
     } finally {
@@ -1640,7 +1792,7 @@ export default function IFRS15Page() {
       const response = (await ifrs15Api.principalAgent({
         arrangement_id: paExtForm.arrangement_id.trim(),
         description: paExtForm.description,
-        third_party_involved: true,
+        third_party_involved: Boolean(paExtForm.third_party_involved),
         gross_contract_value: Number(paExtForm.gross_contract_value) || 0,
         third_party_cost: Number(paExtForm.third_party_cost) || 0,
         controls_before_transfer: paExtForm.controls_before_transfer,
@@ -2032,6 +2184,7 @@ export default function IFRS15Page() {
           payment_timing: r.payment_timing,
           discount_rate: Number(r.discount_rate) || 0,
           currency: r.currency || 'USD',
+          revenue_schedule: Array.isArray(results?.revenue_schedule) ? results.revenue_schedule : [],
         })),
       })) as { data?: Record<string, unknown>; error?: string };
       if (res.error) throw new Error(res.error);
@@ -2316,13 +2469,13 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
         master_report_data: masterReport ?? undefined,
         results: {
           ...results,
-          variable_consideration_assessment: vcAssessment || undefined,
-          rpo_disclosure: rpoAssessment || undefined,
+          variable_consideration_assessment: unifiedVcSource || vcAssessment || undefined,
+          rpo_disclosure: unifiedRpoSource || rpoAssessment || undefined,
           contract_costs_assessment: ccAssessment || undefined,
-          principal_agent_assessment: paAssessment || undefined,
+          principal_agent_assessment: (paExtLatest || paAssessment) || undefined,
           license_classification: licAssessment || undefined,
           deferred_revenue_rollforward: drResultsStack[0] ?? undefined,
-          rpo_disclosure_ifrs120: rpo120Result ?? undefined,
+          rpo_disclosure_ifrs120: unifiedRpo120Source || rpo120Result || undefined,
           principal_agent_history:
             paExtHistory.length > 0
               ? paExtHistory.map((h) => ({
@@ -2374,7 +2527,25 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     ifrs_reference: ref,
                   };
                 })
-              : modAssessment
+              : unifiedModSource
+                ? [
+                    {
+                      modification_date: String(unifiedModSource.modification_date || modForm.modification_date),
+                      date: String(unifiedModSource.modification_date || modForm.modification_date),
+                      type: String(unifiedModSource.modification_type_name || ''),
+                      description:
+                        modForm.modification_description || String(unifiedModSource.explanation || ''),
+                      catch_up_amount: Number(unifiedModSource.catch_up_amount ?? 0),
+                      ifrs_reference: String(
+                        (
+                          Array.isArray(unifiedModSource.journal_entries)
+                            ? (unifiedModSource.journal_entries[0] as { reference?: string } | undefined)
+                            : undefined
+                        )?.reference || '',
+                      ),
+                    },
+                  ]
+                : modAssessment
                 ? [
                     {
                       modification_date: modForm.modification_date,
@@ -2567,13 +2738,108 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
     return Number(vcScenarios[vcMostLikelyIdx]?.amount) || 0;
   }, [vcScenarios, vcMethod, vcMostLikelyIdx]);
   const vc1556ModulePreview = applyVc1556Preview(vcLocalEstimateFor1556, vc1556Factors);
+  const unifiedVcSource = useMemo(() => {
+    if (vcResult) return vcResult as Record<string, unknown>;
+    const fromCalc =
+      (results?.unified_vc_assessment as Record<string, unknown> | undefined) ||
+      (results?.vc_constraint_result as Record<string, unknown> | undefined);
+    if (fromCalc) {
+      const vca = results?.variable_consideration_analysis as Record<string, unknown> | undefined;
+      return {
+        ...fromCalc,
+        expected_amount: Number(
+          vca?.raw_variable_consideration ?? fromCalc.expected_amount ?? fromCalc.estimated_vc_before_constraint ?? 0
+        ),
+        auto_computed: true,
+        manual_override: false,
+      };
+    }
+    return null;
+  }, [vcResult, results]);
+  const unifiedRpoSource = useMemo(() => {
+    if (rpoResult && (rpoResult as Record<string, unknown>).manual_override) {
+      return rpoResult as Record<string, unknown>;
+    }
+    const fromCalc = results?.rpo_result as Record<string, unknown> | undefined;
+    if (fromCalc && fromCalc.total_rpo != null) {
+      return {
+        ...fromCalc,
+        auto_computed: true,
+        manual_override: false,
+      };
+    }
+    return (rpoResult as Record<string, unknown> | null) ?? null;
+  }, [rpoResult, results]);
+  const unifiedModSource = useMemo(() => {
+    if (modAssessment && !(modAssessment as Record<string, unknown>).auto_computed) {
+      return modAssessment as Record<string, unknown>;
+    }
+    return (
+      (modAssessment as Record<string, unknown> | null) ||
+      buildModificationAssessmentFromExtraction(extractedData, results) ||
+      null
+    );
+  }, [modAssessment, extractedData, results]);
+  const unifiedRpo120Source = useMemo(() => {
+    const fromCalc =
+      ((results?.rpo_result as Record<string, unknown> | undefined)?.rpo_120 as
+        | Record<string, unknown>
+        | undefined) || (results?.rpo_result as Record<string, unknown> | undefined);
+    const manual = rpo120Result as Record<string, unknown> | null;
+    if (manual && Number(manual.total_rpo ?? 0) > 0 && !manual.auto_computed) return manual;
+    if (fromCalc && fromCalc.total_rpo != null) {
+      return { ...fromCalc, auto_computed: true };
+    }
+    return manual ?? fromCalc ?? null;
+  }, [rpo120Result, results]);
   const vcConstraintScore = vcConstraintFactors.filter(Boolean).length;
   const vcConstraintPreview = (() => {
-    if (vcConstraintScore === 0) return { level: 'None', pill: 'bg-emerald-100 text-emerald-800 border-emerald-200' };
-    if (vcConstraintScore === 1) return { level: 'Low', pill: 'bg-amber-100 text-amber-900 border-amber-300' };
-    if (vcConstraintScore === 2) return { level: 'Moderate', pill: 'bg-orange-100 text-orange-900 border-orange-300' };
-    return { level: 'High', pill: 'bg-red-100 text-red-800 border-red-300' };
+    const src =
+      (reversalRisk as Record<string, unknown> | null) ||
+      (vcResult as Record<string, unknown> | null) ||
+      (results?.unified_vc_assessment as Record<string, unknown> | undefined) ||
+      (results?.vc_constraint_result as Record<string, unknown> | undefined);
+    if (src?.risk_level) {
+      const rl = String(src.risk_level).toUpperCase();
+      const pill =
+        rl === 'LOW' ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+        : rl === 'MEDIUM' ? 'bg-amber-100 text-amber-900 border-amber-300'
+        : rl === 'HIGH' ? 'bg-orange-100 text-orange-900 border-orange-300'
+        : 'bg-red-100 text-red-800 border-red-300';
+      return {
+        level: rl,
+        pill,
+        score: Number(src.risk_score ?? 0),
+        max: Number(src.constraint_score_max ?? 24),
+      };
+    }
+    if (vcConstraintScore === 0) return { level: 'None', pill: 'bg-emerald-100 text-emerald-800 border-emerald-200', score: 0, max: 24 };
+    if (vcConstraintScore === 1) return { level: 'Low', pill: 'bg-amber-100 text-amber-900 border-amber-300', score: 0, max: 24 };
+    if (vcConstraintScore === 2) return { level: 'Moderate', pill: 'bg-orange-100 text-orange-900 border-orange-300', score: 0, max: 24 };
+    return { level: 'High', pill: 'bg-red-100 text-red-800 border-red-300', score: 0, max: 24 };
   })();
+  const vc1556Display = useMemo(() => {
+    const u = unifiedVcSource;
+    if (u && u.risk_score != null) {
+      const rl = String(u.risk_level ?? '').toUpperCase();
+      const riskLabel =
+        rl === 'LOW' ? 'Low' : rl === 'MEDIUM' ? 'Medium' : rl === 'HIGH' ? 'High' : 'Very High';
+      return {
+        risk: riskLabel,
+        constrained: Number(u.constrained_amount ?? 0),
+        excluded: Number(u.excluded_amount ?? 0),
+        scoreLine: `${Number(u.risk_score ?? 0)}/${Number(u.constraint_score_max ?? 24)} unified points`,
+        isUnified: true,
+      };
+    }
+    return {
+      risk: vc1556ModulePreview.risk,
+      constrained: vc1556ModulePreview.constrained,
+      excluded: vc1556ModulePreview.excluded,
+      scoreLine: `${vc1556ModulePreview.score}/5 IFRS 15.56 factors (preview)`,
+      isUnified: false,
+    };
+  }, [unifiedVcSource, vc1556ModulePreview]);
 
   const calculateVariableConsideration = async () => {
     if ((vcMethod === 'expected_value' || vcMethod === 'scenario_weighted') && Math.abs(vcProbTotalPct - 100) > 1) {
@@ -2605,15 +2871,24 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
         scenarios: scenariosPayload,
         constraint_factors: vcConstraintFactors,
         contract_id: contractId !== '—' ? String(contractId) : undefined,
+        currency,
+        contract_term_months: Number(contractTerm) || undefined,
+        customer_type: reversalCustomerType,
+        historical_attainment_pct:
+          reversalHistoricalPct.trim() === '' ? undefined : Number(reversalHistoricalPct),
+        refund_type: reversalRefundType,
+        recognition_type: recognitionType,
+        has_external_dependency: reversalExtDep,
+        dependency_level: reversalDepLevel,
         ...(total_contract_value !== undefined ? { total_contract_value } : {}),
       })) as { data?: Record<string, unknown>; error?: string };
       if (response.error) throw new Error(response.error);
       const data = response.data;
       if (!data) throw new Error('No response data');
-      setVcResult(data);
+      setVcResult({ ...(data as Record<string, unknown>), manual_override: true, auto_computed: false });
       setVcAssessment(data);
+      setReversalRisk((data as Record<string, unknown>)?.unified_vc_assessment as Record<string, unknown> || data);
       toast.success('Variable consideration calculated');
-      await postReversalRiskFromVc(data);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Calculation failed';
       toast.error(msg);
@@ -2627,15 +2902,20 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
   };
 
   const initRpoFormFromResults = () => {
+    const fromResults = Array.isArray(results?.performance_obligations)
+      ? results.performance_obligations
+      : [];
     const list =
       perfObs.length > 0
         ? perfObs
-        : Object.entries(allocations).map(([id, amt]) => ({
-            obligation: id,
-            obligation_id: id,
-            allocated_amount: Number(amt),
-            revenue_recognized: 0,
-          }));
+        : fromResults.length > 0
+          ? fromResults
+          : Object.entries(allocations).map(([id, amt]) => ({
+              obligation: id,
+              obligation_id: id,
+              allocated_amount: Number(amt),
+              revenue_recognized: 0,
+            }));
     const termM = typeof contractTerm === 'number' ? contractTerm : parseInt(String(contractTerm), 10) || 12;
     const baseEff = contractDate !== '—' ? String(contractDate) : new Date().toISOString().slice(0, 10);
     const defaultEnd = addMonthsIso(baseEff, Number.isFinite(termM) ? termM : 12);
@@ -2672,7 +2952,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
       })) as { data?: Record<string, unknown>; error?: string };
       if (res.error) throw new Error(res.error);
       if (!res.data) throw new Error('No data');
-      setRpoResult(res.data);
+      setRpoResult({ ...(res.data as Record<string, unknown>), manual_override: true, auto_computed: false });
       setRpoAssessment(res.data);
       toast.success('RPO calculated');
     } catch (e: unknown) {
@@ -2692,6 +2972,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
         commission_amount: com,
         contract_term_months: term,
         contract_total_value: tv,
+        currency: currency || 'USD',
         contract_id: contractId !== '—' ? String(contractId) : undefined,
       })) as { data?: Record<string, unknown>; error?: string };
       if (res.error) throw new Error(res.error);
@@ -2716,6 +2997,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
         obtains_before_transfer: paObtains,
         sets_price_independently: paSetsPrice,
         primarily_responsible: paPrimary,
+        third_party_involved: paThirdPartyInvolved,
         contract_id: contractId !== '—' ? String(contractId) : undefined,
       })) as { data?: Record<string, unknown>; error?: string };
       if (res.error) throw new Error(res.error);
@@ -2781,11 +3063,12 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
         contract_id: contractId === '—' ? `CONTRACT-${Date.now()}` : String(contractId),
         customer_name: customerName === '—' ? '' : String(customerName),
         core_results: results as Record<string, unknown>,
-        modification_result: (modAssessment as Record<string, unknown>) || null,
-        variable_consideration_result: (vcResult as Record<string, unknown>) || null,
-        rpo_result: (rpoResult as Record<string, unknown>) || null,
+        modification_result: (unifiedModSource as Record<string, unknown>) || null,
+        variable_consideration_result: (unifiedVcSource as Record<string, unknown>) || null,
+        rpo_result: (unifiedRpoSource as Record<string, unknown>) || null,
         contract_costs_result: (ccResult as Record<string, unknown>) || null,
-        principal_agent_result: (paResult as Record<string, unknown>) || null,
+        principal_agent_result:
+          ((paExtLatest || paResult) as Record<string, unknown> | null) || null,
         license_result: (licResult as Record<string, unknown>) || null,
       })) as { data?: Record<string, unknown>; error?: string };
       if (res.error) throw new Error(res.error);
@@ -3553,17 +3836,32 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       ...c,
                       {
                         ...newRpo120Contract(),
+                        contract_id: contractId !== '—' ? String(contractId) : '',
+                        customer_name: customerName !== '—' ? String(customerName) : '',
+                        contract_start: contractDate !== '—' ? String(contractDate).slice(0, 10) : '',
+                        contract_end: '',
                         total_transaction_price: displayTp,
                         revenue_recognised_to_date: r,
                         performance_obligations: perfObs.length
-                          ? perfObs.map((p: any, i: number) => ({
-                              id: newUid(),
-                              name: String(p.obligation || p.description || p.obligation_id || `PO ${i + 1}`),
-                              allocated_amount: Number(p.allocated_amount ?? 0),
-                              recognised_to_date: Number(p.recognised_to_date ?? p.revenue_recognized ?? 0),
-                              expected_recognition_pattern: 'within_1_year' as Rpo120Pattern,
-                              recognition_type: (String(p.recognition_method || '').includes('point') ? 'point_in_time' : 'over_time') as 'over_time' | 'point_in_time',
-                            }))
+                          ? perfObs.map((p: any, i: number) => {
+                              const poId = String(p.obligation_id || `PO-${i + 1}`);
+                              const poName = String(p.obligation || p.description || poId);
+                              return {
+                                id: newUid(),
+                                name: poName,
+                                obligation_id: poId,
+                                allocated_amount: Number(p.allocated_amount ?? 0),
+                                recognised_to_date: Number(p.recognised_to_date ?? p.revenue_recognized ?? 0),
+                                expected_recognition_pattern: 'within_1_year' as Rpo120Pattern,
+                                recognition_type: (String(p.recognition_method || '').includes('point')
+                                  ? 'point_in_time'
+                                  : 'over_time') as 'over_time' | 'point_in_time',
+                                remaining_schedule: buildRemainingScheduleForPo(schedule, {
+                                  obligation_id: poId,
+                                  obligation: poName,
+                                }),
+                              };
+                            })
                           : [newRpo120Po()],
                       },
                     ]);
@@ -3838,11 +4136,42 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
             <Button variant="primary" className="w-full bg-gradient-orange" onClick={runRpo120Cal} isLoading={rpo120Loading}>
               Calculate RPO
             </Button>
-            {rpo120Result && (
+            {rpoReconciliationError && (
+              <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-900 space-y-3">
+                <p className="font-bold">VALIDATION_ERROR: RPO_RECONCILIATION_FAILED</p>
+                <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">
+                  {String(rpoReconciliationError.message || '')}
+                </pre>
+                {Array.isArray(rpoReconciliationError.missing_schedule_pobs) &&
+                (rpoReconciliationError.missing_schedule_pobs as unknown[]).length > 0 ? (
+                  <div>
+                    <p className="font-semibold mb-1">POBs with missing/incomplete schedule:</p>
+                    <ul className="list-disc pl-5 space-y-1">
+                      {(rpoReconciliationError.missing_schedule_pobs as Record<string, unknown>[]).map(
+                        (p, idx) => (
+                          <li key={idx}>
+                            {String(p.contract_id || '?')}/{String(p.obligation_id || p.obligation_name || '?')}
+                            {p.reason ? ` — ${String(p.reason).replace(/_/g, ' ')}` : ''}
+                          </li>
+                        ),
+                      )}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            )}
+            {(unifiedRpo120Source || rpo120Result) && (() => {
+              const rpoDisp = (unifiedRpo120Source || rpo120Result) as Record<string, unknown>;
+              return (
               <div className="space-y-6 border-t border-border-default pt-6">
+                {Boolean(rpoDisp.auto_computed) && (
+                  <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                    Auto-computed from Step 5 revenue schedule — use Calculate RPO only to override.
+                  </p>
+                )}
                 {(() => {
-                  const b = (rpo120Result.buckets as Record<string, number>) || {};
-                  const total = Number(rpo120Result.total_rpo ?? 0) || 0;
+                  const b = (rpoDisp.buckets as Record<string, number>) || {};
+                  const total = Number(rpoDisp.total_rpo ?? 0) || 0;
                   const w = Number(b.within_1_year ?? 0) || 0;
                   const mid = (Number(b['1_to_2_years'] ?? 0) || 0) + (Number(b['2_to_5_years'] ?? 0) || 0);
                   const b5 = Number(b.beyond_5_years ?? 0) || 0;
@@ -3898,7 +4227,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       </tr>
                     </thead>
                     <tbody>
-                      {((rpo120Result.contract_details as any[]) || []).map((row: any) => (
+                      {((rpoDisp.contract_details as any[]) || []).map((row: any) => (
                         <Fragment key={String(row.contract_id)}>
                           <tr className="border-t border-border-default cursor-pointer hover:bg-bg-light/50" onClick={() => setRpo120Expanded((m) => ({ ...m, [row.contract_id]: !m[row.contract_id] }))}>
                             <td className="py-2 px-2 font-medium">{row.contract_id}</td>
@@ -3924,11 +4253,19 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                           )}
                         </Fragment>
                       ))}
-                      {((rpo120Result.expedient_contracts as any[]) || []).map((row: any) => (
+                      {((rpoDisp.expedient_contracts as any[]) || []).map((row: any) => (
                         <tr key={`exp-${row.contract_id}`} className="border-t border-border-default bg-gray-100 text-text-muted">
                           <td className="py-2 px-2">{row.contract_id}</td>
                           <td className="py-2 px-2" colSpan={4}>
-                            (Practical expedient applied)
+                            Practical expedient applied
+                            {row.expedient_reason === 'auto_schedule_within_12_months'
+                              ? ' (auto — all RPO within 12 months)'
+                              : row.expedient_reason === 'manual'
+                                ? ' (manual)'
+                                : ''}
+                            {row.excluded_rpo_amount != null
+                              ? ` · excluded ${formatCurrency(Number(row.excluded_rpo_amount), currency, 0)}`
+                              : ''}
                           </td>
                           <td className="py-2 px-2 text-right text-xs">Excluded</td>
                         </tr>
@@ -3937,9 +4274,17 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                   </table>
                 </div>
                 <div className="rounded-lg border border-border-default p-4 bg-bg-light/40">
-                  <p className="font-bold text-text-primary mb-2">{(rpo120Result.disclosure_note as any)?.title || 'Note: Remaining Performance Obligations'}</p>
+                  <p className="font-bold text-text-primary mb-2">{(rpoDisp.disclosure_note as any)?.title || 'Note: Remaining Performance Obligations'}</p>
+                  {Array.isArray((rpoDisp.bucket_validation as any)?.issues) &&
+                  ((rpoDisp.bucket_validation as any).issues as unknown[]).length > 0 ? (
+                    <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 space-y-1">
+                      {((rpoDisp.bucket_validation as any).issues as { message?: string }[]).map((issue, idx) => (
+                        <p key={idx}>⚠ {issue.message}</p>
+                      ))}
+                    </div>
+                  ) : null}
                   <pre className="font-serif text-sm whitespace-pre-wrap text-text-primary leading-relaxed">
-                    {String((rpo120Result.disclosure_note as any)?.full_text || '')}
+                    {String((rpoDisp.disclosure_note as any)?.full_text || '')}
                   </pre>
                   <div className="flex flex-wrap gap-2 mt-4">
                     <Button
@@ -3949,7 +4294,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       className="bg-white border border-border-default"
                       onClick={() =>
                         navigator.clipboard
-                          .writeText(String((rpo120Result.disclosure_note as any)?.full_text || ''))
+                          .writeText(String((rpoDisp.disclosure_note as any)?.full_text || ''))
                           .then(() => toast.success('Copied'))
                           .catch(() => toast.error('Copy failed'))
                       }
@@ -3962,7 +4307,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       size="sm"
                       className="bg-white border border-border-default"
                       onClick={() => {
-                        const t = String((rpo120Result.disclosure_note as any)?.full_text || '');
+                        const t = String((rpoDisp.disclosure_note as any)?.full_text || '');
                         const blob = new Blob([t], { type: 'text/plain' });
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
@@ -3976,18 +4321,19 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       <Download className="w-4 h-4 mr-1" /> Download (.txt)
                     </Button>
                   </div>
-                  <p className="text-xs text-text-muted mt-3">{String(rpo120Result.ifrs_reference || 'IFRS 15.120-122')}</p>
+                  <p className="text-xs text-text-muted mt-3">{String(rpoDisp.ifrs_reference || 'IFRS 15.120-122')}</p>
                 </div>
                 <div className="text-sm space-y-1 border border-dashed border-border-default rounded-lg p-3">
                   <p className="font-semibold text-text-primary">Audit checklist</p>
                   <p>✅ Aggregate RPO amount disclosed</p>
                   <p>✅ Expected recognition timing disclosed</p>
-                  <p>{Number(rpo120Result.expedient_contracts_excluded ?? 0) > 0 ? '✅' : '—'} Practical expedient disclosed (if applied)</p>
+                  <p>{Number(rpoDisp.expedient_contracts_excluded ?? 0) > 0 ? '✅' : '—'} Practical expedient disclosed (if applied)</p>
                   <p>✅ Variable consideration constraint noted</p>
                   <p>✅ RPO reconciles to contract details</p>
                 </div>
               </div>
-            )}
+              );
+            })()}
           </div>
         )}
         {ifrs15DashTab === 'principal-agent' && (
@@ -4028,6 +4374,19 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               </div>
             )}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <label className="flex items-start gap-2 p-3 border border-border-default rounded-lg cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={paExtForm.third_party_involved}
+                    onChange={(e) => setPaExtForm((f) => ({ ...f, third_party_involved: e.target.checked }))}
+                  />
+                  <span className="text-sm text-text-primary">
+                    Third party involved — vendor/subcontractor arranged on behalf of the customer
+                  </span>
+                </label>
+              </div>
               <div className="md:col-span-2">
                 <label className="block text-xs text-text-muted mb-1">Arrangement ID</label>
                 <input
@@ -4128,6 +4487,22 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <div className="space-y-4 border-t border-border-default pt-6">
                 {(() => {
                   const conc = String(paExtLatest.conclusion || '');
+                  if (conc === 'NOT_APPLICABLE') {
+                    return (
+                      <div className="rounded-xl border-2 border-slate-300 bg-slate-50 p-4">
+                        <p className="text-xl font-bold text-slate-800">Not applicable — no third party identified</p>
+                        <p className="text-sm mt-2 text-slate-700">{String(paExtLatest.explanation || '')}</p>
+                      </div>
+                    );
+                  }
+                  if (conc === 'BLOCKED') {
+                    return (
+                      <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
+                        <p className="text-xl font-bold text-amber-900">Assessment blocked — third-party cost required</p>
+                        <p className="text-sm mt-2 text-amber-800">{String(paExtLatest.explanation || '')}</p>
+                      </div>
+                    );
+                  }
                   const gross = Number(paExtLatest.gross_contract_value ?? 0);
                   const cost = Number(paExtLatest.third_party_cost ?? 0);
                   const margin = Number(paExtLatest.net_margin ?? gross - cost);
@@ -4239,7 +4614,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
             <div className="rounded-lg border border-border-default bg-bg-light p-4 text-sm text-text-secondary">
               Sales commissions and other incremental costs of obtaining a contract must be capitalised and amortised if the expected amortisation period exceeds one year (IFRS 15.91). Practical expedient: expense immediately if amortisation period ≤ 1 year (IFRS 15.94).
             </div>
-            {ccBatchResult && (
+            {ccBatchResult && !contractCostsBatchNotAssessed(ccBatchResult) && (
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 {(
                   [
@@ -4320,9 +4695,16 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
             <Button variant="primary" className="w-full bg-gradient-orange" onClick={runCcBatchCalc} isLoading={ccBatchLoading}>
               Calculate
             </Button>
-            {ccBatchResult && (
+            {ccBatchResult && contractCostsBatchNotAssessed(ccBatchResult) && (
+              <p className="text-sm text-text-muted italic border-t pt-4">
+                No contract costs assessed for this contract.
+              </p>
+            )}
+            {ccBatchResult && !contractCostsBatchNotAssessed(ccBatchResult) && (
               <div className="space-y-6 border-t pt-6">
-                {(ccBatchResult.costs as any[]).map((it: any) => (
+                {(ccBatchResult.costs as any[])
+                  .filter((it: any) => it.treatment !== 'NOT_ASSESSED' && it.assessed !== false)
+                  .map((it: any) => (
                   <div
                     key={it.cost_id}
                     className={`rounded-lg border-l-4 p-4 space-y-2 ${it.treatment === 'CAPITALISE' ? 'border-green-500 bg-green-50/30' : 'border-amber-400 bg-amber-50/30'}`}
@@ -4496,6 +4878,12 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
             </Button>
             {licIpResult && (
               <div className="space-y-4 border-t pt-6">
+                {((licIpResult.licenses as any[]) || []).every((lic: any) => String(lic.license_type) === 'NOT_APPLICABLE') ? (
+                  <p className="text-sm text-text-muted italic">
+                    Not applicable — no license obligation identified. Add an explicit licence line item before running this assessment.
+                  </p>
+                ) : (
+                <>
                 <div className="grid grid-cols-3 gap-2 text-center text-sm">
                   <div className="p-2 rounded border bg-blue-50">
                     RTA: {String((licIpResult.summary as any)?.right_to_access ?? 0)}
@@ -4542,6 +4930,8 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     )}
                   </div>
                 ))}
+                </>
+                )}
               </div>
             )}
           </div>
@@ -5495,9 +5885,18 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                   </div>
                 </div>
                 {((bahResult.arrangements as any[]) || []).map((a: any) => {
+                  const notApplicable = String(a.conclusion) === 'NOT_APPLICABLE';
                   const ok = String(a.conclusion) === 'REVENUE_RECOGNISABLE';
                   const jes = (a.journal_entries as any[]) || [];
                   const failed = (a.failed_criteria as string[]) || [];
+                  if (notApplicable) {
+                    return (
+                      <div key={String(a.arrangement_id)} className="rounded-lg border-l-4 border-slate-400 bg-slate-50 p-4">
+                        <p className="text-lg font-bold text-slate-800">Not applicable — no goods pending physical transfer</p>
+                        <p className="text-sm mt-2 text-slate-700">{String(a.explanation || '')}</p>
+                      </div>
+                    );
+                  }
                   return (
                     <div
                       key={String(a.arrangement_id)}
@@ -5770,6 +6169,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                 </div>
                 {((fcResult.contracts as any[]) || []).map((c: any) => {
                   const cid = String(c.contract_id ?? '');
+                  const blocked = Boolean(c.blocked) || String(c.assessment_status) === 'blocked_schedule_conflict';
                   const exp = Boolean(c.practical_expedient_applied);
                   const jes = (c.journal_entries as any[]) || [];
                   const sched = (c.amortisation_schedule as any[]) || [];
@@ -5782,10 +6182,22 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     <div
                       key={cid}
                       className={`rounded-lg border-l-4 p-4 space-y-3 ${
-                        exp ? 'border-l-slate-500 bg-slate-50/40' : 'border-l-blue-600 bg-blue-50/25'
+                        blocked
+                          ? 'border-l-red-600 bg-red-50/30'
+                          : exp
+                            ? 'border-l-slate-500 bg-slate-50/40'
+                            : 'border-l-blue-600 bg-blue-50/25'
                       }`}
                     >
-                      {exp ? (
+                      {blocked ? (
+                        <>
+                          <p className="text-sm font-bold text-red-900">BLOCKED — conflicts with schedule-based recognition</p>
+                          <p className="text-sm whitespace-pre-wrap text-red-800">{String(c.explanation || '')}</p>
+                          <p className="text-xs text-red-700">
+                            Financing cannot be applied as a single lump-sum PV when the main engine already recognises revenue periodically.
+                          </p>
+                        </>
+                      ) : exp ? (
                         <>
                           <p className="text-sm font-bold text-slate-800">PRACTICAL EXPEDIENT (≤ 12 months)</p>
                           <p className="text-lg font-bold amount text-slate-900">Revenue: {formatCurrency(rev, currency, 0)} (no adjustment)</p>
@@ -7101,18 +7513,48 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     </span>
                   </div>
 
-                  {results?.revenue_engine_result?.schedule_based ||
-                  (results?.revenue_engine_result?.poc_percentage == null &&
-                    results?.revenue_engine_result?.revenue_this_period == null) ? (
-                    <p className="text-sm text-blue-800">
-                      Not applicable — time-based recognition per performance obligation schedule (IFRS 15 Step 5).
-                      {typeof results?.total_recognised === 'number' && results.total_recognised > 0 && (
-                        <span className="block mt-2 font-semibold">
-                          Total recognised to date: {formatCurrency(results.total_recognised, currency, 0)}
-                        </span>
-                      )}
-                    </p>
-                  ) : (
+                  {(() => {
+                    const label =
+                      String(results?.recognition_pattern_label || '') ||
+                      (results?.revenue_engine_result?.schedule_based ||
+                      (results?.revenue_engine_result?.poc_percentage == null &&
+                        results?.revenue_engine_result?.revenue_this_period == null)
+                        ? 'Schedule-based / time-based recognition per performance obligation schedule (IFRS 15 Step 5).'
+                        : '');
+                    const isPointInTime = label.toLowerCase().includes('point-in-time');
+                    const isScheduleBased = label.toLowerCase().includes('schedule-based') || label.toLowerCase().includes('time-based');
+                    if (isPointInTime) {
+                      return (
+                        <p className="text-sm text-blue-800">
+                          {label}
+                          {typeof results?.total_recognised === 'number' && results.total_recognised > 0 && (
+                            <span className="block mt-2 font-semibold">
+                              Total recognised to date: {formatCurrency(results.total_recognised, currency, 0)}
+                            </span>
+                          )}
+                        </p>
+                      );
+                    }
+                    if (
+                      isScheduleBased ||
+                      results?.revenue_engine_result?.schedule_based ||
+                      (results?.revenue_engine_result?.poc_percentage == null &&
+                        results?.revenue_engine_result?.revenue_this_period == null)
+                    ) {
+                      return (
+                        <p className="text-sm text-blue-800">
+                          {label || 'Schedule-based / time-based recognition per performance obligation schedule (IFRS 15 Step 5).'}
+                          {typeof results?.total_recognised === 'number' && results.total_recognised > 0 && (
+                            <span className="block mt-2 font-semibold">
+                              Total recognised to date: {formatCurrency(results.total_recognised, currency, 0)}
+                            </span>
+                          )}
+                        </p>
+                      );
+                    }
+                    return null;
+                  })() ||
+                  (
                   <div className="grid grid-cols-3 gap-4">
                     <div>
                       <div className="text-xs text-gray-500">Revenue This Period</div>
@@ -7218,7 +7660,8 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                         <div className="flex flex-wrap items-center gap-2">
                           <span className={`text-xs font-bold px-3 py-1 rounded-full ${pill}`}>{risk}</span>
                           <span className="text-sm text-text-secondary">
-                            Score: {Number(cr.constraint_score ?? 0)} / 5 factors
+                            Score: {Number(cr.risk_score ?? cr.constraint_score ?? 0)} / {Number(cr.constraint_score_max ?? 24)} points
+                            {cr.named_factor_score != null ? ` (${Number(cr.named_factor_score)}/5 IFRS 15.56 factors)` : ''}
                           </span>
                         </div>
                         {(Array.isArray(cr.factors_present) ? cr.factors_present : []).length > 0 && (
@@ -7536,10 +7979,15 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       Assess Modification
                     </Button>
 
-                    {modAssessment && (
+                    {unifiedModSource && (
                       <div className="space-y-4">
+                        {Boolean(unifiedModSource.auto_computed) && (
+                          <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                            Synced from main calculation — modification already reflected in the revenue schedule.
+                          </p>
+                        )}
                         {(() => {
-                          const mt = String(modAssessment.modification_type || '');
+                          const mt = String(unifiedModSource.modification_type || '');
                           const badgeGreen = mt === 'TYPE_1';
                           const badgeBlue = mt === 'TYPE_2';
                           const badgeAmber = mt === 'TYPE_3';
@@ -7562,19 +8010,19 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                                   {mt || '—'}
                                 </span>
                                 <span className="text-sm font-semibold text-text-primary">
-                                  {modAssessment.modification_type_name}
+                                  {unifiedModSource.modification_type_name}
                                 </span>
                               </div>
                               {mt === 'TYPE_3' && (
                                 <p className="mt-3 text-base font-bold text-orange-primary">
-                                  Catch-up: {formatCurrency(Math.abs(Number(modAssessment.catch_up_amount || 0)), currency, 0)}
+                                  Catch-up: {formatCurrency(Math.abs(Number(unifiedModSource.catch_up_amount || 0)), currency, 0)}
                                 </p>
                               )}
                             </div>
                           );
                         })()}
 
-                        {Array.isArray(modAssessment.new_recognition_schedule) && modAssessment.new_recognition_schedule.length > 0 && (
+                        {Array.isArray(unifiedModSource.new_recognition_schedule) && unifiedModSource.new_recognition_schedule.length > 0 && (
                           <div className="border border-border-default rounded-lg overflow-hidden">
                             <h4 className="text-sm font-semibold text-text-primary px-3 py-2 bg-bg-light border-b border-border-default">
                               New recognition schedule
@@ -7588,7 +8036,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                                 </tr>
                               </thead>
                               <tbody>
-                                {modAssessment.new_recognition_schedule.map((row: any, i: number) => (
+                                {unifiedModSource.new_recognition_schedule.map((row: any, i: number) => (
                                   <tr key={i} className="border-b border-border-default">
                                     <td className="py-2 px-3">{row.performance_obligation}</td>
                                     <td className="py-2 px-3 text-right amount">{formatCurrency(Number(row.allocated_amount || 0), currency, 0)}</td>
@@ -7603,7 +8051,10 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                         <div className="border border-border-default rounded-lg p-4">
                           <h4 className="text-sm font-semibold text-text-primary mb-3">Journal entries</h4>
                           <div className="space-y-3">
-                            {(modAssessment.journal_entries || []).map((entry: any, i: number) => {
+                            {(Array.isArray(unifiedModSource.journal_entries)
+                              ? unifiedModSource.journal_entries
+                              : []
+                            ).map((entry: any, i: number) => {
                               const hasNewShape = entry.debit_account && entry.credit_account;
                               if (hasNewShape) {
                                 const amt = Number(entry.amount || 0);
@@ -7640,20 +8091,22 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
 
                         <div className="p-4 bg-bg-light border border-border-default rounded-lg">
                           <p className="text-sm text-text-primary leading-relaxed" style={{ fontFamily: 'Georgia, serif' }}>
-                            {modAssessment.explanation}
+                            {String(unifiedModSource.explanation || '')}
                           </p>
                           <p className="text-[10px] text-text-muted mt-3">
-                            {(modAssessment.journal_entries || [])[0]?.reference ||
-                              (modAssessment.modification_type === 'TYPE_1'
+                            {(Array.isArray(unifiedModSource.journal_entries)
+                              ? unifiedModSource.journal_entries[0]
+                              : null)?.reference ||
+                              (unifiedModSource.modification_type === 'TYPE_1'
                                 ? 'IFRS 15.18'
-                                : modAssessment.modification_type === 'TYPE_2'
+                                : unifiedModSource.modification_type === 'TYPE_2'
                                   ? 'IFRS 15.20(b)'
                                   : 'IFRS 15.21')}
                           </p>
                         </div>
                       </div>
                     )}
-                    {!modAssessment && <p className="text-sm text-text-muted">No modification assessed yet.</p>}
+                    {!unifiedModSource && <p className="text-sm text-text-muted">No modification assessed yet.</p>}
                   </div>
                 )}
               </div>
@@ -7880,6 +8333,9 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                         <span className={`text-xs font-bold px-3 py-1 rounded-full border ${vcConstraintPreview.pill}`}>
                           {vcConstraintPreview.level}
                         </span>
+                        <span className="text-xs text-text-muted">
+                          {vcConstraintPreview.score}/{vcConstraintPreview.max} points
+                        </span>
                       </div>
                     </div>
 
@@ -7916,31 +8372,32 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                           <span className="text-text-muted">Risk Level: </span>
                           <span
                             className={`font-semibold ${
-                              vc1556ModulePreview.risk === 'Low'
+                              vc1556Display.risk === 'Low'
                                 ? 'text-green-700'
-                                : vc1556ModulePreview.risk === 'Medium'
+                                : vc1556Display.risk === 'Medium'
                                   ? 'text-amber-700'
-                                  : vc1556ModulePreview.risk === 'High'
+                                  : vc1556Display.risk === 'High'
                                     ? 'text-orange-700'
                                     : 'text-red-700'
                             }`}
                           >
-                            {vc1556ModulePreview.risk}
+                            {vc1556Display.risk}
                           </span>
+                          <span className="text-xs text-text-muted ml-2">({vc1556Display.scoreLine})</span>
                         </div>
                         <div className="text-text-secondary">
                           VC before constraint:{' '}
                           <span className="font-medium text-text-primary">
-                            {formatCurrency(vc1556ModulePreview.constrained + vc1556ModulePreview.excluded, currency, 0)}
+                            {formatCurrency(vc1556Display.constrained + vc1556Display.excluded, currency, 0)}
                           </span>
                         </div>
                         <div>
                           Constrained amount:{' '}
-                          <span className="font-semibold text-green-700">{formatCurrency(vc1556ModulePreview.constrained, currency, 0)}</span>
+                          <span className="font-semibold text-green-700">{formatCurrency(vc1556Display.constrained, currency, 0)}</span>
                         </div>
                         <div>
                           Excluded amount:{' '}
-                          <span className="font-semibold text-red-600">{formatCurrency(vc1556ModulePreview.excluded, currency, 0)}</span>
+                          <span className="font-semibold text-red-600">{formatCurrency(vc1556Display.excluded, currency, 0)}</span>
                         </div>
                       </div>
                     </div>
@@ -7955,48 +8412,54 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       Calculate Variable Consideration
                     </Button>
 
-                    {vcResult && (
+                    {unifiedVcSource && (
                       <div className="space-y-4 border-t border-border-default pt-6">
+                        {Boolean(unifiedVcSource.auto_computed) && (
+                          <p className="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+                            Synced from main calculation — manual recalculate below overrides this assessment.
+                          </p>
+                        )}
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                           <div className="p-4 rounded-lg border border-border-default bg-white shadow-sm text-center">
                             <p className="text-xs text-text-muted">Unconstrained</p>
                             <p className="text-lg font-bold text-text-primary amount mt-1">
-                              {formatCurrency(Number(vcResult.expected_amount ?? 0), currency, 0)}
+                              {formatCurrency(Number(unifiedVcSource.expected_amount ?? unifiedVcSource.estimated_vc_before_constraint ?? 0), currency, 0)}
                             </p>
                             <p className="text-xs text-text-muted mt-1">(estimated)</p>
                           </div>
                           <div className="p-4 rounded-lg border border-orange-200 bg-orange-50/40 shadow-sm text-center">
                             <p className="text-xs text-text-muted">Constrained</p>
                             <p className="text-lg font-bold text-text-primary amount mt-1">
-                              {formatCurrency(Number(vcResult.constrained_amount ?? 0), currency, 0)}
+                              {formatCurrency(Number(unifiedVcSource.constrained_amount ?? 0), currency, 0)}
                             </p>
                             <p className="text-xs text-text-muted mt-1">(to include)</p>
                           </div>
                           <div className="p-4 rounded-lg border border-border-default bg-white shadow-sm text-center">
                             <p className="text-xs text-text-muted">Reduction</p>
                             <p className="text-lg font-bold text-text-primary amount mt-1">
-                              {formatCurrency(Number(vcResult.reduction_amount ?? 0), currency, 0)}
+                              {formatCurrency(Number(unifiedVcSource.reduction_amount ?? unifiedVcSource.excluded_amount ?? 0), currency, 0)}
                             </p>
                             <p className="text-xs text-text-muted mt-1">
-                              ({Number(vcResult.reduction_pct ?? 0).toFixed(1)}%)
+                              ({Number(unifiedVcSource.reduction_pct ?? 0).toFixed(1)}%)
                             </p>
                           </div>
                         </div>
 
                         {(() => {
-                          const rl = String(vcResult.risk_level ?? 'LOW');
-                          const rs = (vcResult.risk_scenario as Record<string, number> | null | undefined) || {};
+                          const rl = String(unifiedVcSource.risk_level ?? 'LOW').toUpperCase();
+                          const rs = (unifiedVcSource.risk_scenario as Record<string, number> | null | undefined) || {};
                           const bgClass =
-                            rl === 'HIGH' ? 'bg-red-50' : rl === 'MEDIUM' ? 'bg-orange-50' : 'bg-green-50';
+                            rl === 'HIGH' || rl === 'CRITICAL' ? 'bg-red-50' : rl === 'MEDIUM' ? 'bg-orange-50' : 'bg-green-50';
                           const badgeClass =
-                            rl === 'HIGH'
+                            rl === 'HIGH' || rl === 'CRITICAL'
                               ? 'bg-red-100 text-red-800 border border-red-200'
                               : rl === 'MEDIUM'
                                 ? 'bg-orange-100 text-orange-900 border border-orange-200'
                                 : 'bg-green-100 text-green-800 border border-green-200';
-                          const badgeLabel = rl === 'HIGH' ? 'HIGH RISK' : rl === 'MEDIUM' ? 'MEDIUM RISK' : 'LOW RISK';
-                          const rat = Number(vcResult.revenue_at_risk ?? 0);
-                          const rpc = Number(vcResult.risk_pct_of_contract ?? 0);
+                          const badgeLabel =
+                            rl === 'CRITICAL' ? 'CRITICAL RISK' : rl === 'HIGH' ? 'HIGH RISK' : rl === 'MEDIUM' ? 'MEDIUM RISK' : 'LOW RISK';
+                          const rat = Number(unifiedVcSource.revenue_at_risk ?? unifiedVcSource.excluded_amount ?? 0);
+                          const rpc = Number(unifiedVcSource.risk_pct_of_contract ?? unifiedVcSource.risk_pct ?? 0);
                           return (
                             <div className={`relative rounded-xl border border-border-default p-5 ${bgClass}`}>
                               <span
@@ -8035,14 +8498,14 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                           );
                         })()}
 
-                        {typeof vcResult.constraint_warning === 'string' && vcResult.constraint_warning.trim() !== '' && (
+                        {typeof unifiedVcSource.constraint_warning === 'string' && unifiedVcSource.constraint_warning.trim() !== '' && (
                           <div className="rounded-xl border border-orange-300 bg-orange-50/80 p-5 space-y-4">
                             <p className="text-sm font-bold text-orange-950">⚠ Constraint Warning</p>
-                            <p className="text-sm text-orange-950 leading-relaxed">{vcResult.constraint_warning}</p>
+                            <p className="text-sm text-orange-950 leading-relaxed">{unifiedVcSource.constraint_warning}</p>
                             <div>
                               <p className="text-xs font-semibold text-orange-900 mb-1">
                                 Constraint multiplier applied:{' '}
-                                {(Number(vcResult.constraint_multiplier ?? 1) * 100).toFixed(0)}% of expected value
+                                {(Number(unifiedVcSource.constraint_multiplier ?? 1) * 100).toFixed(0)}% of expected value
                                 included
                               </p>
                               <p className="text-xs text-orange-800 mb-1">IFRS 15.57 — reassess when uncertainty resolves.</p>
@@ -8051,12 +8514,12 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                                 <div
                                   className="h-full bg-orange-500 transition-all rounded-full"
                                   style={{
-                                    width: `${Math.min(100, Math.max(0, Number(vcResult.constraint_multiplier ?? 1) * 100))}%`,
+                                    width: `${Math.min(100, Math.max(0, Number(unifiedVcSource.constraint_multiplier ?? 1) * 100))}%`,
                                   }}
                                 />
                               </div>
                               <p className="text-xs text-orange-800 mt-1">
-                                {(Number(vcResult.constraint_multiplier ?? 1) * 100).toFixed(0)}% of expected value
+                                {(Number(unifiedVcSource.constraint_multiplier ?? 1) * 100).toFixed(0)}% of expected value
                                 reflected in constrained amount
                               </p>
                             </div>
@@ -8141,8 +8604,8 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                             className="border-orange-200 text-orange-900"
                             isLoading={isReversalRiskLoading}
                             onClick={() => {
-                              if (!vcResult) return;
-                              void postReversalRiskFromVc(vcResult);
+                              if (!unifiedVcSource) return;
+                              void postReversalRiskFromVc(unifiedVcSource);
                             }}
                           >
                             Assess Reversal Risk
@@ -8314,29 +8777,29 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                           })()}
                         </div>
 
-                        {Array.isArray(vcResult.active_factors) && (vcResult.active_factors as string[]).length > 0 && (
+                        {Array.isArray(unifiedVcSource.active_factors) && (unifiedVcSource.active_factors as string[]).length > 0 && (
                           <div>
                             <p className="text-sm font-semibold text-text-primary">Factors applied:</p>
                             <ul className="list-disc pl-5 mt-1 text-sm text-text-primary space-y-0.5">
-                              {(vcResult.active_factors as string[]).map((f, j) => (
+                              {(unifiedVcSource.active_factors as string[]).map((f, j) => (
                                 <li key={j}>{f}</li>
                               ))}
                             </ul>
                           </div>
                         )}
-                        {typeof vcResult.explanation === 'string' && vcResult.explanation && (
+                        {typeof unifiedVcSource.explanation === 'string' && unifiedVcSource.explanation && (
                           <div className="p-4 bg-bg-light border border-border-default rounded-lg">
                             <p className="text-sm text-text-primary leading-relaxed" style={{ fontFamily: 'Georgia, "Times New Roman", serif' }}>
-                              {vcResult.explanation}
+                              {unifiedVcSource.explanation}
                             </p>
                           </div>
                         )}
-                        {Boolean(vcResult.risk_flag) && (
+                        {Boolean(unifiedVcSource.risk_flag) && (
                           <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-900">
                             ⚠{' '}
-                            {typeof vcResult.risk_message === 'string' && vcResult.risk_message
-                              ? vcResult.risk_message
-                              : `Constraint reduces variable consideration by ${Number(vcResult.reduction_pct ?? 0).toFixed(1)}%. Consider whether the variable element should be excluded entirely until uncertainty resolves.`}
+                            {typeof unifiedVcSource.risk_message === 'string' && unifiedVcSource.risk_message
+                              ? unifiedVcSource.risk_message
+                              : `Constraint reduces variable consideration by ${Number(unifiedVcSource.reduction_pct ?? 0).toFixed(1)}%. Consider whether the variable element should be excluded entirely until uncertainty resolves.`}
                           </div>
                         )}
                         <Button
@@ -8345,18 +8808,18 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                           className="bg-gradient-orange"
                           onClick={addVcToTransactionPrice}
                           title={
-                            String(vcResult.risk_level ?? '') === 'HIGH'
-                              ? `High revenue risk — only ${formatCurrency(Number(vcResult.constrained_amount ?? 0), currency, 0)} of ${formatCurrency(Number(vcResult.expected_amount ?? 0), currency, 0)} expected value included`
+                            String(unifiedVcSource.risk_level ?? '').toUpperCase() === 'HIGH'
+                              ? `High revenue risk — only ${formatCurrency(Number(unifiedVcSource.constrained_amount ?? 0), currency, 0)} of ${formatCurrency(Number(unifiedVcSource.expected_amount ?? 0), currency, 0)} expected value included`
                               : undefined
                           }
                         >
-                          {String(vcResult.risk_level ?? '') === 'HIGH'
-                            ? `Add ${formatCurrency(Number(vcResult.constrained_amount ?? 0), currency, 0)} to TP ⚠`
-                            : `Add ${formatCurrency(Number(vcResult.constrained_amount ?? 0), currency, 0)} to TP ✓`}
+                          {String(unifiedVcSource.risk_level ?? '').toUpperCase() === 'HIGH'
+                            ? `Add ${formatCurrency(Number(unifiedVcSource.constrained_amount ?? 0), currency, 0)} to TP ⚠`
+                            : `Add ${formatCurrency(Number(unifiedVcSource.constrained_amount ?? 0), currency, 0)} to TP ✓`}
                         </Button>
                       </div>
                     )}
-                    {!vcResult && <p className="text-sm text-text-muted">No variable consideration assessed yet.</p>}
+                    {!unifiedVcSource && <p className="text-sm text-text-muted">No variable consideration assessed yet.</p>}
                   </div>
                 )}
               </div>
@@ -8437,20 +8900,26 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     <Button variant="primary" size="md" className="bg-gradient-orange" onClick={runRpoCalculation} isLoading={isRpoLoading}>
                       Run RPO analysis
                     </Button>
-                    {rpoResult && (
+                    {unifiedRpoSource && (
                       <div className="space-y-4 border-t border-border-default pt-6">
+                        {Boolean(unifiedRpoSource.auto_computed) && (
+                          <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                            Auto-computed from Step 5 revenue schedule
+                            {unifiedRpoSource.source ? ` (${String(unifiedRpoSource.source)})` : ''}.
+                          </p>
+                        )}
                         <div className="rounded-xl p-6 text-center text-white bg-gradient-to-r from-orange-500 to-amber-500 shadow-md">
                           <p className="text-sm font-medium opacity-90">Total Remaining Performance Obligations</p>
                           <p className="text-3xl font-bold amount mt-2">
-                            {formatCurrency(Number(rpoResult.total_rpo ?? 0), currency, 0)}
+                            {formatCurrency(Number(unifiedRpoSource.total_rpo ?? 0), currency, 0)}
                           </p>
-                          <p className="text-xs mt-2 opacity-90">As of {String(rpoResult.as_of_date || '')}</p>
+                          <p className="text-xs mt-2 opacity-90">As of {String(unifiedRpoSource.as_of_date || '')}</p>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                           {[
-                            { label: 'Within 1 Year', val: rpoResult.within_1_year },
-                            { label: '1 to 2 Years', val: rpoResult.one_to_two_years },
-                            { label: 'Beyond 2 Years', val: rpoResult.beyond_2_years },
+                            { label: 'Within 1 Year', val: unifiedRpoSource.within_1_year },
+                            { label: '1 to 2 Years', val: unifiedRpoSource.one_to_two_years },
+                            { label: 'Beyond 2 Years', val: unifiedRpoSource.beyond_2_years },
                           ].map((b) => (
                             <div key={b.label} className="p-4 rounded-lg border border-border-default text-center bg-white">
                               <p className="text-xs text-text-muted">{b.label}</p>
@@ -8472,7 +8941,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                               </tr>
                             </thead>
                             <tbody>
-                              {(Array.isArray(rpoResult.by_obligation) ? rpoResult.by_obligation : []).map((ob: any, i: number) => {
+                              {(Array.isArray(unifiedRpoSource.by_obligation) ? unifiedRpoSource.by_obligation : []).map((ob: any, i: number) => {
                                 const pct = Number(ob.pct_complete ?? 0);
                                 const barColor = pct > 75 ? 'bg-emerald-500' : pct >= 25 ? 'bg-orange-400' : 'bg-red-500';
                                 const bucketLabel =
@@ -8503,7 +8972,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                             </tbody>
                           </table>
                         </div>
-                        {rpoResult.practical_expedient_available ? (
+                        {unifiedRpoSource.practical_expedient_available ? (
                           <div className="p-4 rounded-lg border border-emerald-200 bg-emerald-50 text-sm text-emerald-900">
                             ✓ Practical expedient available. RPO disclosure may be omitted under IFRS 15.121.
                           </div>
@@ -8520,7 +8989,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                               className="text-text-muted hover:text-orange-primary p-1"
                               title="Copy"
                               onClick={() => {
-                                const t = String(rpoResult.disclosure_text || '');
+                                const t = String(unifiedRpoSource.disclosure_text || '');
                                 navigator.clipboard.writeText(t).then(() => toast.success('Copied')).catch(() => toast.error('Copy failed'));
                               }}
                             >
@@ -8531,12 +9000,12 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                             className="text-sm text-text-primary leading-relaxed whitespace-pre-wrap"
                             style={{ fontFamily: 'Times New Roman, Times, serif' }}
                           >
-                            {String(rpoResult.disclosure_text || '')}
+                            {String(unifiedRpoSource.disclosure_text || '')}
                           </p>
                         </div>
                       </div>
                     )}
-                    {!rpoResult && <p className="text-sm text-text-muted">RPO not yet calculated.</p>}
+                    {!unifiedRpoSource && <p className="text-sm text-text-muted">RPO not yet calculated.</p>}
                   </div>
                 )}
               </div>
@@ -8615,7 +9084,7 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     <Button variant="primary" size="md" className="bg-gradient-orange" onClick={runContractCostsCalculation} isLoading={isCcLoading}>
                       Calculate Commission Asset
                     </Button>
-                    {ccResult && (
+                    {ccResult && ccResult.assessed !== false && (
                       <div className="space-y-4 border-t border-border-default pt-6">
                         {ccResult.use_practical_expedient ? (
                           <>
@@ -8727,7 +9196,10 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                         )}
                       </div>
                     )}
-                    {!ccResult && <p className="text-sm text-text-muted">No contract costs assessed yet.</p>}
+                    {!ccResult && <p className="text-sm text-text-muted italic">No contract costs assessed for this contract.</p>}
+                    {ccResult && ccResult.assessed === false && (
+                      <p className="text-sm text-text-muted italic">{String(ccResult.explanation || 'No contract costs assessed for this contract.')}</p>
+                    )}
                   </div>
                 )}
               </div>
@@ -8754,6 +9226,17 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                       This determines whether revenue is recognised <strong>GROSS</strong> (full transaction price) or <strong>NET</strong> (fee
                       only). The difference can be material to reported revenue.
                     </div>
+                    <label className="flex items-start gap-2 p-3 border border-border-default rounded-lg cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={paThirdPartyInvolved}
+                        onChange={(e) => setPaThirdPartyInvolved(e.target.checked)}
+                      />
+                      <span className="text-sm text-text-primary">
+                        This contract involves a third party (vendor/subcontractor) whose goods or services the entity arranges on behalf of the customer
+                      </span>
+                    </label>
                     {[
                       {
                         q: 'Does your entity obtain the good or service before transferring it to the customer?',
@@ -8829,7 +9312,17 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     </Button>
                     {paResult && (
                       <div className="space-y-4 border-t border-border-default pt-4">
-                        {String(paResult.conclusion) === 'PRINCIPAL' ? (
+                        {String(paResult.conclusion) === 'NOT_APPLICABLE' ? (
+                          <div className="rounded-xl p-5 bg-slate-100 border border-slate-300 text-center">
+                            <p className="font-bold text-lg text-slate-800">Not applicable — no third party identified</p>
+                            <p className="text-sm mt-2 text-slate-700">{String(paResult.explanation || '')}</p>
+                          </div>
+                        ) : String(paResult.conclusion) === 'BLOCKED' ? (
+                          <div className="rounded-xl p-5 bg-amber-50 border border-amber-300 text-center">
+                            <p className="font-bold text-lg text-amber-900">Assessment blocked — third-party cost required</p>
+                            <p className="text-sm mt-2 text-amber-800">{String(paResult.explanation || paResult.borderline_note || '')}</p>
+                          </div>
+                        ) : String(paResult.conclusion) === 'PRINCIPAL' ? (
                           <div className="rounded-xl p-5 bg-gradient-to-r from-emerald-600 to-green-600 text-white text-center">
                             <p className="font-bold text-lg">✓ PRINCIPAL — Recognise GROSS</p>
                             <p className="text-sm mt-1 opacity-95">Revenue: {formatCurrency(Number(paResult.gross_revenue), currency, 0)}</p>
@@ -8842,11 +9335,13 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                             <p className="text-sm">Commission Rate: {Number(paResult.commission_rate_pct).toFixed(1)}%</p>
                           </div>
                         )}
-                        {Boolean(paResult.borderline) && (
+                        {String(paResult.conclusion) !== 'NOT_APPLICABLE' && String(paResult.conclusion) !== 'BLOCKED' && Boolean(paResult.borderline) && (
                           <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-sm">
                             ⚠ {String(paResult.borderline_note || 'Borderline assessment. Document your rationale for audit.')}
                           </div>
                         )}
+                        {String(paResult.conclusion) !== 'NOT_APPLICABLE' && String(paResult.conclusion) !== 'BLOCKED' && (
+                        <>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                           {[
                             {
@@ -8920,6 +9415,8 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                             </div>
                           ))}
                         </div>
+                        </>
+                        )}
                         {typeof paResult.explanation === 'string' && (
                           <p className="p-4 bg-bg-light border border-border-default rounded-lg text-sm text-text-primary leading-relaxed" style={{ fontFamily: 'Georgia, serif' }}>
                             {paResult.explanation}

@@ -321,6 +321,57 @@ def test_extraction_without_ev_narrative_falls_back_to_component_sum():
 
 
 
+def test_contract_costs_capitalises_dxb014_commission():
+    """CONST-2025-DXB-014 — AED 76,920 sales commission capitalised over 18 months."""
+    commission = 76_920.0
+    term = 18
+    contract_value = 2_564_000.0
+
+    legacy = IFRS15ContractCostsEngine().calculate(
+        {
+            "commission_amount": commission,
+            "contract_term_months": term,
+            "contract_total_value": contract_value,
+            "currency": "AED",
+        }
+    )
+    assert legacy["assessed"] is True
+    assert legacy["capitalise"] is True
+    assert legacy["commission_amount"] == pytest.approx(commission)
+    assert legacy["monthly_amortisation"] == pytest.approx(round(commission / term, 2))
+    assert legacy["total_asset_recognised"] == pytest.approx(commission)
+    assert legacy["impairment_flag"] is False
+    assert len(legacy["amortisation_schedule"]) == term
+    assert legacy["amortisation_schedule"][-1]["closing_balance"] == pytest.approx(0.0)
+    assert "AED" in legacy["explanation"]
+    assert "$" not in legacy["explanation"]
+
+    batch = IFRS15Calculator().calculate_contract_costs(
+        [
+            ContractCostInput(
+                cost_id="COMM-DXB014",
+                contract_id="CONST-2025-DXB-014",
+                description="Sales commission (3% of original contract value)",
+                cost_type="incremental_obtaining",
+                cost_amount=commission,
+                incurred_date="2026-01-15",
+                contract_start="2026-01-01",
+                contract_end="2027-07-01",
+                expected_renewal=False,
+                expected_renewal_months=0,
+                currency="AED",
+            )
+        ]
+    )
+    item = batch["costs"][0]
+    assert item["treatment"] == "CAPITALISE"
+    assert item["amortisation_period_months"] == term
+    assert item["monthly_amortisation"] == pytest.approx(round(commission / term, 2))
+    assert item["cost_amount"] == pytest.approx(commission)
+    assert item["amortisation_schedule"][-1]["asset_balance"] == pytest.approx(0.0)
+    assert batch["summary"]["total_capitalised"] == pytest.approx(commission)
+
+
 def test_contract_costs_not_assessed_when_zero_commission():
     single = IFRS15ContractCostsEngine().calculate(
         {

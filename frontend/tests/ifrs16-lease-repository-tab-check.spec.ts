@@ -129,63 +129,47 @@ test('IFRS16 lease repository tab checks for RE-UK-001', async ({ page, context 
     await page.screenshot({ path: path.join(SHOT_DIR, 'tab-2-financial-management-FAIL.png'), fullPage: true });
   }
 
-  // Tab 3 — Lease Modifications
-  try {
-    await page.getByRole('button', { name: 'Lease Modifications' }).click();
-    await page.getByRole('button', { name: /Add Modification/i }).click();
-    await expect(page.getByText(/New Modification|Edit Modification/i)).toBeVisible();
-    const advisorVisible = await page.getByText(/Modification advisor/i).isVisible().catch(() => false);
-    const advisorError = await page.locator('.text-red-800').first().isVisible().catch(() => false);
-    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-3-lease-modifications.png'), fullPage: true });
-    report.tab3 = {
-      status: advisorVisible || advisorError ? 'pass' : 'warn',
-      note: advisorError ? 'Modification advisor UI shown; API may be offline' : undefined,
-    };
-  } catch (e) {
-    report.tab3 = { status: 'fail', note: e instanceof Error ? e.message : String(e) };
-    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-3-lease-modifications-FAIL.png'), fullPage: true });
-  }
-
-  // Tab 4 — Assets & Locations
+  // Tab 3 — Assets & Locations
   try {
     await page.getByRole('button', { name: 'Assets & Locations' }).click();
     await expect(page.getByRole('heading', { name: 'Assets & Locations' })).toBeVisible();
-    await expect(inputForLabel(page, 'Lease Type')).toHaveValue('Office');
-    await expect(inputForLabel(page, 'ROU Asset GL Code')).toHaveValue('ROU-1001');
-    await expect(inputForLabel(page, 'Lease Liability GL Code')).toHaveValue('LL-2001');
-    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-4-assets-locations.png'), fullPage: true });
-    report.tab4 = { status: 'pass' };
+    await expect(inputForLabel(page, /Lease type/i)).toHaveValue('Office');
+    await page.getByText('Additional details').click();
+    await expect(inputForLabel(page, /ROU asset GL code/i)).toHaveValue('ROU-1001');
+    await expect(inputForLabel(page, /Lease liability GL code/i)).toHaveValue('LL-2001');
+    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-3-assets-locations.png'), fullPage: true });
+    report.tab3 = { status: 'pass' };
   } catch (e) {
-    report.tab4 = { status: 'fail', note: e instanceof Error ? e.message : String(e) };
-    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-4-assets-locations-FAIL.png'), fullPage: true });
+    report.tab3 = { status: 'fail', note: e instanceof Error ? e.message : String(e) };
+    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-3-assets-locations-FAIL.png'), fullPage: true });
   }
 
-  // Tab 5 — Schedules
+  // Tab 4 — Schedules
   try {
     await page.getByRole('button', { name: 'Schedules' }).click();
     await page.getByRole('button', { name: 'Lease Liability Schedule' }).click();
     await expect(page.getByRole('columnheader', { name: 'Opening' })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: 'Closing' })).toBeVisible();
     await expect(page.getByText('2024-02-01')).toBeVisible();
-    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-5-schedules.png'), fullPage: true });
-    report.tab5 = { status: 'pass' };
+    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-4-schedules.png'), fullPage: true });
+    report.tab4 = { status: 'pass' };
   } catch (e) {
-    report.tab5 = { status: 'fail', note: e instanceof Error ? e.message : String(e) };
-    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-5-schedules-FAIL.png'), fullPage: true });
+    report.tab4 = { status: 'fail', note: e instanceof Error ? e.message : String(e) };
+    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-4-schedules-FAIL.png'), fullPage: true });
   }
 
-  // Tab 6 — Review & Calculate
+  // Tab 5 — Review & Calculate
   try {
     await page.getByRole('button', { name: 'Review & Calculate' }).click();
     await expect(page.getByRole('button', { name: '🧮 Calculate IFRS 16' })).toBeVisible();
     await expect(page.getByText('LEASE LIABILITY', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('ROU ASSET', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('Auto-generated accounting entries')).toBeVisible();
-    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-6-review-calculate.png'), fullPage: true });
-    report.tab6 = { status: 'pass' };
+    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-5-review-calculate.png'), fullPage: true });
+    report.tab5 = { status: 'pass' };
   } catch (e) {
-    report.tab6 = { status: 'fail', note: e instanceof Error ? e.message : String(e) };
-    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-6-review-calculate-FAIL.png'), fullPage: true });
+    report.tab5 = { status: 'fail', note: e instanceof Error ? e.message : String(e) };
+    await page.screenshot({ path: path.join(SHOT_DIR, 'tab-5-review-calculate-FAIL.png'), fullPage: true });
   }
 
   fs.writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2));
