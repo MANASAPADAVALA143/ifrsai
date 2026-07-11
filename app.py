@@ -1306,6 +1306,17 @@ def _has_amortization_schedule(results: dict) -> bool:
     return False
 
 
+def serialize_ifrs16_results(results: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert pandas DataFrames in calculator output to JSON-serializable records."""
+    import pandas as pd
+
+    out = dict(results)
+    for key, val in out.items():
+        if isinstance(val, pd.DataFrame):
+            out[key] = val.to_dict(orient="records")
+    return out
+
+
 def _lease_repository_to_request(lease_data: Dict[str, Any]) -> Optional[LeaseRequest]:
     """Build a LeaseRequest from a client lease-repository entry when inputs are sufficient."""
     if not isinstance(lease_data, dict):
@@ -1432,10 +1443,7 @@ def _recalculate_results_json(lease_request: LeaseRequest) -> Dict[str, Any]:
     calculator = IFRS16Calculator()
     lease_input = convert_lease_request_to_input(lease_request)
     result = calculator.calculate_full_ifrs16(lease_input)
-    result_json = result.copy()
-    if "amortization_schedule" in result_json and hasattr(result_json["amortization_schedule"], "to_dict"):
-        result_json["amortization_schedule"] = result_json["amortization_schedule"].to_dict(orient="records")
-    return result_json
+    return serialize_ifrs16_results(result)
 
 
 def _resolve_bulk_export_results(
@@ -1684,10 +1692,7 @@ async def calculate_lease(request: LeaseRequest):
                 reporting_dt = None
         results = calculator.calculate_full_ifrs16(lease_input, reporting_date=reporting_dt)
         
-        # Convert DataFrame to dict for JSON serialization
-        results_json = results.copy()
-        if 'amortization_schedule' in results_json:
-            results_json['amortization_schedule'] = results_json['amortization_schedule'].to_dict(orient='records')
+        results_json = serialize_ifrs16_results(results)
         
         # Generate Excel file (calculation still succeeds if export fails)
         file_id = str(uuid.uuid4())
@@ -2031,10 +2036,7 @@ async def batch_calculate(leases: List[LeaseRequest]):
             calculator = IFRS16Calculator()
             result = calculator.calculate_full_ifrs16(lease_input)
             
-            # Convert DataFrame
-            result_json = result.copy()
-            if 'amortization_schedule' in result_json:
-                result_json['amortization_schedule'] = result_json['amortization_schedule'].to_dict(orient='records')
+            result_json = serialize_ifrs16_results(result)
             
             results.append({
                 "lease_id": lease.lease_id,
@@ -2081,9 +2083,7 @@ async def ifrs16_bulk_calculate(body: IFRS16BulkCalculateRequest):
             lease_input = convert_lease_request_to_input(lease)
             calculator = IFRS16Calculator()
             result = calculator.calculate_full_ifrs16(lease_input)
-            result_json = result.copy()
-            if "amortization_schedule" in result_json and hasattr(result_json["amortization_schedule"], "to_dict"):
-                result_json["amortization_schedule"] = result_json["amortization_schedule"].to_dict(orient="records")
+            result_json = serialize_ifrs16_results(result)
 
             ll = float(result.get("lease_liability", 0) or 0)
             rou = float(result.get("rou_asset", 0) or 0)
