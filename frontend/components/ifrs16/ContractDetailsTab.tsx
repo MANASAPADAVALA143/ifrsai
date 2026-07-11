@@ -125,16 +125,6 @@ export function ContractDetailsTab({
               ))}
             </select>
           </div>
-          <div>
-            <label className={labelClass}>Modification date</label>
-            <input
-              type="date"
-              value={form.modificationDate || ''}
-              onChange={(e) => patch({ modificationDate: e.target.value })}
-              className={inputClassFilled(inputClass, form.modificationDate)}
-            />
-            <HelperText>Only if terms changed after commencement</HelperText>
-          </div>
         </div>
       </TintedSectionCard>
 

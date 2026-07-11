@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, type ReactNode } from 'react';
 import { SidebarLayout } from '@/components/SidebarLayout';
 import { Button } from '@/components/Button';
 import {
@@ -83,7 +83,7 @@ import {
 } from '@/lib/ifrs16-lease-extraction';
 import { LeasePdfUploadBar } from '@/components/ifrs16/LeasePdfUploadBar';
 import { FieldLabelWithExtraction } from '@/components/ifrs16/FieldLabelWithExtraction';
-import { CollapsibleFormSection, ContextHelpCallout } from '@/components/ifrs16/lease-form-ui';
+import { CollapsibleFormSection, ContextHelpCallout, TintedSectionCard } from '@/components/ifrs16/lease-form-ui';
 
 // ---------------------------------------------------------------------------
 // ERP push buttons (inline)
@@ -197,10 +197,11 @@ function TallyPushButton({ leaseId, calcResults, period }: { leaseId: string; ca
 }
 // ---------------------------------------------------------------------------
 
-const TAB_IDS = ['contract', 'financial', 'assets', 'schedules', 'disclosures', 'review'] as const;
+const TAB_IDS = ['contract', 'financial', 'modifications', 'assets', 'schedules', 'disclosures', 'review'] as const;
 const TABS: { id: typeof TAB_IDS[number]; label: string; icon: any }[] = [
   { id: 'contract', label: 'Contract Details', icon: FileText },
   { id: 'financial', label: 'Financial Management', icon: DollarSign },
+  { id: 'modifications', label: 'Lease Modifications', icon: RefreshCw },
   { id: 'assets', label: 'Assets & Locations', icon: MapPin },
   { id: 'schedules', label: 'Schedules', icon: BarChart3 },
   { id: 'disclosures', label: 'Disclosures', icon: FileCheck },
@@ -1248,6 +1249,33 @@ function getReportingDateForFY(fy: string): Date {
   ];
   const missingAssetPrerequisites = assetPrerequisites.filter((item) => !item.complete);
   const assetsTabEnabled = missingAssetPrerequisites.length === 0;
+  const contractDetailsReady = Boolean(form.startDate && form.endDate);
+  const getTabLockedMessage = (tabId: typeof TAB_IDS[number]) => {
+    if (tabId === 'modifications' && !contractDetailsReady) return 'Complete Contract Details first';
+    if (tabId === 'assets' && !assetsTabEnabled) return 'Complete Contract Details and Financial Management first';
+    if ((tabId === 'schedules' || tabId === 'disclosures') && !hasResults) return 'Calculate IFRS 16 first';
+    return null;
+  };
+  const LockedTabMessage = ({
+    title,
+    body,
+    actions,
+  }: {
+    title: string;
+    body: string;
+    actions?: ReactNode;
+  }) => (
+    <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-6">
+      <div className="flex items-start gap-3">
+        <Info className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
+        <div>
+          <h4 className="text-sm font-semibold text-[#1e293b] mb-1">{title}</h4>
+          <p className="text-sm text-[#64748b] mb-4">{body}</p>
+          {actions}
+        </div>
+      </div>
+    </div>
+  );
 
   const renderLeaseModificationsSection = () => {
             const mods = form.modifications || [];
@@ -1493,30 +1521,26 @@ function getReportingDateForFY(fy: string): Date {
           
   return (
     <SidebarLayout
-      pageTitle={isNew ? 'New Lease' : displayTitle}
+      pageTitle={isNew ? 'New Lease' : form.leaseId || 'Lease'}
       pageSubtitle=""
+      hidePageHeader
     >
       <div className="space-y-0">
-        {/* Sticky header */}
+        {/* Sticky header — single title row with actions */}
         <div className="sticky top-0 z-30 bg-[#f5f6fa] border-b border-[#e2e8f0] -mx-6 px-6 py-4 mb-6 shadow-sm">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <nav className="flex items-center gap-2 text-sm text-[#64748b] mb-1">
-                <Link href="/dashboard" className="hover:text-[#f97316]">IFRS</Link>
-                <ChevronRight className="w-4 h-4" />
-                <Link href="/dashboard/ifrs16/repository" className="hover:text-[#f97316]">Lease Repository</Link>
-                <ChevronRight className="w-4 h-4" />
-                <span className="text-[#1e293b] font-medium">{form.leaseId || 'New'}</span>
-              </nav>
-              <h1 className="text-xl font-bold text-[#1e293b]">{displayTitle}</h1>
-              <div className="flex items-center gap-2 mt-1">
-                <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusLabel === 'Active' ? 'bg-green-100 text-green-700' : statusLabel === 'Draft' ? 'bg-gray-100 text-gray-700' : 'bg-amber-100 text-amber-700'}`}>
-                  {statusLabel}
-                </span>
-                <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-700">{form.version || 'V1'}</span>
-              </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <h1 className="text-2xl md:text-3xl font-bold text-[#1e293b] truncate">{displayTitle}</h1>
+              {!isNew ? (
+                <>
+                  <span className={`shrink-0 px-2 py-0.5 text-xs font-medium rounded-full ${statusLabel === 'Active' ? 'bg-green-100 text-green-700' : statusLabel === 'Draft' ? 'bg-gray-100 text-gray-700' : 'bg-amber-100 text-amber-700'}`}>
+                    {statusLabel}
+                  </span>
+                  <span className="shrink-0 px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-700">{form.version || 'V1'}</span>
+                </>
+              ) : null}
             </div>
-            <div className="flex flex-wrap gap-2 items-center">
+            <div className="flex flex-wrap gap-2 items-center shrink-0">
               <div className="relative" ref={sampleMenuRef}>
                 <button
                   type="button"
@@ -1611,13 +1635,14 @@ function getReportingDateForFY(fy: string): Date {
               const active = activeTab === t.id;
               const dirty = dirtyTabs.has(t.id);
               const hasExtracted = extractedTabs.has(t.id);
-              const disabled = t.id === 'assets' && !assetsTabEnabled;
+              const lockedMessage = getTabLockedMessage(t.id);
+              const disabled = Boolean(lockedMessage);
               return (
                 <button
                   key={t.id}
                   type="button"
                   disabled={disabled}
-                  title={disabled ? 'Complete Contract Details and Financial Management first' : undefined}
+                  title={lockedMessage ?? undefined}
                   onClick={() => setActiveTab(t.id)}
                   className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
                     disabled
@@ -1630,7 +1655,7 @@ function getReportingDateForFY(fy: string): Date {
                   <Icon className="w-4 h-4" /> {t.label}
                   {disabled && (
                     <span className="text-[10px] font-semibold text-[#94a3b8] bg-white border border-[#e2e8f0] rounded-full px-1.5 py-0.5">
-                      Locked
+                      {lockedMessage}
                     </span>
                   )}
                   {hasExtracted && <span className="absolute top-1.5 right-1 w-2 h-2 rounded-full bg-[#f97316]" title="AI extracted data" />}
@@ -1670,8 +1695,15 @@ function getReportingDateForFY(fy: string): Date {
                 extractedConfidences={extractedConfidences}
                 onClearExtractedField={clearExtractedField}
               />
-              <section className="mb-6">
-                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Description & Terms</h4>
+              <TintedSectionCard
+                title="Description & terms"
+                icon={<span className="text-indigo-500">📝</span>}
+                tintClass="bg-indigo-50/40"
+                borderClass="border-indigo-100"
+              >
+                <ContextHelpCallout>
+                  Capture renewal, termination and restoration clauses here so downstream modification and disclosure tabs can reference the contract context.
+                </ContextHelpCallout>
                 <DescriptionTermsTab
                   form={form}
                   setForm={setForm}
@@ -1681,9 +1713,12 @@ function getReportingDateForFY(fy: string): Date {
                   extractedConfidences={extractedConfidences}
                   onClearExtractedField={clearExtractedField}
                 />
-              </section>
-              <details className="mb-6 border border-[#e2e8f0] rounded-lg overflow-hidden">
-                <summary className="px-4 py-3 bg-[#f8fafc] text-sm font-medium cursor-pointer">Contact Details</summary>
+              </TintedSectionCard>
+              <details className="mb-6 border border-slate-200 rounded-xl overflow-hidden bg-slate-50">
+                <summary className="px-4 py-3 bg-white/60 text-sm font-semibold text-[#1e293b] cursor-pointer">
+                  Contact Details
+                  <span className="block text-[10px] font-normal text-[#64748b] mt-0.5">Optional contact metadata for counterparties and legal entity records</span>
+                </summary>
                 <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div className="rounded-lg overflow-hidden border border-[#e2e8f0]">
                     <div className="px-3 py-2 bg-gradient-to-r from-[#f97316] to-[#ef4444] text-white text-sm font-medium">Lessor Details</div>
@@ -1715,13 +1750,6 @@ function getReportingDateForFY(fy: string): Date {
                   </div>
                 </div>
               </details>
-              <CollapsibleFormSection
-                title="Lease Modifications"
-                subtitle="Remeasurement when terms change — optional for new leases"
-                tintClass="bg-orange-50/40"
-              >
-                {renderLeaseModificationsSection()}
-              </CollapsibleFormSection>
               <div className="flex justify-end">
                 <Button onClick={() => { handleSaveToRepo(); setDirtyTabs((s) => { const n = new Set(s); n.delete('contract'); return n; }); }} className="bg-[#f97316] text-white">Save Tab</Button>
               </div>
@@ -1783,8 +1811,14 @@ function getReportingDateForFY(fy: string): Date {
                   })
                 }
               />
-              <section className="mb-6">
-                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Residual Value Guarantee (IFRS 16 para 26(d))</h4>
+              <CollapsibleFormSection
+                title="Residual value guarantee"
+                subtitle="IFRS 16 para 26(d) — include only when guaranteed by lessee"
+                tintClass="bg-violet-50/40"
+              >
+                <ContextHelpCallout>
+                  Residual value guarantees are edge-case inputs. Only lessee-guaranteed expected payments are included in the lease liability.
+                </ContextHelpCallout>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                   <div><label className={labelClass}>RVG amount{financialSym ? ` (${financialSym})` : ''}</label><input type="number" min="0" value={form.rvgAmount ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, rvgAmount: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="Guaranteed amount" /></div>
                   <div>
@@ -1798,9 +1832,14 @@ function getReportingDateForFY(fy: string): Date {
                   </div>
                   <div><label className={labelClass}>Expected payment at end{financialSym ? ` (${financialSym})` : ''}</label><input type="number" min="0" value={form.rvgExpectedPayment ?? '0'} onChange={(e) => { setForm((p) => ({ ...p, rvgExpectedPayment: e.target.value })); markDirty('financial'); }} className={inputClass} placeholder="What lessee expects to pay" /></div>
                 </div>
-              </section>
-              <section className="mb-6">
-                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Escalation & Terms</h4>
+              </CollapsibleFormSection>
+              <TintedSectionCard
+                title="Escalation & IBR terms"
+                icon={<span className="text-amber-500">📈</span>}
+                badge={<span className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded font-medium">IBR required</span>}
+                tintClass="bg-amber-50/50"
+                borderClass="border-amber-100"
+              >
                 <ContextHelpCallout>
                   <strong>IBR (Incremental Borrowing Rate)</strong> is the rate the lessee would pay to borrow funds for a similar term, security, and currency — IFRS 16 para 26.
                   It discounts lease payments to present value. Use AI Suggest for market benchmarks by country and asset type.
@@ -1905,9 +1944,16 @@ function getReportingDateForFY(fy: string): Date {
                   </div>
                   <div><label className={labelClass}>Extended Escalation Value</label><input type="text" value={form.extendedEscalationValue} onChange={(e) => { setForm((p) => ({ ...p, extendedEscalationValue: e.target.value })); markDirty('financial'); }} className={inputClass} /></div>
                 </div>
-              </section>
-              <section className="mb-6">
-                <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">Business Unit & Cost Centers</h4>
+              </TintedSectionCard>
+              <TintedSectionCard
+                title="Business unit & cost centers"
+                icon={<span className="text-emerald-500">🏷️</span>}
+                tintClass="bg-emerald-50/40"
+                borderClass="border-emerald-100"
+              >
+                <ContextHelpCallout variant="tip">
+                  Use allocation tags when the lease cost should be split across departments, projects or entities.
+                </ContextHelpCallout>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
                   <div>
                     <FieldLabelWithExtraction field="lessor" extractedConfidences={extractedConfidences}>
@@ -1971,10 +2017,42 @@ function getReportingDateForFY(fy: string): Date {
                     <p className={`text-sm font-mono ${allocationTotal === 100 ? 'text-green-600' : 'text-red-600'}`}>Total Allocation: {allocationTotal}% {allocationTotal === 100 ? '✓' : ''}</p>
                   </>
                 )}
-              </section>
+              </TintedSectionCard>
               <div className="flex justify-end">
                 <Button onClick={() => { handleSaveToRepo(); setDirtyTabs((s) => { const n = new Set(s); n.delete('financial'); return n; }); }} className="bg-[#f97316] text-white">Save Tab</Button>
               </div>
+            </>
+          )}
+
+          {activeTab === 'modifications' && (
+            <>
+              <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2">
+                <RefreshCw className="w-5 h-5 text-[#f97316]" /> Lease Modifications
+              </h3>
+              {!contractDetailsReady ? (
+                <LockedTabMessage
+                  title="Complete Contract Details first"
+                  body="Lease modifications need the original commencement and end dates before revised terms can be measured."
+                  actions={
+                    <Button variant="secondary" className="border border-[#e2e8f0] bg-white" onClick={() => setActiveTab('contract')}>
+                      Go to Contract Details
+                    </Button>
+                  }
+                />
+              ) : (
+                <TintedSectionCard
+                  title="Modification workflow"
+                  icon={<RefreshCw className="w-4 h-4 text-[#f97316]" />}
+                  badge={<span className="text-xs text-orange-700 bg-orange-100 px-2 py-0.5 rounded font-medium">Collapsed edge cases below</span>}
+                  tintClass="bg-orange-50/40"
+                  borderClass="border-orange-100"
+                >
+                  <ContextHelpCallout>
+                    Add a modification only when lease terms change after commencement. Standard new leases can skip this tab.
+                  </ContextHelpCallout>
+                  {renderLeaseModificationsSection()}
+                </TintedSectionCard>
+              )}
             </>
           )}
 
@@ -2085,12 +2163,19 @@ function getReportingDateForFY(fy: string): Date {
                   </div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                      <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">Lease Liability</p><p className="font-mono font-semibold text-[#1e293b]">{fmt(liability)}</p></div>
-                      <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">ROU Asset</p><p className="font-mono font-semibold text-[#1e293b]">{fmt(rou)}</p></div>
-                      <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">Monthly Depreciation</p><p className="font-mono font-semibold text-[#1e293b]">{fmt(monthlyDepreciation)}</p></div>
-                      <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">Total Interest</p><p className="font-mono font-semibold text-[#1e293b]">{fmt(totalInterest)}</p></div>
-                    </div>
+                    <TintedSectionCard
+                      title="Schedule summary"
+                      icon={<BarChart3 className="w-4 h-4 text-[#f97316]" />}
+                      tintClass="bg-blue-50/40"
+                      borderClass="border-blue-100"
+                    >
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">Lease Liability</p><p className="font-mono font-semibold text-[#1e293b]">{fmt(liability)}</p></div>
+                        <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">ROU Asset</p><p className="font-mono font-semibold text-[#1e293b]">{fmt(rou)}</p></div>
+                        <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">Monthly Depreciation</p><p className="font-mono font-semibold text-[#1e293b]">{fmt(monthlyDepreciation)}</p></div>
+                        <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white"><p className="text-xs text-[#64748b] uppercase">Total Interest</p><p className="font-mono font-semibold text-[#1e293b]">{fmt(totalInterest)}</p></div>
+                      </div>
+                    </TintedSectionCard>
                     {(() => {
                       const rb = calcResults?.rou_build_up ?? existingLease?.results?.rou_build_up;
                       const incNoteRaw = calcResults?.incentive_disclosure_note ?? existingLease?.results?.incentive_disclosure_note;
@@ -2173,11 +2258,17 @@ function getReportingDateForFY(fy: string): Date {
                         </div>
                       );
                     })()}
-                    <div className="flex flex-wrap items-center gap-4 mb-4 p-3 rounded-lg bg-[#f9fafb] border border-[#e2e8f0]">
+                    <CollapsibleFormSection
+                      title="Schedule assumptions"
+                      subtitle="Functional currency and restoration inputs used for schedule views"
+                      tintClass="bg-slate-50"
+                    >
+                    <div className="flex flex-wrap items-center gap-4 p-3 rounded-lg bg-white border border-[#e2e8f0]">
                       <span className="text-xs font-medium text-[#64748b] uppercase">For schedules:</span>
                       <label className="flex items-center gap-2"><span className="text-sm text-[#64748b]">Functional currency</span><select value={form.functionalCurrency || 'INR'} onChange={(e) => setForm((p) => ({ ...p, functionalCurrency: e.target.value }))} className="px-3 py-1.5 border border-[#e2e8f0] rounded-lg text-sm">{CURRENCIES.map((c) => (<option key={c} value={c}>{c}</option>))}</select></label>
                       <label className="flex items-center gap-2"><span className="text-sm text-[#64748b]">Restoration cost ({displayCurrency})</span><input type="number" value={form.restorationCost || ''} onChange={(e) => setForm((p) => ({ ...p, restorationCost: e.target.value }))} className="w-28 px-3 py-1.5 border border-[#e2e8f0] rounded-lg text-sm font-mono" placeholder="0" /></label>
                     </div>
+                    </CollapsibleFormSection>
                     <div className="flex flex-wrap gap-1 border-b border-[#e2e8f0] mb-4">
                       {scheduleSubTabs.map(({ id, label }) => (
                         <button
@@ -3034,7 +3125,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                 )}
 
                 {/* Section 1 — Health Check */}
-                <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden mb-6" style={{ borderLeft: '4px solid #f97316' }}>
+                <div className="bg-amber-50/50 rounded-xl border border-amber-100 overflow-hidden mb-6" style={{ borderLeft: '4px solid #f97316' }}>
                   <div className="px-4 py-3 border-b border-[#e2e8f0] font-semibold text-[#1e293b]">Validation checklist</div>
                   <div className="p-4 space-y-2">
                     <p className={vStart ? 'text-green-600 text-sm' : 'text-red-600 text-sm'}>{vStart ? '✅' : '❌'} Lease commencement date set</p>
@@ -3060,7 +3151,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                       </div>
                     )}
                     {/* Section 2 — KPI Cards */}
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
                       {[
                         { label: 'LEASE LIABILITY', value: fmt(liability), sub: 'as at today' },
                         { label: 'ROU ASSET', value: fmt(rou), sub: 'NBV as at today' },
@@ -3097,7 +3188,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                       const cpiStepPct =
                         cpiBase > 0 ? ((cpiCurrent / cpiBase - 1) * 100).toFixed(1) : '0.0';
                       return (
-                        <div className="mt-4 p-4 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-600 mb-6">
+                        <div className="mt-4 p-4 bg-slate-50 border border-slate-200 rounded-lg text-xs text-gray-600 mb-6">
                           <div className="flex items-center gap-1.5 mb-2">
                             <span className="text-gray-400">⚙</span>
                             <span className="font-semibold text-gray-700 uppercase tracking-wide text-xs">
@@ -3193,7 +3284,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                     })()}
 
                     {/* Section 3 — Parameters */}
-                    <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden mb-6">
+                    <div className="bg-indigo-50/40 rounded-xl border border-indigo-100 overflow-hidden mb-6">
                       <button type="button" className="w-full px-4 py-3 flex items-center justify-between text-left font-semibold text-[#1e293b] border-b border-[#e2e8f0]" onClick={() => setReviewParamsCollapsed((c) => !c)}>
                         Calculation Parameters Used
                         {reviewParamsCollapsed ? <ChevronRight className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
@@ -3241,7 +3332,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                     </div>
 
                     {/* Section 4 — Journal Entries */}
-                    <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden mb-6">
+                    <div className="bg-emerald-50/40 rounded-xl border border-emerald-100 overflow-hidden mb-6">
                       <div className="px-4 py-3 border-b border-[#e2e8f0]">
                         <div className="font-semibold text-[#1e293b]">Journal Entries</div>
                         <p className="text-xs text-[#64748b] mt-0.5">Auto-generated accounting entries</p>
@@ -3407,7 +3498,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                     )}
 
                     {/* Section 5 — Download Reports */}
-                    <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden mb-6">
+                    <div className="bg-slate-50 rounded-xl border border-slate-200 overflow-hidden mb-6">
                       <div className="px-4 py-3 border-b border-[#e2e8f0] font-semibold text-[#1e293b]">Download Reports</div>
                       <div className="p-4 flex flex-wrap gap-2">
                         {excelFileId ? (
@@ -3423,7 +3514,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
                     </div>
 
                     {/* Section 6 — Audit Trail */}
-                    <div className="bg-white rounded-xl border border-[#e2e8f0] overflow-hidden mb-6">
+                    <div className="bg-orange-50/40 rounded-xl border border-orange-100 overflow-hidden mb-6">
                       <div className="px-4 py-3 border-b border-[#e2e8f0] font-semibold text-[#1e293b]">Audit Trail</div>
                       <div className="p-4 overflow-x-auto">
                         <table className="w-full text-sm border-collapse">

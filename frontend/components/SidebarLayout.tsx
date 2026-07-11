@@ -41,9 +41,10 @@ interface SidebarLayoutProps {
   children: React.ReactNode;
   pageTitle: string;
   pageSubtitle: string;
+  hidePageHeader?: boolean;
 }
 
-export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayoutProps) {
+export function SidebarLayout({ children, pageTitle, pageSubtitle, hidePageHeader = false }: SidebarLayoutProps) {
   const { user, loading, signOut, getCompanyName, isAdmin } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
@@ -513,10 +514,12 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle }: SidebarLayo
         {/* Page Content */}
         <main className="flex-1 p-6 px-7">
           {/* Page Header */}
-          <div className="mb-6">
-            <h1 className="text-3xl font-bold text-text-primary mb-2">{pageTitle}</h1>
-            <p className="text-text-secondary">{pageSubtitle}</p>
-          </div>
+          {!hidePageHeader ? (
+            <div className="mb-6">
+              <h1 className="text-3xl font-bold text-text-primary mb-2">{pageTitle}</h1>
+              {pageSubtitle ? <p className="text-text-secondary">{pageSubtitle}</p> : null}
+            </div>
+          ) : null}
 
           {children}
         </main>

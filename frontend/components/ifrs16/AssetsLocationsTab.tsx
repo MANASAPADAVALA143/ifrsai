@@ -8,7 +8,7 @@ import {
   type CountryMode,
 } from './lease-form-shared';
 import { FieldLabelWithExtraction } from './FieldLabelWithExtraction';
-import { ContextHelpCallout, TintedSectionCard } from './lease-form-ui';
+import { CollapsibleFormSection, ContextHelpCallout, TintedSectionCard } from './lease-form-ui';
 
 const LEASE_TYPES = [
   'Building',
@@ -307,14 +307,16 @@ export function AssetsLocationsTab({
         </div>
       </TintedSectionCard>
 
-      <details className="mb-6 border border-[#e2e8f0] rounded-xl overflow-hidden bg-slate-50">
-        <summary className="px-4 py-3 bg-white/60 text-sm font-semibold text-[#1e293b] cursor-pointer">
-          Additional details
-          <span className="block text-[10px] font-normal text-[#64748b] mt-0.5">
-            GL codes, useful life & depreciation method
-          </span>
-        </summary>
-        <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 border-t border-[#e2e8f0] bg-white/50">
+      <CollapsibleFormSection
+        title="Additional asset accounting details"
+        subtitle="GL codes, useful life & depreciation method"
+        tintClass="bg-slate-50"
+      >
+        <ContextHelpCallout>
+          These fields improve downstream accounting exports and fixed asset reporting. Leave blank if your chart of
+          accounts is not mapped yet.
+        </ContextHelpCallout>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <div>
             <label className={labelClass}>Useful life (months)</label>
             <input
@@ -391,7 +393,7 @@ export function AssetsLocationsTab({
             />
           </div>
         </div>
-      </details>
+      </CollapsibleFormSection>
     </>
   );
 }

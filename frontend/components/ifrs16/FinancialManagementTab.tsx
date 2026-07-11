@@ -10,6 +10,11 @@ import {
   type CurrencyMode,
 } from './lease-form-shared';
 import { FieldLabelWithExtraction } from './FieldLabelWithExtraction';
+import {
+  CollapsibleFormSection,
+  ContextHelpCallout,
+  TintedSectionCard,
+} from './lease-form-ui';
 
 const PAYMENT_FREQ = ['Monthly', 'Quarterly', 'Semi-Annual', 'Annual'];
 const PAYMENT_TYPES = ['Advance', 'Arrears'];
@@ -55,40 +60,52 @@ export function FinancialManagementTab({
   const amountLabel = (text: string) => (sym ? `${text} (${sym})` : text);
 
   return (
-    <section className="mb-6">
-      <div className="flex flex-wrap gap-1.5 mb-4">
-        {(['AED', 'INR', 'GBP', 'OTHER'] as const).map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            onClick={() => setMode(mode)}
-            className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${
-              currencyMode === mode
-                ? 'bg-[#1B3A6B] text-white border-[#1B3A6B]'
-                : 'bg-white text-[#64748b] border-[#e2e8f0] hover:border-[#1B3A6B]'
-            }`}
-          >
-            {mode === 'AED'
-              ? '🇦🇪 UAE (AED)'
-              : mode === 'INR'
-                ? '🇮🇳 India (INR)'
-                : mode === 'GBP'
-                  ? '🇬🇧 UK (GBP)'
-                  : '🌐 Other'}
-          </button>
-        ))}
-      </div>
+    <section className="mb-6 space-y-4">
+      <TintedSectionCard
+        title="Payment basics"
+        icon={<span className="text-blue-500">💳</span>}
+        badge={
+          <span className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded font-medium">
+            Required for IFRS 16 calculation
+          </span>
+        }
+        tintClass="bg-blue-50/60"
+        borderClass="border-blue-100"
+      >
+        <ContextHelpCallout>
+          Base rent, payment timing, currency and IBR determine the lease liability present value. Keep these
+          fields current before calculating.
+        </ContextHelpCallout>
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {(['AED', 'INR', 'GBP', 'OTHER'] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setMode(mode)}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${
+                currencyMode === mode
+                  ? 'bg-[#1B3A6B] text-white border-[#1B3A6B]'
+                  : 'bg-white text-[#64748b] border-[#e2e8f0] hover:border-[#1B3A6B]'
+              }`}
+            >
+              {mode === 'AED'
+                ? '🇦🇪 UAE (AED)'
+                : mode === 'INR'
+                  ? '🇮🇳 India (INR)'
+                  : mode === 'GBP'
+                    ? '🇬🇧 UK (GBP)'
+                    : '🌐 Other'}
+            </button>
+          ))}
+        </div>
 
-      <div className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 mb-4">
-        All amounts in {currencyMode}
-      </div>
+        <div className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded bg-white text-blue-700 border border-blue-200 mb-4">
+          All amounts in {currencyMode}
+        </div>
 
-      <h4 className="text-sm font-medium text-[#64748b] border-b border-[#e2e8f0] pb-2 mb-3">
-        Basic Financial Information
-      </h4>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div>
-          <FieldLabelWithExtraction field="baseRentAmount" extractedConfidences={extractedConfidences}>
+          <FieldLabelWithExtraction field="baseRentAmount" extractedConfidences={extractedConfidences} required>
             {amountLabel('Base rent amount')}
           </FieldLabelWithExtraction>
           <input
@@ -103,7 +120,7 @@ export function FinancialManagementTab({
           />
         </div>
         <div>
-          <FieldLabelWithExtraction field="paymentFrequency" extractedConfidences={extractedConfidences}>
+          <FieldLabelWithExtraction field="paymentFrequency" extractedConfidences={extractedConfidences} required>
             Payment frequency
           </FieldLabelWithExtraction>
           <select
@@ -120,7 +137,9 @@ export function FinancialManagementTab({
           </select>
         </div>
         <div>
-          <label className={labelClass}>Payment type</label>
+          <label className="block text-[11px] font-bold text-gray-800 uppercase tracking-wide mb-1">
+            Payment type <span className="text-[#DC2626] font-bold text-sm">*</span>
+          </label>
           <select
             value={form.paymentType}
             onChange={(e) => {
@@ -135,7 +154,7 @@ export function FinancialManagementTab({
           </select>
         </div>
         <div>
-          <FieldLabelWithExtraction field="currency" extractedConfidences={extractedConfidences}>
+          <FieldLabelWithExtraction field="currency" extractedConfidences={extractedConfidences} required>
             Currency
           </FieldLabelWithExtraction>
           <select
@@ -154,6 +173,18 @@ export function FinancialManagementTab({
             ))}
           </select>
         </div>
+        </div>
+      </TintedSectionCard>
+
+      <CollapsibleFormSection
+        title="Other contract amounts & FX"
+        subtitle="Extended rent, exchange rates, rent-free periods and lease incentives"
+        tintClass="bg-slate-50"
+      >
+        <ContextHelpCallout variant="tip">
+          Use these fields only when the contract includes FX translation, rent-free months, or lessor incentives.
+        </ContextHelpCallout>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div>
           <label className={labelClass}>{amountLabel('Extended base rent')}</label>
           <input
@@ -178,83 +209,6 @@ export function FinancialManagementTab({
             className={inputClass}
           />
         </div>
-        <div>
-          <FieldLabelWithExtraction field="legalFees" extractedConfidences={extractedConfidences}>
-            <span className="inline-flex items-center gap-1">
-              {amountLabel('Legal fees')}{' '}
-              <Info className="inline w-3.5 h-3.5 text-[#64748b] cursor-help" />
-            </span>
-          </FieldLabelWithExtraction>
-          <input
-            type="number"
-            min="0"
-            value={form.legalFees ?? '0'}
-            onChange={(e) => {
-              setForm((p) => ({ ...p, legalFees: e.target.value }));
-              markDirty('financial');
-              onClearExtractedField?.('legalFees');
-            }}
-            className={inputClass}
-          />
-        </div>
-        <div>
-          <FieldLabelWithExtraction field="brokerageFees" extractedConfidences={extractedConfidences}>
-            {amountLabel('Brokerage / agent fees')}
-          </FieldLabelWithExtraction>
-          <input
-            type="number"
-            min="0"
-            value={form.brokerageFees ?? '0'}
-            onChange={(e) => {
-              setForm((p) => ({ ...p, brokerageFees: e.target.value }));
-              markDirty('financial');
-              onClearExtractedField?.('brokerageFees');
-            }}
-            className={inputClass}
-          />
-        </div>
-        <div>
-          <label className={labelClass}>{amountLabel('Other initial direct costs')}</label>
-          <input
-            type="number"
-            min="0"
-            value={form.otherInitialDirectCosts ?? '0'}
-            onChange={(e) => {
-              setForm((p) => ({ ...p, otherInitialDirectCosts: e.target.value }));
-              markDirty('financial');
-            }}
-            className={inputClass}
-          />
-        </div>
-        <div className="md:col-span-2">
-          <label className={labelClass}>IDC description</label>
-          <input
-            type="text"
-            value={form.initialDirectCostsDescription ?? ''}
-            onChange={(e) => {
-              setForm((p) => ({ ...p, initialDirectCostsDescription: e.target.value }));
-              markDirty('financial');
-            }}
-            className={inputClass}
-            placeholder="e.g. Legal fees for lease negotiation, agent commission"
-          />
-        </div>
-      </div>
-
-      <div className="flex justify-between items-center bg-[#f8fafc] rounded-lg px-4 py-3 mt-3 border border-[#e2e8f0]">
-        <div>
-          <p className="text-sm text-[#64748b]">Total initial direct costs</p>
-          <p className="text-xs text-[#64748b]/70 mt-0.5">
-            Added to ROU asset on commencement — IFRS 16 para 24
-          </p>
-        </div>
-        <p className="text-lg font-semibold text-[#f97316]">
-          {sym ? `${sym} ` : ''}
-          {totalIDC.toLocaleString()}
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
         <div>
           <FieldLabelWithExtraction field="rentFreeMonths" extractedConfidences={extractedConfidences}>
             Rent-free period (months)
@@ -299,7 +253,94 @@ export function FinancialManagementTab({
             placeholder="e.g. 2 months rent free"
           />
         </div>
-      </div>
+        </div>
+      </CollapsibleFormSection>
+
+      <CollapsibleFormSection
+        title="Initial direct costs"
+        subtitle="Legal fees, brokerage and other directly attributable costs"
+        tintClass="bg-amber-50/60"
+      >
+        <ContextHelpCallout>
+          Initial direct costs are added to the ROU asset at commencement under IFRS 16 para 24.
+        </ContextHelpCallout>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div>
+            <FieldLabelWithExtraction field="legalFees" extractedConfidences={extractedConfidences}>
+              <span className="inline-flex items-center gap-1">
+                {amountLabel('Legal fees')}{' '}
+                <Info className="inline w-3.5 h-3.5 text-[#64748b] cursor-help" />
+              </span>
+            </FieldLabelWithExtraction>
+            <input
+              type="number"
+              min="0"
+              value={form.legalFees ?? '0'}
+              onChange={(e) => {
+                setForm((p) => ({ ...p, legalFees: e.target.value }));
+                markDirty('financial');
+                onClearExtractedField?.('legalFees');
+              }}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <FieldLabelWithExtraction field="brokerageFees" extractedConfidences={extractedConfidences}>
+              {amountLabel('Brokerage / agent fees')}
+            </FieldLabelWithExtraction>
+            <input
+              type="number"
+              min="0"
+              value={form.brokerageFees ?? '0'}
+              onChange={(e) => {
+                setForm((p) => ({ ...p, brokerageFees: e.target.value }));
+                markDirty('financial');
+                onClearExtractedField?.('brokerageFees');
+              }}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>{amountLabel('Other initial direct costs')}</label>
+            <input
+              type="number"
+              min="0"
+              value={form.otherInitialDirectCosts ?? '0'}
+              onChange={(e) => {
+                setForm((p) => ({ ...p, otherInitialDirectCosts: e.target.value }));
+                markDirty('financial');
+              }}
+              className={inputClass}
+            />
+          </div>
+          <div className="md:col-span-2">
+            <label className={labelClass}>IDC description</label>
+            <input
+              type="text"
+              value={form.initialDirectCostsDescription ?? ''}
+              onChange={(e) => {
+                setForm((p) => ({ ...p, initialDirectCostsDescription: e.target.value }));
+                markDirty('financial');
+              }}
+              className={inputClass}
+              placeholder="e.g. Legal fees for lease negotiation, agent commission"
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-between items-center bg-white rounded-lg px-4 py-3 mt-3 border border-[#e2e8f0]">
+          <div>
+            <p className="text-sm text-[#64748b]">Total initial direct costs</p>
+            <p className="text-xs text-[#64748b]/70 mt-0.5">
+              Added to ROU asset on commencement — IFRS 16 para 24
+            </p>
+          </div>
+          <p className="text-lg font-semibold text-[#f97316]">
+            {sym ? `${sym} ` : ''}
+            {totalIDC.toLocaleString()}
+          </p>
+        </div>
+      </CollapsibleFormSection>
     </section>
   );
 }
