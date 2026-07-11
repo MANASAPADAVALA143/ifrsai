@@ -8,6 +8,7 @@ import { getLeaseRepository } from '@/lib/lease-repository';
 import { formatIndianCurrency } from '@/lib/utils';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
+import { IFRS16_INPUT_CLASS } from '@/lib/ifrs16-ui-styles';
 
 const COST_CENTER_KEY = 'costcenter_allocations';
 
@@ -152,7 +153,7 @@ export default function CostCenterPage() {
           <select
             value={selectedLease}
             onChange={(e) => setSelectedLease(e.target.value)}
-            className="w-full max-w-md px-4 py-2 bg-bg-light border border-border-default rounded-lg focus:ring-2 focus:ring-orange-primary text-text-primary"
+            className={`w-full max-w-md ${IFRS16_INPUT_CLASS}`}
           >
             <option value="">— Select —</option>
             {leases.map((l) => (
@@ -176,7 +177,7 @@ export default function CostCenterPage() {
                       placeholder="Cost Center Name"
                       value={r.name}
                       onChange={(e) => updateRow(r.id, 'name', e.target.value)}
-                      className="flex-1 px-4 py-2 bg-bg-light border border-border-default rounded-lg text-text-primary"
+                      className={`flex-1 ${IFRS16_INPUT_CLASS}`}
                     />
                     <input
                       type="number"
@@ -186,14 +187,14 @@ export default function CostCenterPage() {
                       step={0.1}
                       value={r.pct || ''}
                       onChange={(e) => updateRow(r.id, 'pct', parseFloat(e.target.value) || 0)}
-                      className="w-20 px-4 py-2 bg-bg-light border border-border-default rounded-lg text-text-primary font-mono"
+                      className={`w-20 ${IFRS16_INPUT_CLASS} font-mono`}
                     />
                     <input
                       type="text"
                       placeholder="GL Code"
                       value={r.glCode}
                       onChange={(e) => updateRow(r.id, 'glCode', e.target.value)}
-                      className="w-28 px-4 py-2 bg-bg-light border border-border-default rounded-lg text-text-primary font-mono"
+                      className={`w-28 ${IFRS16_INPUT_CLASS} font-mono`}
                     />
                     <button
                       onClick={() => removeRow(r.id)}

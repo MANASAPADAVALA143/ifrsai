@@ -16,12 +16,11 @@ import {
   Unlock,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { IFRS16_INPUT_CLASS, IFRS16_LABEL_CLASS, IFRS16_CARD_CLASS } from '@/lib/ifrs16-ui-styles';
 
-const cardClass =
-  'bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]';
-const inputClass =
-  'w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm focus:ring-2 focus:ring-[#f97316]/30 focus:border-[#f97316]';
-const labelClass = 'block text-xs font-medium text-[#64748b] uppercase tracking-wide mb-1';
+const cardClass = IFRS16_CARD_CLASS;
+const inputClass = IFRS16_INPUT_CLASS;
+const labelClass = IFRS16_LABEL_CLASS;
 
 type Tab = 'close' | 'disclosures' | 'settings';
 

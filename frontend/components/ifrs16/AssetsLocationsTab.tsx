@@ -83,7 +83,7 @@ export function AssetsLocationsTab({
           <strong>Lease type</strong> and <strong>asset description</strong> drive ROU classification, depreciation
           method defaults, and IBR benchmarking. Required before running Calculate.
         </ContextHelpCallout>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2 mb-3">
           <div>
             <FieldLabelWithExtraction field="leaseType" extractedConfidences={extractedConfidences} required>
               Lease type
@@ -184,7 +184,7 @@ export function AssetsLocationsTab({
         )}
 
         {countryMode === 'UAE' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2 mb-3">
             <div className="flex flex-col gap-1">
               <label className="text-[10px] font-bold uppercase text-gray-800">
                 Emirate <span className="text-[#DC2626] font-bold text-sm">*</span>
@@ -247,7 +247,7 @@ export function AssetsLocationsTab({
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
           {countryMode === 'OTHER' && (
             <div>
               <label className={labelClass}>Country name</label>
@@ -316,7 +316,7 @@ export function AssetsLocationsTab({
           These fields improve downstream accounting exports and fixed asset reporting. Leave blank if your chart of
           accounts is not mapped yet.
         </ContextHelpCallout>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
           <div>
             <label className={labelClass}>Useful life (months)</label>
             <input

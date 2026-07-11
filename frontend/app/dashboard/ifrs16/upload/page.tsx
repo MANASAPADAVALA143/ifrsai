@@ -18,6 +18,7 @@ import {
   type ParsedLeaseRow,
 } from '@/lib/ifrs16-bulk-parse';
 import { normalizeAnnualRate, getIbrTypicalRangeHint } from '@/lib/ifrs16-rates';
+import { IFRS16_INPUT_CLASS } from '@/lib/ifrs16-ui-styles';
 import { isPortfolioAggregateLease } from '@/lib/ifrs16-portfolio';
 
 interface LeaseCalculateResponse {
@@ -299,7 +300,7 @@ export default function BulkUploadPage() {
     }
   };
 
-  const inputClass = 'w-full px-4 py-2.5 bg-[#f8fafc] border border-[#e2e8f0] rounded-lg focus:ring-2 focus:ring-orange-500/30 focus:border-orange-500 text-[#1e293b]';
+  const inputClass = IFRS16_INPUT_CLASS;
   const ibrHint = getIbrTypicalRangeHint(formData.currency);
 
   return (

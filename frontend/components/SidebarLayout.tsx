@@ -2,7 +2,7 @@
 
 import { useAuth } from '@/hooks/useAuth';
 import { useRouter, usePathname } from 'next/navigation';
-import { useEffect, useState, type ComponentType } from 'react';
+import { useEffect, useState, type ComponentType, type ReactNode } from 'react';
 import Link from 'next/link';
 import { 
   LayoutDashboard, 
@@ -42,9 +42,10 @@ interface SidebarLayoutProps {
   pageTitle: string;
   pageSubtitle: string;
   hidePageHeader?: boolean;
+  headerActions?: ReactNode;
 }
 
-export function SidebarLayout({ children, pageTitle, pageSubtitle, hidePageHeader = false }: SidebarLayoutProps) {
+export function SidebarLayout({ children, pageTitle, pageSubtitle, hidePageHeader = false, headerActions }: SidebarLayoutProps) {
   const { user, loading, signOut, getCompanyName, isAdmin } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
@@ -515,9 +516,16 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle, hidePageHeade
         <main className="flex-1 p-6 px-7">
           {/* Page Header */}
           {!hidePageHeader ? (
-            <div className="mb-6">
-              <h1 className="text-3xl font-bold text-text-primary mb-2">{pageTitle}</h1>
-              {pageSubtitle ? <p className="text-text-secondary">{pageSubtitle}</p> : null}
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h1 className="text-3xl font-bold text-text-primary mb-1">{pageTitle}</h1>
+                {pageSubtitle ? <p className="text-text-secondary">{pageSubtitle}</p> : null}
+              </div>
+              {headerActions ? (
+                <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+                  {headerActions}
+                </div>
+              ) : null}
             </div>
           ) : null}
 

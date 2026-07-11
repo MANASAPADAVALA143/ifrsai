@@ -13,6 +13,7 @@ import {
   getMonthlyDepreciation,
   scheduleRow,
 } from '@/lib/reports-utils';
+import { IFRS16_INPUT_CLASS } from '@/lib/ifrs16-ui-styles';
 import type { LeaseRepositoryEntry } from '@/lib/lease-repository';
 import toast from 'react-hot-toast';
 
@@ -862,7 +863,7 @@ export default function ErpPage() {
                 <select
                   value={erpType}
                   onChange={(e) => setErpType(e.target.value as ErpType)}
-                  className="w-full px-4 py-2 bg-bg-light border border-border-default rounded-lg focus:ring-2 focus:ring-orange-primary text-text-primary"
+                  className={`w-full ${IFRS16_INPUT_CLASS}`}
                 >
                   <option value="tally">Tally Prime (XML)</option>
                   <option value="sap">SAP (CSV, semicolon)</option>
@@ -876,7 +877,7 @@ export default function ErpPage() {
                 <select
                   value={exportType}
                   onChange={(e) => setExportType(e.target.value as ExportType)}
-                  className="w-full px-4 py-2 bg-bg-light border border-border-default rounded-lg focus:ring-2 focus:ring-orange-primary text-text-primary"
+                  className={`w-full ${IFRS16_INPUT_CLASS}`}
                 >
                   <option value="initial">Initial Recognition only</option>
                   <option value="monthly">Monthly P&amp;L only (depreciation + interest + payment)</option>
@@ -891,7 +892,7 @@ export default function ErpPage() {
                 <select
                   value={selectedLease}
                   onChange={(e) => setSelectedLease(e.target.value)}
-                  className="w-full px-4 py-2 bg-bg-light border border-border-default rounded-lg focus:ring-2 focus:ring-orange-primary text-text-primary"
+                  className={`w-full ${IFRS16_INPUT_CLASS}`}
                 >
                   <option value="">— Select —</option>
                   {leases.map((l) => (
@@ -907,7 +908,7 @@ export default function ErpPage() {
                   type="month"
                   value={period}
                   onChange={(e) => setPeriod(e.target.value)}
-                  className="w-full px-4 py-2 bg-bg-light border border-border-default rounded-lg focus:ring-2 focus:ring-orange-primary text-text-primary"
+                  className={`w-full ${IFRS16_INPUT_CLASS}`}
                 />
                 {lease && !periodInLeaseRange && (
                   <p className="text-amber-600 text-xs mt-1">Period may be outside lease term — amounts estimated.</p>
@@ -942,7 +943,7 @@ export default function ErpPage() {
                     value={(codes as any)[key] ?? ''}
                     onChange={(e) => setCodes({ ...codes, [key]: e.target.value })}
                     placeholder={placeholder}
-                    className="w-full px-4 py-2 bg-bg-light border border-border-default rounded-lg text-text-primary font-mono text-sm"
+                    className={`w-full ${IFRS16_INPUT_CLASS} font-mono`}
                   />
                 </div>
               ))}

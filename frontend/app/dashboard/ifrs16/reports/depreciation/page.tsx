@@ -18,6 +18,7 @@ import {
 } from '@/lib/reports-utils';
 import { exportReportCsv } from '@/lib/export-report-csv';
 import { Button } from '@/components/Button';
+import { IFRS16_SELECT_CLASS } from '@/lib/ifrs16-ui-styles';
 import Link from 'next/link';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -122,7 +123,7 @@ export default function DepreciationScheduleReportPage() {
 
       <div className="flex flex-wrap items-center gap-4 mb-4">
         <label className="text-sm text-[#64748b]">Year</label>
-        <select value={selectedYear} onChange={(e) => setSelectedYear(parseInt(e.target.value, 10))} className="px-3 py-2 border border-[#e2e8f0] rounded-lg">
+        <select value={selectedYear} onChange={(e) => setSelectedYear(parseInt(e.target.value, 10))} className={IFRS16_SELECT_CLASS}>
           {[selectedYear - 2, selectedYear - 1, selectedYear, selectedYear + 1].map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}

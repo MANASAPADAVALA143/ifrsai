@@ -20,9 +20,9 @@ export function FieldLabelWithExtraction({
 }: Props) {
   const confidence = extractedConfidences?.[field];
   return (
-    <div className={`flex flex-wrap items-center gap-1.5 mb-1 ${className}`}>
+    <div className={`flex flex-wrap items-center gap-1 mb-0.5 ${className}`}>
       <label
-        className={`block text-[11px] uppercase tracking-wide ${
+        className={`block text-[10px] uppercase tracking-wide ${
           required ? 'font-bold text-gray-800' : 'font-semibold text-gray-600'
         }`}
       >

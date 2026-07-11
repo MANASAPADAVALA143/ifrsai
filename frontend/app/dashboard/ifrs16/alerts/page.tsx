@@ -9,6 +9,7 @@ import { alertsApi } from '@/lib/api';
 import { formatIndianCurrency } from '@/lib/utils';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
+import { IFRS16_INPUT_CLASS } from '@/lib/ifrs16-ui-styles';
 
 const ALERT_CONFIG_KEY = 'ifrs16_alert_config';
 
@@ -149,7 +150,7 @@ export default function AlertsPage() {
                 value={config.email}
                 onChange={(e) => setConfig({ ...config, email: e.target.value })}
                 placeholder="alerts@company.com"
-                className="w-full px-4 py-2 bg-bg-light border border-border-default rounded-lg text-text-primary"
+                className={`w-full ${IFRS16_INPUT_CLASS}`}
               />
             </div>
             <div>
@@ -159,7 +160,7 @@ export default function AlertsPage() {
                 value={config.whatsapp}
                 onChange={(e) => setConfig({ ...config, whatsapp: e.target.value })}
                 placeholder="+919876543210"
-                className="w-full px-4 py-2 bg-bg-light border border-border-default rounded-lg text-text-primary"
+                className={`w-full ${IFRS16_INPUT_CLASS}`}
               />
             </div>
             <div>

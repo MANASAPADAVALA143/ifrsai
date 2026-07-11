@@ -103,7 +103,7 @@ export function FinancialManagementTab({
           All amounts in {currencyMode}
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
         <div>
           <FieldLabelWithExtraction field="baseRentAmount" extractedConfidences={extractedConfidences} required>
             {amountLabel('Base rent amount')}
@@ -184,7 +184,7 @@ export function FinancialManagementTab({
         <ContextHelpCallout variant="tip">
           Use these fields only when the contract includes FX translation, rent-free months, or lessor incentives.
         </ContextHelpCallout>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
         <div>
           <label className={labelClass}>{amountLabel('Extended base rent')}</label>
           <input
@@ -264,7 +264,7 @@ export function FinancialManagementTab({
         <ContextHelpCallout>
           Initial direct costs are added to the ROU asset at commencement under IFRS 16 para 24.
         </ContextHelpCallout>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
           <div>
             <FieldLabelWithExtraction field="legalFees" extractedConfidences={extractedConfidences}>
               <span className="inline-flex items-center gap-1">

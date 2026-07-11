@@ -1,6 +1,17 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { ExtractionConfidenceMap } from '@/lib/ifrs16-lease-extraction';
 
+export {
+  IFRS16_INPUT_CLASS,
+  IFRS16_LABEL_CLASS,
+  IFRS16_FILTER_INPUT_CLASS,
+  IFRS16_SELECT_CLASS,
+  IFRS16_CARD_CLASS,
+  IFRS16_FORM_GRID,
+  IFRS16_FORM_GRID_3,
+  IFRS16_FORM_GRID_2,
+} from '@/lib/ifrs16-ui-styles';
+
 export type LeaseFormTabProps = {
   form: Record<string, any>;
   setForm: Dispatch<SetStateAction<Record<string, any>>>;

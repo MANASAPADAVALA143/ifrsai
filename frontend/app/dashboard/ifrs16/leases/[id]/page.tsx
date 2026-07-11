@@ -84,6 +84,7 @@ import {
 import { LeasePdfUploadBar } from '@/components/ifrs16/LeasePdfUploadBar';
 import { FieldLabelWithExtraction } from '@/components/ifrs16/FieldLabelWithExtraction';
 import { CollapsibleFormSection, ContextHelpCallout, TintedSectionCard } from '@/components/ifrs16/lease-form-ui';
+import { IFRS16_INPUT_CLASS, IFRS16_LABEL_CLASS } from '@/lib/ifrs16-ui-styles';
 
 // ---------------------------------------------------------------------------
 // ERP push buttons (inline)
@@ -250,8 +251,8 @@ function getPriorLLFromSchedule(schedule: any[], scheduleRowFn: (r: any) => any,
   return Number(last.closing ?? 0);
 }
 
-const inputClass = 'w-full text-sm px-3 py-2 border border-gray-200 rounded-lg bg-white text-gray-900 placeholder-gray-400 focus:outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-100 transition-colors';
-const labelClass = 'block text-[11px] font-semibold text-gray-600 uppercase tracking-wide mb-1';
+const inputClass = IFRS16_INPUT_CLASS;
+const labelClass = IFRS16_LABEL_CLASS;
 
 const defaultFormState = (): Record<string, any> => {
   const defaultCurrency = getDefaultIfrs16Currency();
@@ -1398,7 +1399,7 @@ function getReportingDateForFY(fy: string): Date {
                 ) : (
                   <div className="space-y-6">
                     <Button variant="secondary" className="mb-2" onClick={() => { setModificationPanel('list'); setModificationFormIndex(null); }}>← Back to list</Button>
-                    <h4 className="text-lg font-semibold text-[#1e293b]">{modificationFormIndex === null ? 'New Modification' : `Edit Modification ${(modificationFormIndex ?? 0) + 1}`}</h4>
+                    <h4 className="text-sm font-semibold text-[#1e293b]">{modificationFormIndex === null ? 'New Modification' : `Edit Modification ${(modificationFormIndex ?? 0) + 1}`}</h4>
 
                     <ModificationAIAdvisor
                       extractorHints={contractData}
@@ -1628,8 +1629,8 @@ function getReportingDateForFY(fy: string): Date {
         )}
 
         {/* Tab bar */}
-        <div className="border-b border-[#e2e8f0] mb-6">
-          <div className="flex gap-1 overflow-x-auto">
+        <div className="border-b border-[#e2e8f0] mb-4">
+          <div className="flex gap-0.5 overflow-x-auto">
             {TABS.map((t) => {
               const Icon = t.icon;
               const active = activeTab === t.id;
@@ -1644,7 +1645,7 @@ function getReportingDateForFY(fy: string): Date {
                   disabled={disabled}
                   title={lockedMessage ?? undefined}
                   onClick={() => setActiveTab(t.id)}
-                  className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
+                  className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 whitespace-nowrap transition-colors ${
                     disabled
                       ? 'border-transparent text-[#94a3b8] bg-[#f8fafc] cursor-not-allowed'
                       : active
@@ -1652,7 +1653,7 @@ function getReportingDateForFY(fy: string): Date {
                         : 'border-transparent text-[#64748b] hover:bg-[#fff7ed]'
                   } ${dirty || hasExtracted ? ' relative' : ''}`}
                 >
-                  <Icon className="w-4 h-4" /> {t.label}
+                  <Icon className="w-3.5 h-3.5" /> {t.label}
                   {disabled && (
                     <span className="text-[10px] font-semibold text-[#94a3b8] bg-white border border-[#e2e8f0] rounded-full px-1.5 py-0.5">
                       {lockedMessage}
@@ -1667,12 +1668,12 @@ function getReportingDateForFY(fy: string): Date {
         </div>
 
         {/* Tab content - wrapper */}
-        <div className="bg-white rounded-[14px] border border-[#e2e8f0] p-6 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+        <div className="bg-white rounded-xl border border-[#e2e8f0] p-4 shadow-sm">
           {activeTab === 'contract' && (
             <>
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                <h3 className="text-lg font-semibold text-[#1e293b] flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-[#f97316]" /> Contract Details
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <h3 className="text-sm font-semibold text-[#1e293b] flex items-center gap-1.5">
+                  <FileText className="w-4 h-4 text-[#f97316]" /> Contract Details
                 </h3>
                 {!isNew && (
                   <LeasePdfUploadBar
@@ -1758,7 +1759,7 @@ function getReportingDateForFY(fy: string): Date {
 
           {activeTab === 'financial' && (
             <>
-              <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2"><DollarSign className="w-5 h-5 text-[#f97316]" /> Financial Management</h3>
+              <h3 className="text-sm font-semibold text-[#1e293b] mb-3 flex items-center gap-1.5"><DollarSign className="w-4 h-4 text-[#f97316]" /> Financial Management</h3>
               <FinancialManagementTab
                 form={form}
                 setForm={setForm}
@@ -2026,8 +2027,8 @@ function getReportingDateForFY(fy: string): Date {
 
           {activeTab === 'modifications' && (
             <>
-              <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2">
-                <RefreshCw className="w-5 h-5 text-[#f97316]" /> Lease Modifications
+              <h3 className="text-sm font-semibold text-[#1e293b] mb-3 flex items-center gap-1.5">
+                <RefreshCw className="w-4 h-4 text-[#f97316]" /> Lease Modifications
               </h3>
               {!contractDetailsReady ? (
                 <LockedTabMessage
@@ -2058,7 +2059,7 @@ function getReportingDateForFY(fy: string): Date {
 
           {activeTab === 'assets' && (
             <>
-              <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2"><MapPin className="w-5 h-5 text-[#f97316]" /> Assets & Locations</h3>
+              <h3 className="text-sm font-semibold text-[#1e293b] mb-3 flex items-center gap-1.5"><MapPin className="w-4 h-4 text-[#f97316]" /> Assets & Locations</h3>
               {!assetsTabEnabled ? (
                 <div className="rounded-xl border border-[#e2e8f0] bg-[#f8fafc] p-6">
                   <div className="flex items-start gap-3">
@@ -2155,7 +2156,7 @@ function getReportingDateForFY(fy: string): Date {
             const getFxRate = (i: number) => (fxRatesByPeriod[i] != null && fxRatesByPeriod[i] > 0 ? fxRatesByPeriod[i] : baseFxRate);
             return (
               <>
-                <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2"><BarChart3 className="w-5 h-5 text-[#f97316]" /> Schedules</h3>
+                <h3 className="text-sm font-semibold text-[#1e293b] mb-3 flex items-center gap-1.5"><BarChart3 className="w-4 h-4 text-[#f97316]" /> Schedules</h3>
                 {!hasResults ? (
                   <div className="p-6 rounded-xl bg-[#fff7ed] border border-[#fed7aa] text-[#c2410c] mb-6">
                     <p className="font-medium mb-2">⚡ Go to Review & Calculate tab to generate the amortization schedule for this lease.</p>
@@ -2439,7 +2440,7 @@ function getReportingDateForFY(fy: string): Date {
                       return (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setModificationModalIndex(null)}>
                           <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
-                            <h4 className="text-lg font-semibold text-[#1e293b] mb-4">Modification {modificationModalIndex + 1} Financial Details</h4>
+                            <h4 className="text-sm font-semibold text-[#1e293b] mb-3">Modification {modificationModalIndex + 1} Financial Details</h4>
                             <div className="p-4 mb-4 rounded-lg bg-[#fff7ed] border border-[#fed7aa] text-sm text-[#c2410c] flex gap-2">
                               <Info className="w-5 h-5 shrink-0 mt-0.5" />
                               <p>ROU After Modification = ROU Prior + Lease Liability Increase + Restoration Cost Increase</p>
@@ -2653,7 +2654,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
             if (!hasResults) {
               return (
                 <>
-                  <h3 className="text-lg font-semibold text-[#1e293b] mb-4 flex items-center gap-2"><FileCheck className="w-5 h-5 text-[#f97316]" /> Disclosures</h3>
+                  <h3 className="text-sm font-semibold text-[#1e293b] mb-3 flex items-center gap-1.5"><FileCheck className="w-4 h-4 text-[#f97316]" /> Disclosures</h3>
                   <p className="text-xs text-[#64748b] mb-4">IFRS 16 disclosure notes for this lease</p>
                   <div className="p-6 rounded-xl bg-[#fff7ed] border border-[#fed7aa] text-[#c2410c] mb-6">
                     <p className="font-medium mb-2">Go to Review &amp; Calculate tab to generate disclosure notes for this lease.</p>
@@ -2667,7 +2668,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
               <>
                 <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
                   <div>
-                    <h3 className="text-lg font-semibold text-[#1e293b] flex items-center gap-2"><FileCheck className="w-5 h-5 text-[#f97316]" /> IFRS 16 Disclosure Notes</h3>
+                    <h3 className="text-sm font-semibold text-[#1e293b] flex items-center gap-1.5"><FileCheck className="w-4 h-4 text-[#f97316]" /> IFRS 16 Disclosure Notes</h3>
                     <p className="text-xs text-[#64748b] mt-1">Auto-generated from lease data — para 52-60 compliant</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -3087,7 +3088,7 @@ The Company has not applied the short-term or low-value exemptions to this lease
               <>
                 <div className="flex flex-wrap items-start justify-between gap-4 mb-4">
                   <div>
-                    <h3 className="text-lg font-semibold text-[#1e293b] flex items-center gap-2"><CheckCircle className="w-5 h-5 text-[#f97316]" /> Review & Calculate</h3>
+                    <h3 className="text-sm font-semibold text-[#1e293b] flex items-center gap-1.5"><CheckCircle className="w-4 h-4 text-[#f97316]" /> Review & Calculate</h3>
                     <p className="text-xs text-[#64748b] mt-1">Validate, generate journal entries and export audit-ready reports</p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">

@@ -53,14 +53,13 @@ export function ContractDetailsTab({
   );
 
   const modCards: { key: string; label: string; value: string }[] = [
-    { key: 'modificationDate', label: 'Modification date', value: form.modificationDate || '' },
     { key: 'earlyTerminationDate', label: 'Early termination date', value: form.earlyTerminationDate || '' },
     { key: 'extendedEndDate', label: 'Extended end date', value: form.extendedEndDate || '' },
     { key: 'renewalDate', label: 'Renewal date', value: form.renewalDate || '' },
   ];
 
   return (
-    <section className="mb-6 space-y-4">
+    <section className="mb-4 space-y-3">
       {/* Group A — Parties & identification */}
       <TintedSectionCard
         title="Parties & identification"
@@ -68,7 +67,7 @@ export function ContractDetailsTab({
         tintClass="bg-slate-50"
         borderClass="border-slate-200"
       >
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
           <div>
             <label className={labelClass}>Transaction type</label>
             <select
@@ -112,7 +111,7 @@ export function ContractDetailsTab({
             />
           </div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 mt-2">
           <div>
             <label className={labelClass}>Lease status</label>
             <select
@@ -124,6 +123,16 @@ export function ContractDetailsTab({
                 <option key={o}>{o}</option>
               ))}
             </select>
+          </div>
+          <div>
+            <label className={labelClass}>Modification date</label>
+            <input
+              type="date"
+              value={form.modificationDate || ''}
+              onChange={(e) => patch({ modificationDate: e.target.value })}
+              className={inputClassFilled(inputClass, form.modificationDate)}
+            />
+            <HelperText>Only if terms changed after commencement</HelperText>
           </div>
         </div>
       </TintedSectionCard>
@@ -140,7 +149,7 @@ export function ContractDetailsTab({
         tintClass="bg-blue-50"
         borderClass="border-blue-100"
       >
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
           <div>
             <FieldLabelWithExtraction field="startDate" extractedConfidences={extractedConfidences} required>
               Commencement date
@@ -182,7 +191,7 @@ export function ContractDetailsTab({
             <HelperText>Auto-calculated from dates above</HelperText>
           </div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-2">
           <div>
             <label className={labelClass}>Effective date</label>
             <input
@@ -214,7 +223,7 @@ export function ContractDetailsTab({
           Complete these only if this lease has been modified, terminated early, extended or renewed. Leave
           blank for a standard active lease.
         </ContextHelpCallout>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           {modCards.map((card) => (
             <div key={card.key} className="rounded-lg p-3 bg-white border border-[#e2e8f0]">
               <div className="flex justify-between items-start gap-2 mb-2">
@@ -243,7 +252,7 @@ export function ContractDetailsTab({
           real estate audits and escrow compliance. Contract sealing date/location support legal enforceability
           under UAE property law.
         </ContextHelpCallout>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
           <div>
             <label className={labelClass}>RERA registration no</label>
             <input
@@ -288,7 +297,7 @@ export function ContractDetailsTab({
           Include residual value guarantees and purchase options only if they affect lease classification or
           liability measurement under IFRS 16 paras 26–27.
         </ContextHelpCallout>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
           <div>
             <label className={labelClass}>Residual value</label>
             <input

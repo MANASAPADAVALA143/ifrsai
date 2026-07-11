@@ -27,6 +27,7 @@ import { ifrs16Api } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import toast from 'react-hot-toast';
+import { IFRS16_FILTER_INPUT_CLASS } from '@/lib/ifrs16-ui-styles';
 import * as XLSX from 'xlsx';
 
 function getStatus(endDate: string, entryStatus?: string): { label: string; className: string } {
@@ -295,64 +296,61 @@ export default function LeaseRepositoryPage() {
   };
 
   return (
-    <SidebarLayout pageTitle="Lease Repository" pageSubtitle="All lease contracts and calculations">
-      <div className="space-y-6">
-        {/* Header row */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-bold text-[#1e293b]">Lease Repository</h1>
-            <p className="text-sm text-[#64748b]">All lease contracts and calculations</p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Link href="/dashboard/ifrs16/upload">
-              <Button className="bg-gradient-to-r from-[#f97316] to-[#ef4444] text-white hover:opacity-90">
-                <Upload className="w-4 h-4 mr-2" /> AI Bulk Import
-              </Button>
-            </Link>
-            <Button variant="secondary" className="border border-[#e2e8f0] bg-white">
-              <FileSpreadsheet className="w-4 h-4 mr-2" /> Import Excel
+    <SidebarLayout
+      pageTitle="Lease Repository"
+      pageSubtitle="All lease contracts and calculations"
+      headerActions={
+        <>
+          <Link href="/dashboard/ifrs16/upload">
+            <Button className="bg-gradient-to-r from-[#f97316] to-[#ef4444] text-white hover:opacity-90 text-xs h-8 px-3">
+              <Upload className="w-3.5 h-3.5 mr-1.5" /> AI Bulk Import
             </Button>
-            <Button
-              variant="secondary"
-              className="border border-[#e2e8f0] bg-white"
-              onClick={handleExportContracts}
-            >
-              <FileDown className="w-4 h-4 mr-2" /> Export Register
+          </Link>
+          <Link href="/dashboard/ifrs16/leases/new">
+            <Button className="bg-gradient-to-r from-[#f97316] to-[#ef4444] text-white hover:opacity-90 text-xs h-8 px-3">
+              <Plus className="w-3.5 h-3.5 mr-1.5" /> Add Contract
             </Button>
-            <Button
-              variant="secondary"
-              className="border border-[#e2e8f0] bg-white"
-              onClick={() => void handleExportAllWorkbooks('all')}
-              disabled={exportingWorkbooks || leases.length === 0}
-            >
-              <Download className="w-4 h-4 mr-2" />
-              {exportingWorkbooks ? 'Building ZIP…' : 'Export All Workbooks (ZIP)'}
-            </Button>
-            <Link href="/dashboard/ifrs16/leases/new">
-              <Button className="bg-gradient-to-r from-[#f97316] to-[#ef4444] text-white hover:opacity-90">
-                <Plus className="w-4 h-4 mr-2" /> Add Contract
-              </Button>
-            </Link>
-          </div>
-        </div>
-
+          </Link>
+          <Button variant="secondary" className="border border-[#e2e8f0] bg-white text-xs h-8 px-3">
+            <FileSpreadsheet className="w-3.5 h-3.5 mr-1.5" /> Import Excel
+          </Button>
+          <Button
+            variant="secondary"
+            className="border border-[#e2e8f0] bg-white text-xs h-8 px-3"
+            onClick={handleExportContracts}
+          >
+            <FileDown className="w-3.5 h-3.5 mr-1.5" /> Export Register
+          </Button>
+          <Button
+            variant="secondary"
+            className="border border-[#e2e8f0] bg-white text-xs h-8 px-3"
+            onClick={() => void handleExportAllWorkbooks('all')}
+            disabled={exportingWorkbooks || leases.length === 0}
+          >
+            <Download className="w-3.5 h-3.5 mr-1.5" />
+            {exportingWorkbooks ? 'Building ZIP…' : 'Export All Workbooks (ZIP)'}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
         {/* Filter bar */}
         <div className="bg-white rounded-[14px] p-4 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-2">
             <div className="lg:col-span-2">
               <input
                 type="text"
                 placeholder="Search by ID, title, lessee..."
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-                className="w-full px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm focus:ring-2 focus:ring-[#f97316]/30 focus:border-[#f97316]"
+                className={IFRS16_FILTER_INPUT_CLASS}
               />
             </div>
             <div>
               <select
                 value={filterLeaseType}
                 onChange={(e) => { setFilterLeaseType(e.target.value); setPage(1); }}
-                className="w-full px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm focus:ring-2 focus:ring-[#f97316]/30"
+                className={IFRS16_FILTER_INPUT_CLASS}
               >
                 <option value="">Lease Type</option>
                 {uniqueLeaseTypes.map((t) => (
@@ -364,7 +362,7 @@ export default function LeaseRepositoryPage() {
               <select
                 value={filterLessor}
                 onChange={(e) => { setFilterLessor(e.target.value); setPage(1); }}
-                className="w-full px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm focus:ring-2 focus:ring-[#f97316]/30"
+                className={IFRS16_FILTER_INPUT_CLASS}
               >
                 <option value="">Lessor</option>
                 {uniqueLessors.map((t) => (
@@ -376,7 +374,7 @@ export default function LeaseRepositoryPage() {
               <select
                 value={filterLessee}
                 onChange={(e) => { setFilterLessee(e.target.value); setPage(1); }}
-                className="w-full px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm focus:ring-2 focus:ring-[#f97316]/30"
+                className={IFRS16_FILTER_INPUT_CLASS}
               >
                 <option value="">Lessee</option>
                 {uniqueLessees.map((t) => (
@@ -388,7 +386,7 @@ export default function LeaseRepositoryPage() {
               <select
                 value={filterStatus}
                 onChange={(e) => { setFilterStatus(e.target.value); setPage(1); }}
-                className="w-full px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm focus:ring-2 focus:ring-[#f97316]/30"
+                className={IFRS16_FILTER_INPUT_CLASS}
               >
                 <option value="">Status</option>
                 <option value="Active">Active</option>
@@ -403,7 +401,7 @@ export default function LeaseRepositoryPage() {
                 placeholder="Start from"
                 value={filterStartFrom}
                 onChange={(e) => { setFilterStartFrom(e.target.value); setPage(1); }}
-                className="w-full px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm"
+                className={IFRS16_FILTER_INPUT_CLASS}
               />
             </div>
             <div>
@@ -412,7 +410,7 @@ export default function LeaseRepositoryPage() {
                 placeholder="End to"
                 value={filterEndTo}
                 onChange={(e) => { setFilterEndTo(e.target.value); setPage(1); }}
-                className="w-full px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm"
+                className={IFRS16_FILTER_INPUT_CLASS}
               />
             </div>
           </div>
