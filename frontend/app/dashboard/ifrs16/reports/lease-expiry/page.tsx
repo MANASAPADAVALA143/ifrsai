@@ -119,10 +119,10 @@ export default function LeaseExpiryReportPage() {
   const cardClass = (key: string) => (expiryFilter === key ? 'ring-2 ring-[#f97316] bg-[#fff7ed]' : 'bg-white hover:bg-[#f9fafb]');
 
   return (
-    <SidebarLayout pageTitle="Lease Expiry Report" pageSubtitle="Leases by expiry timeline — renewal planning">
-      <div className="mb-4 flex justify-end">
+    <SidebarLayout pageTitle="Lease Expiry Report" hidePageHeader>
+      <div className="mb-2 flex justify-end">
         <Link href="/dashboard/ifrs16/reports">
-          <Button variant="secondary" className="border border-[#e2e8f0]">← Back to Reports</Button>
+          <Button size="sm" variant="secondary" className="border border-[#e2e8f0]">← Back to Reports</Button>
         </Link>
       </div>
 
@@ -137,7 +137,7 @@ export default function LeaseExpiryReportPage() {
         showContractSearch={true}
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 mb-3">
         {[
           { key: 'expired', label: 'Expired', count: counts.expired, color: 'text-red-600' },
           { key: 'in30', label: 'Expiring in 30 days', count: counts.in30, color: 'text-red-600' },
@@ -150,10 +150,10 @@ export default function LeaseExpiryReportPage() {
             key={c.key}
             type="button"
             onClick={() => setExpiryFilter(expiryFilter === c.key ? null : c.key)}
-            className={`p-4 rounded-xl border border-[#e2e8f0] text-left ${cardClass(c.key)}`}
+            className={`p-2.5 rounded-lg border border-[#e2e8f0] text-left ${cardClass(c.key)}`}
           >
-            <p className={`text-xs uppercase text-[#64748b] mb-1`}>{c.label}</p>
-            <p className={`font-mono font-semibold ${c.color}`}>{c.count}</p>
+            <p className="text-[10px] uppercase text-[#64748b] mb-0.5 leading-tight">{c.label}</p>
+            <p className={`text-sm font-mono font-semibold ${c.color}`}>{c.count}</p>
           </button>
         ))}
       </div>

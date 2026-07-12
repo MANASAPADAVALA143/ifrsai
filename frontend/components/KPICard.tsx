@@ -26,24 +26,24 @@ export function KPICard({
   return (
     <div
       className={cn(
-        'bg-white rounded-lg p-6 shadow-sm border border-gray-100 hover:shadow-md transition-shadow',
+        'bg-white rounded-lg p-4 shadow-sm border border-gray-100 hover:shadow-md transition-shadow',
         className
       )}
     >
-      <div className="flex items-start justify-between">
-        <div className="flex-1">
-          <p className="text-sm font-medium text-gray-600 mb-1">{title}</p>
-          <p className="text-2xl font-bold text-primary mb-1">{value}</p>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium text-gray-600 mb-0.5">{title}</p>
+          <p className="text-lg font-bold text-primary leading-tight truncate">{value}</p>
           {subtitle && (
-            <p className="text-xs text-gray-500">{subtitle}</p>
+            <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>
           )}
         </div>
-        <div className="bg-accent/10 p-3 rounded-lg">
-          <Icon className="w-6 h-6 text-accent" />
+        <div className="bg-accent/10 p-2 rounded-md shrink-0">
+          <Icon className="w-4 h-4 text-accent" />
         </div>
       </div>
       {trend && (
-        <div className="mt-4 flex items-center text-sm">
+        <div className="mt-2 flex items-center text-xs">
           <span
             className={cn(
               'font-medium',

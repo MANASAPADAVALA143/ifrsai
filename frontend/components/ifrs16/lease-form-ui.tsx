@@ -40,10 +40,10 @@ export function CollapsibleFormSection({
 }) {
   return (
     <details
-      className={`mb-4 border border-[#e2e8f0] rounded-xl overflow-hidden ${tintClass}`}
+      className={`mb-2 border border-[#e2e8f0] rounded-lg overflow-hidden ${tintClass}`}
       {...(defaultOpen ? { open: true } : {})}
     >
-      <summary className="px-3 py-2 bg-white/60 text-xs font-semibold text-[#1e293b] cursor-pointer list-none flex items-center justify-between gap-2">
+      <summary className="px-2.5 py-1.5 bg-white/60 text-xs font-semibold text-[#1e293b] cursor-pointer list-none flex items-center justify-between gap-2">
         <span>
           {title}
           {subtitle && (
@@ -54,7 +54,7 @@ export function CollapsibleFormSection({
           {defaultOpen ? 'Expanded' : 'Optional'}
         </span>
       </summary>
-      <div className="p-3 border-t border-[#e2e8f0] bg-white/50">{children}</div>
+      <div className="p-2.5 border-t border-[#e2e8f0] bg-white/50">{children}</div>
     </details>
   );
 }
@@ -76,8 +76,8 @@ export function TintedSectionCard({
   children: ReactNode;
 }) {
   return (
-    <div className={`${tintClass} border ${borderClass} rounded-lg p-3 mb-3`}>
-      <div className="flex items-center justify-between mb-2">
+    <div className={`${tintClass} border ${borderClass} rounded-lg p-2.5 mb-2`}>
+      <div className="flex items-center justify-between mb-1.5">
         <div className="flex items-center gap-1.5">
           {icon}
           <h3 className="text-xs font-semibold text-gray-800">{title}</h3>

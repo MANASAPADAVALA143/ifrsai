@@ -1526,32 +1526,32 @@ function getReportingDateForFY(fy: string): Date {
       pageSubtitle=""
       hidePageHeader
     >
-      <div className="space-y-0">
+      <div className="space-y-0 -mt-1">
         {/* Sticky header — single title row with actions */}
-        <div className="sticky top-0 z-30 bg-[#f5f6fa] border-b border-[#e2e8f0] -mx-6 px-6 py-4 mb-6 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3 min-w-0 flex-1">
-              <h1 className="text-2xl md:text-3xl font-bold text-[#1e293b] truncate">{displayTitle}</h1>
+        <div className="sticky top-0 z-30 bg-[#f5f6fa] border-b border-[#e2e8f0] -mx-5 px-5 py-2 mb-3 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <h1 className="text-lg md:text-xl font-bold text-[#1e293b] truncate">{displayTitle}</h1>
               {!isNew ? (
                 <>
-                  <span className={`shrink-0 px-2 py-0.5 text-xs font-medium rounded-full ${statusLabel === 'Active' ? 'bg-green-100 text-green-700' : statusLabel === 'Draft' ? 'bg-gray-100 text-gray-700' : 'bg-amber-100 text-amber-700'}`}>
+                  <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded-full ${statusLabel === 'Active' ? 'bg-green-100 text-green-700' : statusLabel === 'Draft' ? 'bg-gray-100 text-gray-700' : 'bg-amber-100 text-amber-700'}`}>
                     {statusLabel}
                   </span>
-                  <span className="shrink-0 px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-700">{form.version || 'V1'}</span>
+                  <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded-full bg-blue-100 text-blue-700">{form.version || 'V1'}</span>
                 </>
               ) : null}
             </div>
-            <div className="flex flex-wrap gap-2 items-center shrink-0">
+            <div className="flex flex-wrap gap-1.5 items-center shrink-0">
               <div className="relative" ref={sampleMenuRef}>
                 <button
                   type="button"
                   onClick={() => setShowSampleMenu((p) => !p)}
-                  className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-[#475569] bg-white border border-[#e2e8f0] rounded-lg hover:bg-[#f8fafc] hover:border-[#2E86AB] transition-colors shadow-sm"
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#475569] bg-white border border-[#e2e8f0] rounded-md hover:bg-[#f8fafc] hover:border-[#2E86AB] transition-colors"
                 >
                   <span>📂</span>
                   Load Sample
                   <svg
-                    className={`w-4 h-4 transition-transform duration-200 ${showSampleMenu ? 'rotate-180' : ''}`}
+                    className={`w-3.5 h-3.5 transition-transform duration-200 ${showSampleMenu ? 'rotate-180' : ''}`}
                     fill="none"
                     viewBox="0 0 24 24"
                     stroke="currentColor"
@@ -1584,21 +1584,21 @@ function getReportingDateForFY(fy: string): Date {
                   </div>
                 )}
               </div>
-              <Button onClick={handleCalculate} disabled={isCalculating} className="bg-gradient-to-r from-[#f97316] to-[#ef4444] text-white hover:opacity-90">
-                {isCalculating ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Calculator className="w-4 h-4 mr-2" />}
+              <Button size="sm" onClick={handleCalculate} disabled={isCalculating} className="bg-gradient-to-r from-[#f97316] to-[#ef4444] text-white hover:opacity-90">
+                {isCalculating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Calculator className="w-3.5 h-3.5" />}
                 Calculate IFRS 16
               </Button>
-              <Button onClick={handleHeaderSave} disabled={saving} variant="secondary" className="border border-[#e2e8f0] bg-white">
-                <Save className="w-4 h-4 mr-2" /> Save
+              <Button size="sm" onClick={handleHeaderSave} disabled={saving} variant="secondary" className="border border-[#e2e8f0] bg-white">
+                <Save className="w-3.5 h-3.5" /> Save
               </Button>
               {excelFileId ? (
                 <a href={ifrs16Api.downloadReport(excelFileId)} target="_blank" rel="noopener noreferrer">
-                  <Button variant="secondary" className="border border-[#e2e8f0] bg-white">
-                    <Download className="w-4 h-4 mr-2" /> Download Excel
+                  <Button size="sm" variant="secondary" className="border border-[#e2e8f0] bg-white">
+                    <Download className="w-3.5 h-3.5" /> Download Excel
                   </Button>
                 </a>
               ) : null}
-              <Button variant="secondary" className="text-red-600 hover:bg-red-50 border-0" onClick={handleDelete}>
+              <Button size="sm" variant="secondary" className="text-red-600 hover:bg-red-50 border-0" onClick={handleDelete}>
                 Delete
               </Button>
             </div>
@@ -1616,20 +1616,20 @@ function getReportingDateForFY(fy: string): Date {
         )}
 
         {extractionBanner && (
-          <div className="mb-6 p-4 rounded-xl bg-[#f0fdf4] border border-[#86efac] text-[#166534] text-sm">
+          <div className="mb-3 p-3 rounded-lg bg-[#f0fdf4] border border-[#86efac] text-[#166534] text-xs">
             {extractionBanner}
           </div>
         )}
 
         {scheduleStaleNotice && (
-          <div className="mb-6 p-3 rounded-lg bg-[#f1f5f9] border border-[#e2e8f0] text-[#64748b] text-sm flex items-start gap-2">
-            <Info className="w-4 h-4 shrink-0 mt-0.5 opacity-70" />
+          <div className="mb-3 p-2 rounded-lg bg-[#f1f5f9] border border-[#e2e8f0] text-[#64748b] text-xs flex items-start gap-2">
+            <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 opacity-70" />
             <span>{scheduleStaleNotice}</span>
           </div>
         )}
 
         {/* Tab bar */}
-        <div className="border-b border-[#e2e8f0] mb-4">
+        <div className="border-b border-[#e2e8f0] mb-2">
           <div className="flex gap-0.5 overflow-x-auto">
             {TABS.map((t) => {
               const Icon = t.icon;
@@ -1645,7 +1645,7 @@ function getReportingDateForFY(fy: string): Date {
                   disabled={disabled}
                   title={lockedMessage ?? undefined}
                   onClick={() => setActiveTab(t.id)}
-                  className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 whitespace-nowrap transition-colors ${
+                  className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium border-b-2 whitespace-nowrap transition-colors ${
                     disabled
                       ? 'border-transparent text-[#94a3b8] bg-[#f8fafc] cursor-not-allowed'
                       : active
@@ -1668,12 +1668,12 @@ function getReportingDateForFY(fy: string): Date {
         </div>
 
         {/* Tab content - wrapper */}
-        <div className="bg-white rounded-xl border border-[#e2e8f0] p-4 shadow-sm">
+        <div className="bg-white rounded-lg border border-[#e2e8f0] p-3 shadow-sm">
           {activeTab === 'contract' && (
             <>
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                <h3 className="text-sm font-semibold text-[#1e293b] flex items-center gap-1.5">
-                  <FileText className="w-4 h-4 text-[#f97316]" /> Contract Details
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                <h3 className="text-xs font-semibold text-[#1e293b] flex items-center gap-1">
+                  <FileText className="w-3.5 h-3.5 text-[#f97316]" /> Contract Details
                 </h3>
                 {!isNew && (
                   <LeasePdfUploadBar

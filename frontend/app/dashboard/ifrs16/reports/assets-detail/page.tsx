@@ -120,10 +120,10 @@ export default function AssetsDetailReportPage() {
   ];
 
   return (
-    <SidebarLayout pageTitle="Assets Detail Report" pageSubtitle="One row per asset/lease">
-      <div className="mb-4 flex justify-end">
+    <SidebarLayout pageTitle="Assets Detail Report" hidePageHeader>
+      <div className="mb-2 flex justify-end">
         <Link href="/dashboard/ifrs16/reports">
-          <Button variant="secondary" className="border border-[#e2e8f0]">← Back to Reports</Button>
+          <Button size="sm" variant="secondary" className="border border-[#e2e8f0]">← Back to Reports</Button>
         </Link>
       </div>
 
@@ -138,22 +138,22 @@ export default function AssetsDetailReportPage() {
         showContractSearch={true}
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-        <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white">
-          <p className="text-xs text-[#64748b] uppercase mb-1">Total Assets</p>
-          <p className="font-mono font-semibold text-[#f97316]">{rows.length}</p>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+        <div className="p-2.5 rounded-lg border border-[#e2e8f0] bg-white">
+          <p className="text-[10px] text-[#64748b] uppercase mb-0.5">Total Assets</p>
+          <p className="text-sm font-mono font-semibold text-[#f97316]">{rows.length}</p>
         </div>
-        <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white">
-          <p className="text-xs text-[#64748b] uppercase mb-1">Total ROU Value</p>
-          <p className="font-mono font-semibold text-[#f97316]">{formatReportCurrency(totalROU)}</p>
+        <div className="p-2.5 rounded-lg border border-[#e2e8f0] bg-white">
+          <p className="text-[10px] text-[#64748b] uppercase mb-0.5">Total ROU Value</p>
+          <p className="text-sm font-mono font-semibold text-[#f97316] truncate">{formatReportCurrency(totalROU)}</p>
         </div>
-        <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white">
-          <p className="text-xs text-[#64748b] uppercase mb-1">Total Accumulated Depreciation</p>
-          <p className="font-mono font-semibold">{formatReportCurrency(totalAccDep)}</p>
+        <div className="p-2.5 rounded-lg border border-[#e2e8f0] bg-white">
+          <p className="text-[10px] text-[#64748b] uppercase mb-0.5">Total Accumulated Depreciation</p>
+          <p className="text-sm font-mono font-semibold truncate">{formatReportCurrency(totalAccDep)}</p>
         </div>
-        <div className="p-4 rounded-xl border border-[#e2e8f0] bg-white">
-          <p className="text-xs text-[#64748b] uppercase mb-1">Total NBV Today</p>
-          <p className="font-mono font-semibold text-[#f97316]">{formatReportCurrency(totalNBV)}</p>
+        <div className="p-2.5 rounded-lg border border-[#e2e8f0] bg-white">
+          <p className="text-[10px] text-[#64748b] uppercase mb-0.5">Total NBV Today</p>
+          <p className="text-sm font-mono font-semibold text-[#f97316] truncate">{formatReportCurrency(totalNBV)}</p>
         </div>
       </div>
 

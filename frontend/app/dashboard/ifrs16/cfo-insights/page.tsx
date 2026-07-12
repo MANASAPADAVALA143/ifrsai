@@ -24,7 +24,7 @@ import {
 } from '@/lib/ifrs16-portfolio';
 
 const cardClass =
-  'bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]';
+  'bg-white rounded-lg border border-[#e2e8f0] shadow-sm';
 
 const categoryLabels: Record<string, string> = {
   RENEWAL_DECISION: '🔄 Renewal Decision',
@@ -641,15 +641,15 @@ export default function CFOStrategicInsightsPage() {
       pageTitle="CFO Strategic Insights"
       pageSubtitle="IFRS 16 Lease Portfolio Intelligence"
     >
-      <div className="space-y-6 max-w-6xl">
+      <div className="space-y-4 max-w-6xl">
         {/* Header row */}
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="px-3 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 border border-blue-200">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-blue-100 text-blue-800 border border-blue-200">
               AI Powered
             </span>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-1.5">
             {aiResult && !loading && (
               <Button variant="secondary" size="sm" onClick={runAnalysis} disabled={!hasLeases}>
                 Re-analyse
@@ -657,12 +657,12 @@ export default function CFOStrategicInsightsPage() {
             )}
             <Button
               variant="primary"
-              size="md"
+              size="sm"
               onClick={runAnalysis}
               disabled={!hasLeases}
               isLoading={loading}
             >
-              {!loading && <Sparkles className="w-4 h-4" />}
+              {!loading && <Sparkles className="w-3.5 h-3.5" />}
               Analyse Portfolio
             </Button>
           </div>
@@ -683,53 +683,53 @@ export default function CFOStrategicInsightsPage() {
         ) : (
           <>
             {/* KPI cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-              <div className={`${cardClass} p-5 flex gap-4 items-start`}>
-                <div className="p-2 rounded-lg bg-orange-50 text-[#f97316]">
-                  <Building2 className="w-6 h-6" />
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+              <div className={`${cardClass} p-3 flex gap-2.5 items-center`}>
+                <div className="p-1.5 rounded-md bg-orange-50 text-[#f97316] shrink-0">
+                  <Building2 className="w-4 h-4" />
                 </div>
-                <div>
-                  <p className="text-xs font-medium text-[#64748b] uppercase tracking-wide">Total Lease Liability</p>
-                  <p className="text-xl font-bold text-[#1e293b] mt-1">{formatPortfolioTotal(totalLiability)}</p>
+                <div className="min-w-0">
+                  <p className="text-[10px] font-medium text-[#64748b] uppercase tracking-wide">Total Lease Liability</p>
+                  <p className="text-base font-bold text-[#1e293b] leading-tight truncate">{formatPortfolioTotal(totalLiability)}</p>
                   {portfolioMoney.isMultiCurrency && portfolioMoney.subtitle && (
-                    <p className="text-xs text-[#94a3b8] mt-0.5">{portfolioMoney.subtitle}</p>
+                    <p className="text-[10px] text-[#94a3b8]">{portfolioMoney.subtitle}</p>
                   )}
                   {!portfolioMoney.isMultiCurrency && leases.length > 0 && (
-                    <p className="text-xs text-[#94a3b8] mt-0.5">{portfolioMoney.dominantCurrency}</p>
+                    <p className="text-[10px] text-[#94a3b8]">{portfolioMoney.dominantCurrency}</p>
                   )}
                 </div>
               </div>
-              <div className={`${cardClass} p-5 flex gap-4 items-start`}>
-                <div className="p-2 rounded-lg bg-slate-100 text-[#475569]">
-                  <FileText className="w-6 h-6" />
+              <div className={`${cardClass} p-3 flex gap-2.5 items-center`}>
+                <div className="p-1.5 rounded-md bg-slate-100 text-[#475569] shrink-0">
+                  <FileText className="w-4 h-4" />
                 </div>
-                <div>
-                  <p className="text-xs font-medium text-[#64748b] uppercase tracking-wide">Active Leases</p>
-                  <p className="text-xl font-bold text-[#1e293b] mt-1">{formatIndianNumber(activeCount)}</p>
-                  <p className="text-xs text-[#94a3b8] mt-0.5">Status Active or Calculated</p>
-                </div>
-              </div>
-              <div className={`${cardClass} p-5 flex gap-4 items-start`}>
-                <div className="p-2 rounded-lg bg-violet-50 text-violet-600">
-                  <Percent className="w-6 h-6" />
-                </div>
-                <div>
-                  <p className="text-xs font-medium text-[#64748b] uppercase tracking-wide">Avg IBR Rate</p>
-                  <p className="text-xl font-bold text-[#1e293b] mt-1">{avgIbr.toFixed(1)}%</p>
+                <div className="min-w-0">
+                  <p className="text-[10px] font-medium text-[#64748b] uppercase tracking-wide">Active Leases</p>
+                  <p className="text-base font-bold text-[#1e293b] leading-tight">{formatIndianNumber(activeCount)}</p>
+                  <p className="text-[10px] text-[#94a3b8] truncate">Status Active or Calculated</p>
                 </div>
               </div>
-              <div className={`${cardClass} p-5 flex gap-4 items-start`}>
+              <div className={`${cardClass} p-3 flex gap-2.5 items-center`}>
+                <div className="p-1.5 rounded-md bg-violet-50 text-violet-600 shrink-0">
+                  <Percent className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[10px] font-medium text-[#64748b] uppercase tracking-wide">Avg IBR Rate</p>
+                  <p className="text-base font-bold text-[#1e293b] leading-tight">{avgIbr.toFixed(1)}%</p>
+                </div>
+              </div>
+              <div className={`${cardClass} p-3 flex gap-2.5 items-center`}>
                 <div
-                  className={`p-2 rounded-lg ${
+                  className={`p-1.5 rounded-md shrink-0 ${
                     expiring90 > 0 ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'
                   }`}
                 >
-                  <AlertTriangle className="w-6 h-6" />
+                  <AlertTriangle className="w-4 h-4" />
                 </div>
-                <div>
-                  <p className="text-xs font-medium text-[#64748b] uppercase tracking-wide">Expiring in 90 days</p>
+                <div className="min-w-0">
+                  <p className="text-[10px] font-medium text-[#64748b] uppercase tracking-wide">Expiring in 90 days</p>
                   <p
-                    className={`text-xl font-bold mt-1 ${
+                    className={`text-base font-bold leading-tight ${
                       expiring90 > 0 ? 'text-red-600' : 'text-green-600'
                     }`}
                   >
@@ -740,7 +740,7 @@ export default function CFOStrategicInsightsPage() {
             </div>
 
             {!aiResult && !loading && (
-              <div className="rounded-lg border border-blue-200 bg-blue-50/80 px-4 py-3 text-sm text-blue-900">
+              <div className="rounded-lg border border-blue-200 bg-blue-50/80 px-3 py-2 text-xs text-blue-900">
                 Click &apos;Analyse Portfolio&apos; to generate AI-powered insights for your CFO dashboard.
               </div>
             )}

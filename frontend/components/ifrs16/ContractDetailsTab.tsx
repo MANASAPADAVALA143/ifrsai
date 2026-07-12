@@ -14,7 +14,7 @@ import {
 } from './lease-form-ui';
 
 function HelperText({ children }: { children: React.ReactNode }) {
-  return <p className="text-[10px] text-[#64748b] mt-1">{children}</p>;
+  return <p className="text-[10px] text-[#64748b] mt-0.5 leading-tight">{children}</p>;
 }
 
 const MOD_HINTS: Record<string, string> = {
@@ -59,7 +59,7 @@ export function ContractDetailsTab({
   ];
 
   return (
-    <section className="mb-4 space-y-3">
+    <section className="mb-2 space-y-2">
       {/* Group A — Parties & identification */}
       <TintedSectionCard
         title="Parties & identification"
@@ -95,7 +95,7 @@ export function ContractDetailsTab({
               type="text"
               value={form.leaseId || ''}
               readOnly
-              className={inputClassFilled(inputClass, form.leaseId)}
+              className={`${inputClassFilled(inputClass, form.leaseId)} whitespace-nowrap overflow-hidden text-ellipsis`}
             />
             <HelperText>Auto-generated — used in repository & reports</HelperText>
           </div>

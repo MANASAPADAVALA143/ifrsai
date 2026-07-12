@@ -333,9 +333,9 @@ export default function LeaseRepositoryPage() {
         </>
       }
     >
-      <div className="space-y-4">
+      <div className="space-y-3">
         {/* Filter bar */}
-        <div className="bg-white rounded-[14px] p-4 border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+        <div className="bg-white rounded-lg p-3 border border-[#e2e8f0] shadow-sm">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-2">
             <div className="lg:col-span-2">
               <input
@@ -417,7 +417,7 @@ export default function LeaseRepositoryPage() {
         </div>
 
         {duplicateGroups.size > 0 && (
-          <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-sm">
+          <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs">
             <p className="font-medium">Possible duplicate detected</p>
             <p className="mt-1">
               {duplicateGroups.size} group(s) share the same asset description, commencement date, and lessee. Review
@@ -434,8 +434,8 @@ export default function LeaseRepositoryPage() {
         )}
 
         {selectedIds.size > 0 && (
-          <div className="flex flex-wrap items-center gap-3 p-3 rounded-lg bg-[#f8fafc] border border-[#e2e8f0]">
-            <span className="text-sm text-[#64748b]">{selectedIds.size} selected</span>
+          <div className="flex flex-wrap items-center gap-2 p-2 rounded-lg bg-[#f8fafc] border border-[#e2e8f0]">
+            <span className="text-xs text-[#64748b]">{selectedIds.size} selected</span>
             <Button
               variant="secondary"
               className="border border-[#e2e8f0] bg-white"
@@ -463,10 +463,10 @@ export default function LeaseRepositoryPage() {
         )}
 
         {/* Table */}
-        <div className="bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] overflow-hidden">
+        <div className="bg-white rounded-lg border border-[#e2e8f0] shadow-sm overflow-hidden">
           {filtered.length === 0 ? (
-            <div className="p-12 text-center">
-              <FolderOpen className="w-16 h-16 text-[#94a3b8] mx-auto mb-4" />
+            <div className="p-8 text-center">
+              <FolderOpen className="w-12 h-12 text-[#94a3b8] mx-auto mb-3" />
               <p className="text-[#64748b]">No leases yet. Add your first lease to get started.</p>
               <Link href="/dashboard/ifrs16/leases/new">
                 <Button className="mt-4 bg-[#f97316] hover:bg-[#ea580c] text-white">Add Contract</Button>
@@ -475,10 +475,10 @@ export default function LeaseRepositoryPage() {
           ) : (
             <>
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full text-xs">
                   <thead>
                     <tr className="bg-[#f8fafc] border-b border-[#e2e8f0]">
-                      <th className="py-3 px-3 w-10">
+                      <th className="py-2 px-2 w-8">
                         <input
                           type="checkbox"
                           aria-label="Select all on page"
@@ -487,18 +487,18 @@ export default function LeaseRepositoryPage() {
                           onClick={(e) => e.stopPropagation()}
                         />
                       </th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Lease ID</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Title</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Lease Type</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Lessee</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Currency</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Start Date</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">End Date</th>
-                      <th className="text-right py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Monthly Payment</th>
-                      <th className="text-right py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Lease Liability</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Status</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase">Version</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748b] uppercase w-12">Actions</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase whitespace-nowrap w-[1%]">Lease ID</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase">Title</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase">Lease Type</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase">Lessee</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase">Currency</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase whitespace-nowrap">Start Date</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase whitespace-nowrap">End Date</th>
+                      <th className="text-right py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase whitespace-nowrap">Monthly Payment</th>
+                      <th className="text-right py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase whitespace-nowrap">Lease Liability</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase">Status</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase">Version</th>
+                      <th className="text-left py-2 px-3 text-[10px] font-semibold text-[#64748b] uppercase w-10">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -517,7 +517,7 @@ export default function LeaseRepositoryPage() {
                           }`}
                           onClick={() => router.push(`/dashboard/ifrs16/leases/${id}`)}
                         >
-                          <td className="py-3 px-3" onClick={(e) => e.stopPropagation()}>
+                          <td className="py-2 px-2" onClick={(e) => e.stopPropagation()}>
                             <input
                               type="checkbox"
                               checked={selectedIds.has(rowSelectionKey(l))}
@@ -525,42 +525,42 @@ export default function LeaseRepositoryPage() {
                               aria-label={`Select ${id}`}
                             />
                           </td>
-                          <td className="py-3 px-4">
+                          <td className="py-2 px-3 whitespace-nowrap w-[1%]">
                             <Link
                               href={`/dashboard/ifrs16/leases/${id}`}
-                              className="text-[#f97316] font-medium hover:underline font-mono"
+                              className="text-[#f97316] font-medium hover:underline font-mono text-xs whitespace-nowrap"
                               onClick={(e) => e.stopPropagation()}
                             >
                               {id}
                             </Link>
                           </td>
-                          <td className="py-3 px-4 text-[#1e293b]">{l.title || l.asset || '—'}</td>
-                          <td className="py-3 px-4 text-[#64748b]">{l.lease_type || '—'}</td>
-                          <td className="py-3 px-4 text-[#64748b]">{l.lessee || l.lessee_name || '—'}</td>
-                          <td className="py-3 px-4 text-[#64748b] font-mono text-xs">{resolveLeaseCurrency(l)}</td>
-                          <td className="py-3 px-4 text-[#64748b]">{l.start_date || l.dates?.commencement || '—'}</td>
-                          <td className="py-3 px-4 text-[#64748b]">{l.end_date || l.dates?.end || '—'}</td>
-                          <td className="py-3 px-4 text-right font-mono text-[#1e293b]">
+                          <td className="py-2 px-3 text-[#1e293b] max-w-[180px] truncate">{l.title || l.asset || '—'}</td>
+                          <td className="py-2 px-3 text-[#64748b]">{l.lease_type || '—'}</td>
+                          <td className="py-2 px-3 text-[#64748b] max-w-[140px] truncate">{l.lessee || l.lessee_name || '—'}</td>
+                          <td className="py-2 px-3 text-[#64748b] font-mono">{resolveLeaseCurrency(l)}</td>
+                          <td className="py-2 px-3 text-[#64748b] whitespace-nowrap">{l.start_date || l.dates?.commencement || '—'}</td>
+                          <td className="py-2 px-3 text-[#64748b] whitespace-nowrap">{l.end_date || l.dates?.end || '—'}</td>
+                          <td className="py-2 px-3 text-right font-mono text-[#1e293b] whitespace-nowrap">
                             {formatLeaseMoney(l.monthly_payment ?? l.payments?.monthly ?? 0, resolveLeaseCurrency(l))}
                           </td>
-                          <td className="py-3 px-4 text-right font-mono text-[#1e293b]">
+                          <td className="py-2 px-3 text-right font-mono text-[#1e293b] whitespace-nowrap">
                             {formatLeaseMoney(l.liability ?? 0, resolveLeaseCurrency(l))}
                           </td>
-                          <td className="py-3 px-4">
-                            <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${status.className}`}>
+                          <td className="py-2 px-3">
+                            <span className={`inline-flex px-1.5 py-0.5 text-[10px] font-medium rounded-full ${status.className}`}>
                               {status.label}
                             </span>
                           </td>
-                          <td className="py-3 px-4">
-                            <span className="inline-flex px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-700">
+                          <td className="py-2 px-3">
+                            <span className="inline-flex px-1.5 py-0.5 text-[10px] font-medium rounded-full bg-blue-100 text-blue-700">
                               {version}
                             </span>
                           </td>
-                          <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
+                          <td className="py-2 px-3" onClick={(e) => e.stopPropagation()}>
                             <div className="relative">
                               <button
                                 onClick={(e) => { e.stopPropagation(); setMenuOpen(menuOpen === menuId ? null : menuId); }}
-                                className="p-1.5 rounded hover:bg-[#e2e8f0] text-[#64748b]"
+                                className="p-1 rounded hover:bg-[#e2e8f0] text-[#64748b]"
                               >
                                 <MoreVertical className="w-4 h-4" />
                               </button>
@@ -607,8 +607,8 @@ export default function LeaseRepositoryPage() {
                 </table>
               </div>
               {totalPages > 1 && (
-                <div className="flex items-center justify-between px-4 py-3 border-t border-[#e2e8f0]">
-                  <p className="text-sm text-[#64748b]">
+                <div className="flex items-center justify-between px-3 py-2 border-t border-[#e2e8f0]">
+                  <p className="text-xs text-[#64748b]">
                     Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length}
                   </p>
                   <div className="flex gap-2">

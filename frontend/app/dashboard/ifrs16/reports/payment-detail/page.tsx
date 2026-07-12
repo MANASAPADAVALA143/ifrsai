@@ -113,7 +113,7 @@ export default function PaymentDetailReportPage() {
   ];
 
   return (
-    <SidebarLayout pageTitle="Payment Detail Report" pageSubtitle="Shows every individual payment across all leases">
+    <SidebarLayout pageTitle="Payment Detail Report" hidePageHeader>
       <div className="mb-4 flex justify-end">
         <Link href="/dashboard/ifrs16/reports">
           <Button variant="secondary" className="border border-[#e2e8f0]">← Back to Reports</Button>

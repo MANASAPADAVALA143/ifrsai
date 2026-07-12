@@ -431,9 +431,9 @@ export default function IFRS16DashboardPage() {
       pageTitle={`${getGreeting()}, ${getCompanyName()}`}
       pageSubtitle={`${formatDate(new Date())} · Your compliance is up to date ✓`}
     >
-      <div className="space-y-8">
+      <div className="space-y-4">
         {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <KPICard
             title="Total Lease Liability"
             value={kpiLiability}
@@ -461,42 +461,43 @@ export default function IFRS16DashboardPage() {
         </div>
 
         {/* Quick Actions */}
-        <div className="flex flex-wrap gap-3">
+        <div className="flex flex-wrap gap-2">
           <Link href="/dashboard/ifrs16/leases/new">
-            <Button variant="primary" className="bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white">
-              <Plus className="w-4 h-4 mr-2" />
+            <Button size="sm" variant="primary" className="bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white">
+              <Plus className="w-3.5 h-3.5" />
               Add New Lease
             </Button>
           </Link>
           <Link href="/dashboard/ifrs16/upload">
-            <Button variant="secondary" className="border-border-default">
-              <Upload className="w-4 h-4 mr-2" />
+            <Button size="sm" variant="secondary" className="border-border-default">
+              <Upload className="w-3.5 h-3.5" />
               Bulk Upload
             </Button>
           </Link>
           <Link href="/dashboard/reports">
-            <Button variant="secondary" className="border-border-default">
-              <FileBarChart className="w-4 h-4 mr-2" />
+            <Button size="sm" variant="secondary" className="border-border-default">
+              <FileBarChart className="w-3.5 h-3.5" />
               Generate Reports
             </Button>
           </Link>
           <Button
             type="button"
+            size="sm"
             variant="primary"
             className="bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white"
             onClick={() => setCfoInsightsOpen(true)}
           >
-            <Sparkles className="w-4 h-4 mr-2" />
+            <Sparkles className="w-3.5 h-3.5" />
             CFO Insights
           </Button>
         </div>
 
         {/* Charts Row */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-100">
-            <h3 className="text-lg font-bold text-primary mb-4">Lease Liability Trend</h3>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-100">
+            <h3 className="text-sm font-semibold text-primary mb-2">Lease Liability Trend</h3>
             {hasScheduleTrend ? (
-              <ResponsiveContainer width="100%" height={300}>
+              <ResponsiveContainer width="100%" height={220}>
                 <LineChart data={liabilityTrendData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                   <XAxis dataKey="month" stroke="#666" style={{ fontSize: '12px' }} />
@@ -524,16 +525,16 @@ export default function IFRS16DashboardPage() {
                 </LineChart>
               </ResponsiveContainer>
             ) : (
-              <div className="flex items-center justify-center h-[300px] text-sm text-[#64748b] text-center px-6">
+              <div className="flex items-center justify-center h-[220px] text-xs text-[#64748b] text-center px-4">
                 No liability trend yet. Add and calculate leases to see the chart.
               </div>
             )}
           </div>
 
-          <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-100">
-            <h3 className="text-lg font-bold text-primary mb-4">Leases by Asset Type</h3>
+          <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-100">
+            <h3 className="text-sm font-semibold text-primary mb-2">Leases by Asset Type</h3>
             {pieChartData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
+              <ResponsiveContainer width="100%" height={220}>
                 <PieChart>
                   <Pie
                     data={pieChartData}
@@ -541,7 +542,7 @@ export default function IFRS16DashboardPage() {
                     cy="50%"
                     labelLine={false}
                     label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
-                    outerRadius={100}
+                    outerRadius={75}
                     fill="#8884d8"
                     dataKey="value"
                   >
@@ -553,7 +554,7 @@ export default function IFRS16DashboardPage() {
                 </PieChart>
               </ResponsiveContainer>
             ) : (
-              <div className="flex items-center justify-center h-[300px] text-sm text-[#64748b] text-center px-6">
+              <div className="flex items-center justify-center h-[220px] text-xs text-[#64748b] text-center px-4">
                 No leases yet. Add leases to see the breakdown by asset type.
               </div>
             )}
@@ -562,8 +563,8 @@ export default function IFRS16DashboardPage() {
 
         {/* Recent Calculations Table */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-100 overflow-hidden">
-          <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-            <h3 className="text-lg font-bold text-primary">Recent Calculations</h3>
+          <div className="px-4 py-3 border-b border-gray-100 flex justify-between items-center">
+            <h3 className="text-sm font-semibold text-primary">Recent Calculations</h3>
             <Link href="/dashboard/ifrs16/repository">
               <Button variant="secondary" size="sm">View All Leases</Button>
             </Link>
@@ -572,18 +573,18 @@ export default function IFRS16DashboardPage() {
             <table className="w-full">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lease Name</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Standard</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Liability</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lease Name</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Standard</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Liability</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {recentCalculations.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-6 py-12 text-center text-sm text-[#64748b]">
+                    <td colSpan={6} className="px-4 py-8 text-center text-sm text-[#64748b]">
                       No calculations yet. Add a new lease or upload leases to get started.
                     </td>
                   </tr>
@@ -597,23 +598,23 @@ export default function IFRS16DashboardPage() {
                       }
                     }}
                   >
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    <td className="px-4 py-2.5 whitespace-nowrap text-sm text-gray-900">
                       {formatDate(calc.date)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                    <td className="px-4 py-2.5 whitespace-nowrap text-sm font-medium text-gray-900">
                       {calc.leaseName}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
+                    <td className="px-4 py-2.5 whitespace-nowrap">
                       <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-accent/10 text-accent">
                         {calc.standard}
                       </span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">
+                    <td className="px-4 py-2.5 whitespace-nowrap text-sm text-gray-900 font-medium">
                       {marketMode === 'IN'
                         ? formatIndianCurrency(calc.liability)
                         : fmtPortfolio(calc.liability)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
+                    <td className="px-4 py-2.5 whitespace-nowrap">
                       <span
                         className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${
                           calc.status === 'Completed'
@@ -624,7 +625,7 @@ export default function IFRS16DashboardPage() {
                         {calc.status}
                       </span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" onClick={(e) => e.stopPropagation()}>
+                    <td className="px-4 py-2.5 whitespace-nowrap text-sm text-gray-500" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-2">
                         {'leaseId' in calc && calc.leaseId && (
                           <Link href={`/dashboard/ifrs16/leases/${calc.leaseId}`}>

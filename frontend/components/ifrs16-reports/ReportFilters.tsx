@@ -60,11 +60,17 @@ export function ReportFilters({
     onFiltersChange({ ...filters, [key]: value });
   };
 
+  const setPeriodFilter = (key: 'years' | 'months', value: string) => {
+    setOne(key, value ? [value] : []);
+  };
+
   const yearList = yearOptions.length ? yearOptions : Array.from({ length: 6 }, (_, i) => new Date().getFullYear() - 2 + i);
   const monthList = monthOptions.length ? monthOptions : Array.from({ length: 12 }, (_, i) => ({ value: i + 1, label: new Date(2000, i, 1).toLocaleString('default', { month: 'short' }) }));
 
+  const contractSearchSpan = showYearMonth ? 'sm:col-span-2 lg:col-span-2' : 'sm:col-span-2 lg:col-span-4';
+
   return (
-    <div className="bg-[#f9fafb] border border-[#e2e8f0] rounded-lg p-3 mb-3">
+    <div className="bg-[#f9fafb] border border-[#e2e8f0] rounded-lg p-2.5 mb-2">
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 mb-2">
         <div>
           <label className="block text-[10px] font-semibold text-[#64748b] uppercase tracking-wide mb-0.5">Lessee</label>
@@ -103,7 +109,7 @@ export function ReportFilters({
           </select>
         </div>
         {showContractSearch && (
-          <div className="sm:col-span-2 lg:col-span-4">
+          <div className={contractSearchSpan}>
             <label className="block text-[10px] font-semibold text-[#64748b] uppercase tracking-wide mb-0.5">Contract Name</label>
             <input type="text" value={filters.contractName} onChange={(e) => setOne('contractName', e.target.value)} placeholder="Search contract..." className={inputClass} />
           </div>
@@ -111,26 +117,26 @@ export function ReportFilters({
         {showYearMonth && (
           <>
             <div>
-              <label className="block text-[10px] font-semibold text-[#64748b] uppercase tracking-wide mb-0.5">Years</label>
+              <label className="block text-[10px] font-semibold text-[#64748b] uppercase tracking-wide mb-0.5">Year</label>
               <select
-                multiple
-                value={filters.years}
-                onChange={(e) => setOne('years', Array.from(e.target.selectedOptions, (o) => o.value))}
-                className={inputClass + ' min-h-[80px]'}
+                value={filters.years[0] ?? ''}
+                onChange={(e) => setPeriodFilter('years', e.target.value)}
+                className={inputClass}
               >
+                <option value="">All</option>
                 {yearList.map((y) => (
                   <option key={y} value={String(y)}>{y}</option>
                 ))}
               </select>
             </div>
             <div>
-              <label className="block text-[10px] font-semibold text-[#64748b] uppercase tracking-wide mb-0.5">Months</label>
+              <label className="block text-[10px] font-semibold text-[#64748b] uppercase tracking-wide mb-0.5">Month</label>
               <select
-                multiple
-                value={filters.months}
-                onChange={(e) => setOne('months', Array.from(e.target.selectedOptions, (o) => o.value))}
-                className={inputClass + ' min-h-[80px]'}
+                value={filters.months[0] ?? ''}
+                onChange={(e) => setPeriodFilter('months', e.target.value)}
+                className={inputClass}
               >
+                <option value="">All</option>
                 {monthList.map((m) => (
                   <option key={m.value} value={String(m.value)}>{m.label}</option>
                 ))}
