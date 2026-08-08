@@ -1288,6 +1288,243 @@ export const ifrs15Api = {
       body: JSON.stringify(payload),
     }),
 
+  billingReconUploadBilling: (body: Record<string, unknown>) =>
+    firmApiCall<{ imported: number; errors: string[] }>('/api/ifrs15/billing-recon/upload-billing', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  billingReconUploadGl: (body: Record<string, unknown>) =>
+    firmApiCall<{ imported: number; errors: string[] }>('/api/ifrs15/billing-recon/upload-gl', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  billingReconRun: (body: { company_id?: string; period: string; contract_id?: string }) =>
+    firmApiCall<{
+      success: boolean;
+      results: Record<string, unknown>[];
+      count: number;
+      result: Record<string, unknown>;
+    }>('/api/ifrs15/billing-recon/run', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  billingReconResults: (params: { company_id?: string; period?: string; contract_id?: string }) => {
+    const qs = new URLSearchParams();
+    if (params.company_id) qs.set('company_id', params.company_id);
+    if (params.period) qs.set('period', params.period);
+    if (params.contract_id) qs.set('contract_id', params.contract_id);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return firmApiCall<{ success: boolean; results: Record<string, unknown>[]; count: number }>(
+      `/api/ifrs15/billing-recon/results${suffix}`
+    );
+  },
+
+  billingReconExceptions: (params: { company_id?: string; period?: string }) => {
+    const qs = new URLSearchParams();
+    if (params.company_id) qs.set('company_id', params.company_id);
+    if (params.period) qs.set('period', params.period);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return firmApiCall<{
+      success: boolean;
+      exceptions: Array<Record<string, unknown>>;
+      count: number;
+    }>(`/api/ifrs15/billing-recon/exceptions${suffix}`);
+  },
+
+  billingReconReview: (resultId: string, reviewedBy: string) =>
+    firmApiCall<{ success: boolean; result: Record<string, unknown> }>(
+      `/api/ifrs15/billing-recon/results/${encodeURIComponent(resultId)}/review`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ reviewed_by: reviewedBy }),
+      }
+    ),
+
+  modificationsList: (params: { company_id?: string; contract_id?: string; status?: string }) => {
+    const qs = new URLSearchParams();
+    if (params.company_id) qs.set('company_id', params.company_id);
+    if (params.contract_id) qs.set('contract_id', params.contract_id);
+    if (params.status) qs.set('status', params.status);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return firmApiCall<{ success: boolean; modifications: Record<string, unknown>[]; count: number }>(
+      `/api/ifrs15/modifications${suffix}`
+    );
+  },
+
+  modificationsContracts: (companyId?: string) => {
+    const qs = companyId ? `?company_id=${encodeURIComponent(companyId)}` : '';
+    return firmApiCall<{ success: boolean; contracts: Record<string, unknown>[] }>(
+      `/api/ifrs15/modifications/contracts${qs}`
+    );
+  },
+
+  modificationsGet: (id: string) =>
+    firmApiCall<{
+      success: boolean;
+      modification: Record<string, unknown>;
+      audit_trail: Record<string, unknown>[];
+    }>(`/api/ifrs15/modifications/${encodeURIComponent(id)}`),
+
+  modificationsClassify: (body: Record<string, unknown>) =>
+    firmApiCall<{
+      success: boolean;
+      modification: Record<string, unknown>;
+      classification: Record<string, unknown>;
+      catch_up: Record<string, unknown> | null;
+    }>('/api/ifrs15/modifications/classify', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  modificationsCatchup: (body: { modification_id: string; override_progress_pct?: number }) =>
+    firmApiCall<{ success: boolean; modification: Record<string, unknown>; catch_up: Record<string, unknown> }>(
+      '/api/ifrs15/modifications/calculate-catchup',
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+
+  modificationsOverride: (id: string, body: { human_treatment: string; reason: string; actor: string }) =>
+    firmApiCall<{ success: boolean; modification: Record<string, unknown> }>(
+      `/api/ifrs15/modifications/${encodeURIComponent(id)}/override`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+
+  modificationsApprove: (id: string, approvedBy: string) =>
+    firmApiCall<{ success: boolean; modification: Record<string, unknown> }>(
+      `/api/ifrs15/modifications/${encodeURIComponent(id)}/approve`,
+      { method: 'POST', body: JSON.stringify({ approved_by: approvedBy }) }
+    ),
+
+  modificationsGenerateMemo: (id: string) =>
+    firmApiCall<{ success: boolean; memo: string; modification: Record<string, unknown> }>(
+      `/api/ifrs15/modifications/${encodeURIComponent(id)}/generate-memo`,
+      { method: 'POST' }
+    ),
+
+  modificationsPostJe: (id: string, body: { je_date: string; actor: string }) =>
+    firmApiCall<{ success: boolean; modification: Record<string, unknown> }>(
+      `/api/ifrs15/modifications/${encodeURIComponent(id)}/post-je`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+
+  rpoDashboardCurrent: (companyId?: string) => {
+    const qs = companyId ? `?company_id=${encodeURIComponent(companyId)}` : '';
+    return firmApiCall<{
+      success: boolean;
+      snapshot: Record<string, unknown>;
+      contract_detail: Record<string, unknown>[];
+      groups: Record<string, unknown>;
+    }>(`/api/ifrs15/rpo-dashboard/current${qs}`);
+  },
+
+  rpoDashboardSnapshots: (params: { company_id?: string; last_n_periods?: number }) => {
+    const qs = new URLSearchParams();
+    if (params.company_id) qs.set('company_id', params.company_id);
+    if (params.last_n_periods) qs.set('last_n_periods', String(params.last_n_periods));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return firmApiCall<{ success: boolean; snapshots: Record<string, unknown>[]; count: number }>(
+      `/api/ifrs15/rpo-dashboard/snapshots${suffix}`
+    );
+  },
+
+  rpoDashboardSnapshot: (id: string) =>
+    firmApiCall<{
+      success: boolean;
+      snapshot: Record<string, unknown>;
+      contract_detail: Record<string, unknown>[];
+      groups: Record<string, unknown>;
+    }>(`/api/ifrs15/rpo-dashboard/snapshots/${encodeURIComponent(id)}`),
+
+  rpoDashboardWaterfall: (params: { company_id?: string; periods?: number }) => {
+    const qs = new URLSearchParams();
+    if (params.company_id) qs.set('company_id', params.company_id);
+    if (params.periods) qs.set('periods', String(params.periods));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return firmApiCall<{ success: boolean; waterfall: Record<string, unknown>[]; count: number }>(
+      `/api/ifrs15/rpo-dashboard/waterfall${suffix}`
+    );
+  },
+
+  rpoDashboardRun: (body: {
+    company_id?: string;
+    snapshot_date?: string;
+    period?: string;
+    ltm_revenue?: number;
+  }) =>
+    firmApiCall<{
+      success: boolean;
+      snapshot: Record<string, unknown>;
+      contract_detail: Record<string, unknown>[];
+      groups: Record<string, unknown>;
+    }>('/api/ifrs15/rpo-dashboard/run-snapshot', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  rpoDashboardExportPdf: async (params: { company_id?: string; snapshot_id?: string }) => {
+    try {
+      const qs = new URLSearchParams();
+      if (params.company_id) qs.set('company_id', params.company_id);
+      if (params.snapshot_id) qs.set('snapshot_id', params.snapshot_id);
+      const suffix = qs.toString() ? `?${qs.toString()}` : '';
+      const response = await fetch(`${API_URL}/api/ifrs15/rpo-dashboard/export-disclosure${suffix}`, {
+        method: 'POST',
+        headers: { 'X-Firm-Id': _firmId() },
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        return {
+          blob: null as Blob | null,
+          filename: null as string | null,
+          error: (err as { detail?: string }).detail || response.statusText,
+        };
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      return {
+        blob,
+        filename: match?.[1] || 'IFRS15_RPO_disclosure.pdf',
+        error: null as string | null,
+      };
+    } catch (error) {
+      return {
+        blob: null as Blob | null,
+        filename: null as string | null,
+        error: error instanceof Error ? error.message : 'Download failed',
+      };
+    }
+  },
+
+  modificationsMemoPdf: async (id: string) => {
+    try {
+      const response = await fetch(
+        `${API_URL}/api/ifrs15/modifications/${encodeURIComponent(id)}/memo-pdf`,
+        { headers: { 'X-Firm-Id': _firmId() } }
+      );
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        return {
+          blob: null as Blob | null,
+          filename: null as string | null,
+          error: (err as { detail?: string }).detail || response.statusText,
+        };
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      return { blob, filename: match?.[1] || 'modification_memo.pdf', error: null as string | null };
+    } catch (error) {
+      return {
+        blob: null as Blob | null,
+        filename: null as string | null,
+        error: error instanceof Error ? error.message : 'Download failed',
+      };
+    }
+  },
+
   realestateDeadlineTrackerExport: async (payload: Record<string, unknown>) => {
     try {
       const response = await fetch(`${API_URL}/api/ifrs15/realestate/deadline-tracker/export-excel`, {

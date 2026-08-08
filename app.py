@@ -5563,6 +5563,27 @@ except ImportError as _rev_rec_import_err:
     print(f"WARNING: Rev-rec reconciliation router not loaded: {_rev_rec_import_err}")
 
 try:
+    from backend.app.routers.ifrs15_billing_recon import router as _ifrs15_billing_recon_router
+
+    app.include_router(_ifrs15_billing_recon_router)
+except ImportError as _ifrs15_br_err:
+    print(f"WARNING: IFRS 15 billing recon router not loaded: {_ifrs15_br_err}")
+
+try:
+    from backend.app.routers.ifrs15_modifications import router as _ifrs15_modifications_router
+
+    app.include_router(_ifrs15_modifications_router)
+except ImportError as _ifrs15_mod_err:
+    print(f"WARNING: IFRS 15 modifications router not loaded: {_ifrs15_mod_err}")
+
+try:
+    from backend.app.routers.ifrs15_rpo_dashboard import router as _ifrs15_rpo_dashboard_router
+
+    app.include_router(_ifrs15_rpo_dashboard_router)
+except ImportError as _ifrs15_rpo_err:
+    print(f"WARNING: IFRS 15 RPO dashboard router not loaded: {_ifrs15_rpo_err}")
+
+try:
     from backend.app.routers.ifrs16_comparative import router as _ifrs16_comparative_router
 
     app.include_router(_ifrs16_comparative_router)

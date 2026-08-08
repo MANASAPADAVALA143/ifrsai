@@ -10,6 +10,7 @@ export type ModuleNavItem = {
   icon?: LucideIcon;
   href?: string;
   badge?: string;
+  description?: string;
 };
 
 export type ModuleNavGroup = {

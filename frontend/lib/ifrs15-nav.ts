@@ -4,12 +4,13 @@ import {
   ClipboardList,
   FileText,
   FolderOpen,
-  Layers,
-  PieChart,
+  BarChart3,
   Scale,
   Shield,
   Upload,
   Wallet,
+  GitCompare,
+  GitMerge,
 } from 'lucide-react';
 import type { ModuleNavGroup } from '@/components/module/ModuleSubNav';
 
@@ -29,6 +30,7 @@ export type Ifrs15NavId =
   | 'contract-costs'
   | 'licenses-ip'
   | 'tp-adjustments'
+  | 'billing-recon'
   | 'audit-trail'
   | 'client-report'
   | 'master-report';
@@ -63,7 +65,14 @@ export const IFRS15_NAV_GROUPS: ModuleNavGroup[] = [
     items: [
       { id: 'revenue-calculate', label: 'Revenue Calculate', icon: Calculator },
       { id: 'deferred-revenue', label: 'Deferred Revenue', icon: Wallet },
-      { id: 'rpo-disclosure', label: 'RPO Disclosure', icon: PieChart },
+      {
+        id: 'rpo-disclosure',
+        label: 'RPO Dashboard',
+        icon: BarChart3,
+        href: '/dashboard/ifrs15/rpo',
+        description: 'IFRS 15 §120 · Backlog waterfall + disclosure',
+        badge: 'UPGRADED',
+      },
     ],
   },
   {
@@ -72,13 +81,33 @@ export const IFRS15_NAV_GROUPS: ModuleNavGroup[] = [
     items: [
       { id: 'variable-consideration', label: 'Variable Consideration', icon: Scale },
       { id: 'principal-agent', label: 'Principal vs Agent', icon: Shield },
-      { id: 'contract-modifications', label: 'Contract Modifications', icon: Layers },
+      {
+        id: 'contract-modifications',
+        label: 'Contract Modifications',
+        icon: GitMerge,
+        href: '/dashboard/ifrs15/modifications',
+        description: 'IFRS 15.18-21 · AI classification + catch-up calc',
+        badge: 'UPGRADED',
+      },
       { id: 'warranties-material-rights', label: 'Warranties & Material Rights', icon: ClipboardList },
       { id: 'bill-and-hold', label: 'Bill-and-Hold', icon: FileText },
       { id: 'financing-component', label: 'Financing Component', icon: Wallet },
       { id: 'contract-costs', label: 'Contract Costs', icon: Calculator },
       { id: 'licenses-ip', label: 'Licenses of IP', icon: FileText },
       { id: 'tp-adjustments', label: 'TP Adjustments', icon: Scale },
+    ],
+  },
+  {
+    id: 'reconciliation',
+    title: 'RECONCILIATION',
+    items: [
+      {
+        id: 'billing-recon',
+        label: 'Billing Recon',
+        icon: GitCompare,
+        href: '/dashboard/ifrs15/billing-recon',
+        badge: 'NEW',
+      },
     ],
   },
   {
@@ -117,6 +146,7 @@ export function navIdToDashTab(navId: Ifrs15NavId): Ifrs15DashTab {
     'contract-costs': 'contract-costs',
     'licenses-ip': 'licenses-ip',
     'tp-adjustments': 'tp-adjustments',
+    'billing-recon': 'calculate',
     'audit-trail': 'audit-trail',
     'client-report': 'calculate',
     'master-report': 'calculate',

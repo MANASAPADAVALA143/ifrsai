@@ -3817,6 +3817,17 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <h3 className="text-lg font-bold text-text-primary">REMAINING PERFORMANCE OBLIGATIONS</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.120-122 — Mandatory Disclosure</p>
             </div>
+            <Link
+              href="/dashboard/ifrs15/rpo"
+              className="flex items-start justify-between gap-3 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2.5 hover:bg-teal-100 transition-colors"
+            >
+              <div>
+                <p className="text-sm font-semibold text-teal-900">View Full RPO Dashboard →</p>
+                <p className="text-xs text-teal-800 mt-0.5">
+                  Portfolio backlog, IFRS 15 §120 time bands, waterfall and AI disclosure draft.
+                </p>
+              </div>
+            </Link>
             {contractContextBar()}
             <div className="rounded-lg border border-border-default bg-bg-light p-4 text-sm text-text-secondary">
               IFRS 15.120 requires disclosure of the aggregate transaction price allocated to unsatisfied performance obligations at period end, and when the entity expects to recognise that revenue. This note is required in the annual report of any listed company.
@@ -7882,6 +7893,18 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                   <h3 className="text-base font-bold text-text-primary">Contract Modifications</h3>
                   <p className="text-xs text-text-muted mt-1">IFRS 15.18–21</p>
                 </div>
+                <Link
+                  href="/dashboard/ifrs15/modifications"
+                  className="mb-4 flex items-start justify-between gap-3 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2.5 hover:bg-teal-100 transition-colors"
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-teal-900">Full modification workflow (upgraded)</p>
+                    <p className="text-xs text-teal-800 mt-0.5">
+                      AI classification (IFRS 15.18–21), catch-up math, memo, JE posting and audit trail.
+                    </p>
+                  </div>
+                  <span className="text-xs font-semibold text-teal-700 shrink-0 mt-0.5">Open →</span>
+                </Link>
                 {contractContextBar('modification')}
 
                 {modificationHistory.length > 0 && (
@@ -8830,6 +8853,9 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                   <div>
                     <h3 className="text-base font-bold text-text-primary">RPO Disclosure</h3>
                     <p className="text-xs text-text-muted mt-1">Remaining performance obligations timing</p>
+                    <Link href="/dashboard/ifrs15/rpo" className="text-xs font-semibold text-teal-700 hover:underline mt-1 inline-block">
+                      View Full RPO Dashboard →
+                    </Link>
                   </div>
                   <Button
                     variant="primary"
