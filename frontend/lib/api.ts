@@ -1498,6 +1498,84 @@ export const ifrs15Api = {
     }
   },
 
+  evidencePackList: (companyId?: string) => {
+    const qs = companyId ? `?company_id=${encodeURIComponent(companyId)}` : '';
+    return firmApiCall<{ success: boolean; packs: Record<string, unknown>[]; count: number }>(
+      `/api/ifrs15/evidence-pack${qs}`
+    );
+  },
+
+  evidencePackGet: (id: string) =>
+    firmApiCall<{
+      success: boolean;
+      pack: Record<string, unknown>;
+      checklist: Record<string, unknown>[];
+      grouped: Record<string, Record<string, unknown>[]>;
+      summary: Record<string, unknown>;
+      evidence: Record<string, unknown>;
+    }>(`/api/ifrs15/evidence-pack/${encodeURIComponent(id)}`),
+
+  evidencePackGenerate: (body: {
+    company_id?: string;
+    period: string;
+    period_type?: string;
+    prepared_by?: string;
+  }) =>
+    firmApiCall<{
+      success: boolean;
+      pack: Record<string, unknown>;
+      checklist: Record<string, unknown>[];
+      summary: Record<string, unknown>;
+      evidence: Record<string, unknown>;
+    }>('/api/ifrs15/evidence-pack/generate', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  evidencePackSubmitReview: (id: string, reviewedBy: string) =>
+    firmApiCall<{ success: boolean; pack: Record<string, unknown> }>(
+      `/api/ifrs15/evidence-pack/${encodeURIComponent(id)}/submit-review`,
+      { method: 'PATCH', body: JSON.stringify({ reviewed_by: reviewedBy }) }
+    ),
+
+  evidencePackApprove: (id: string, body: { approved_by: string; issued_to?: string }) =>
+    firmApiCall<{ success: boolean; pack: Record<string, unknown> }>(
+      `/api/ifrs15/evidence-pack/${encodeURIComponent(id)}/approve`,
+      { method: 'PATCH', body: JSON.stringify(body) }
+    ),
+
+  evidencePackExport: async (id: string, kind: 'pdf' | 'excel') => {
+    try {
+      const path = kind === 'pdf' ? 'export-pdf' : 'export-excel';
+      const response = await fetch(
+        `${API_URL}/api/ifrs15/evidence-pack/${encodeURIComponent(id)}/${path}`,
+        { method: 'POST', headers: { 'X-Firm-Id': _firmId() } }
+      );
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        return {
+          blob: null as Blob | null,
+          filename: null as string | null,
+          error: (err as { detail?: string }).detail || response.statusText,
+        };
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      return {
+        blob,
+        filename: match?.[1] || (kind === 'pdf' ? 'AEP.pdf' : 'AEP.xlsx'),
+        error: null as string | null,
+      };
+    } catch (error) {
+      return {
+        blob: null as Blob | null,
+        filename: null as string | null,
+        error: error instanceof Error ? error.message : 'Download failed',
+      };
+    }
+  },
+
   modificationsMemoPdf: async (id: string) => {
     try {
       const response = await fetch(

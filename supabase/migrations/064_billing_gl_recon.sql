@@ -75,3 +75,7 @@ CREATE INDEX IF NOT EXISTS idx_ifrs15_recon_company_period
   ON ifrs15_recon_results(company_id, period);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_ifrs15_recon_scope
   ON ifrs15_recon_results(company_id, period, COALESCE(contract_id, ''), contract_type);
+
+GRANT ALL ON TABLE ifrs15_billing_transactions TO anon, authenticated, service_role;
+GRANT ALL ON TABLE ifrs15_gl_postings TO anon, authenticated, service_role;
+GRANT ALL ON TABLE ifrs15_recon_results TO anon, authenticated, service_role;

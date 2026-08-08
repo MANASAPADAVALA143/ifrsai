@@ -85,3 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_ifrs15_rpo_detail_company_type
   ON ifrs15_rpo_contract_detail(company_id, contract_type);
 CREATE INDEX IF NOT EXISTS idx_ifrs15_rpo_src_company
   ON ifrs15_rpo_contracts(company_id);
+
+GRANT ALL ON TABLE ifrs15_rpo_contracts TO anon, authenticated, service_role;
+GRANT ALL ON TABLE ifrs15_rpo_snapshots TO anon, authenticated, service_role;
+GRANT ALL ON TABLE ifrs15_rpo_contract_detail TO anon, authenticated, service_role;

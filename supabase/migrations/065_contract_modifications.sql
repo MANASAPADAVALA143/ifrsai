@@ -69,3 +69,6 @@ CREATE INDEX IF NOT EXISTS idx_ifrs15_mods_company_status
   ON ifrs15_contract_modifications(company_id, status);
 CREATE INDEX IF NOT EXISTS idx_ifrs15_mod_audit_mod_id
   ON ifrs15_modification_audit(modification_id);
+
+GRANT ALL ON TABLE ifrs15_contract_modifications TO anon, authenticated, service_role;
+GRANT ALL ON TABLE ifrs15_modification_audit TO anon, authenticated, service_role;

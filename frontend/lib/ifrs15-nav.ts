@@ -11,6 +11,7 @@ import {
   Wallet,
   GitCompare,
   GitMerge,
+  ShieldCheck,
 } from 'lucide-react';
 import type { ModuleNavGroup } from '@/components/module/ModuleSubNav';
 
@@ -33,7 +34,8 @@ export type Ifrs15NavId =
   | 'billing-recon'
   | 'audit-trail'
   | 'client-report'
-  | 'master-report';
+  | 'master-report'
+  | 'evidence-pack';
 
 export type Ifrs15DashTab =
   | 'portfolio'
@@ -117,6 +119,14 @@ export const IFRS15_NAV_GROUPS: ModuleNavGroup[] = [
       { id: 'audit-trail', label: 'Audit Trail', icon: ClipboardList },
       { id: 'client-report', label: 'Client PDF Report', icon: FileText },
       { id: 'master-report', label: 'Master Report & Excel', icon: FileText },
+      {
+        id: 'evidence-pack',
+        label: 'Audit Evidence Pack',
+        icon: ShieldCheck,
+        href: '/dashboard/ifrs15/evidence-pack',
+        description: 'IFRS 15 · Complete auditor-ready evidence package',
+        badge: 'NEW',
+      },
     ],
   },
 ];
@@ -150,6 +160,7 @@ export function navIdToDashTab(navId: Ifrs15NavId): Ifrs15DashTab {
     'audit-trail': 'audit-trail',
     'client-report': 'calculate',
     'master-report': 'calculate',
+    'evidence-pack': 'calculate',
   };
   return map[navId] ?? 'calculate';
 }

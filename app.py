@@ -5584,6 +5584,13 @@ except ImportError as _ifrs15_rpo_err:
     print(f"WARNING: IFRS 15 RPO dashboard router not loaded: {_ifrs15_rpo_err}")
 
 try:
+    from backend.app.routers.ifrs15_evidence_pack import router as _ifrs15_evidence_pack_router
+
+    app.include_router(_ifrs15_evidence_pack_router)
+except ImportError as _ifrs15_aep_err:
+    print(f"WARNING: IFRS 15 evidence pack router not loaded: {_ifrs15_aep_err}")
+
+try:
     from backend.app.routers.ifrs16_comparative import router as _ifrs16_comparative_router
 
     app.include_router(_ifrs16_comparative_router)
