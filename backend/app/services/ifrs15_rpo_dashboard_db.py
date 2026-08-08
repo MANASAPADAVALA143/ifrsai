@@ -69,6 +69,10 @@ class IFRS15RpoDashboardDB:
     def delete_details(self, snapshot_id: str) -> None:
         self.client.table("ifrs15_rpo_contract_detail").delete().eq("snapshot_id", snapshot_id).execute()
 
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        self.delete_details(snapshot_id)
+        self.client.table("ifrs15_rpo_snapshots").delete().eq("id", snapshot_id).execute()
+
     def insert_details(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not rows:
             return []
