@@ -433,7 +433,7 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle, hidePageHeade
       ) : null}
 
       {/* Main Content Area */}
-      <div className={cn('flex-1 flex flex-col', hideMainSidebar ? '' : 'ml-[220px]')}>
+      <div className={cn('flex-1 flex flex-col min-w-0', hideMainSidebar ? '' : 'ml-[220px]')}>
         <header className="min-h-14 bg-white border-b border-border-default sticky top-0 z-40 flex items-center justify-between gap-4 px-4 lg:px-7 py-2">
           {hideMainSidebar ? (
             <div className="flex items-center gap-3 min-w-0 flex-1 overflow-x-auto">
