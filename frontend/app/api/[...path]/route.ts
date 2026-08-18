@@ -58,6 +58,10 @@ async function proxy(req: NextRequest, pathSegments: string[]) {
 
   const outHeaders = new Headers(upstream.headers);
   outHeaders.delete("transfer-encoding");
+  // fetch() transparently decompresses the body, but leaves this header on
+  // upstream.headers — forwarding it makes the browser try to decode
+  // already-decompressed bytes and fail with ERR_CONTENT_DECODING_FAILED.
+  outHeaders.delete("content-encoding");
 
   return new Response(upstream.body, {
     status: upstream.status,
