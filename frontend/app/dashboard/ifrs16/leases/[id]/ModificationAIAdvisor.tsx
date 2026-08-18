@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/Button';
 import { ifrs16Api } from '@/lib/api';
@@ -84,9 +84,18 @@ export function ModificationAIAdvisor({
     setAdvice(data as ModificationAdvice);
   }, [mergedHints, modificationInputs]);
 
+  // fetchAdvice's identity changes on every parent render (modificationInputs
+  // is passed as a fresh inline object literal), so depending on it directly
+  // would refetch on every render instead of only when the content actually
+  // changes. Route through a ref so the effect depends only on payloadKey.
+  const fetchAdviceRef = useRef(fetchAdvice);
   useEffect(() => {
-    fetchAdvice();
-  }, [payloadKey, fetchAdvice]);
+    fetchAdviceRef.current = fetchAdvice;
+  });
+
+  useEffect(() => {
+    fetchAdviceRef.current();
+  }, [payloadKey]);
 
   if (collapsed) {
     return (
