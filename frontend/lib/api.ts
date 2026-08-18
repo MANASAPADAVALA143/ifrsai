@@ -73,19 +73,24 @@ async function apiPostRealestateEscrowGate<T>(
 
 async function apiCall<T>(
   endpoint: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  timeoutMs?: number
 ): Promise<ApiResponse<T>> {
+  const controller = timeoutMs ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
     const method = (options.method ?? 'GET').toString().toUpperCase();
     const hasBody = options.body != null && options.body !== '';
     const jsonContentType = hasBody && method !== 'GET' && method !== 'HEAD';
     const response = await fetch(`${API_URL}${endpoint}`, {
       ...options,
+      ...(controller ? { signal: controller.signal } : {}),
       headers: {
         ...(jsonContentType ? { 'Content-Type': 'application/json' } : {}),
         ...options.headers,
       },
     });
+    if (timeoutId) clearTimeout(timeoutId);
 
     const bodyText = await response.text();
     if (!response.ok) {
@@ -105,6 +110,10 @@ async function apiCall<T>(
     }
     return { data };
   } catch (error) {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === 'AbortError') {
+      return { error: getApiHealthTimeoutMessage() };
+    }
     const msg = error instanceof Error ? error.message : 'An error occurred';
     const net =
       msg === 'Failed to fetch' ||
@@ -119,10 +128,14 @@ async function apiCall<T>(
 // IFRS 16 endpoints
 export const ifrs16Api = {
   calculate: async (leaseData: any) => {
-    return apiCall('/api/calculate', {
-      method: 'POST',
-      body: JSON.stringify(leaseData),
-    });
+    return apiCall(
+      '/api/calculate',
+      {
+        method: 'POST',
+        body: JSON.stringify(leaseData),
+      },
+      45000
+    );
   },
 
   modificationAdvice: async (body: {
