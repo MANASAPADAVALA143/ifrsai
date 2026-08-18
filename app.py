@@ -1663,7 +1663,7 @@ async def qa_report_email(request: QAReportEmailRequest):
 
 
 @app.post("/api/calculate", response_model=CalculationResponse)
-async def calculate_lease(request: LeaseRequest):
+async def calculate_lease(request: LeaseRequest, background_tasks: BackgroundTasks):
     """
     Calculate IFRS 16 lease accounting metrics
     
@@ -1704,62 +1704,74 @@ async def calculate_lease(request: LeaseRequest):
             print(f"Excel export failed (non-critical): {excel_err}")
             file_id = None
         
-        # Auto-trigger RAG embedding only when company_id is provided.
-        engine = get_rag_engine() if request.company_id else None
-        if engine:
-            try:
-                # Prepare content for embedding (use original results with DataFrames converted)
-                embed_content = {
-                    "lease_id": request.lease_id,
-                    "company_id": request.company_id,
-                    "asset_description": request.asset_description,
-                    "lessee_name": request.lessee_name,
-                    "lessor_name": request.lessor_name,
-                    "commencement_date": request.commencement_date,
-                    "lease_term_months": request.lease_term_months,
-                    "monthly_payment": request.monthly_payment,
-                    "annual_discount_rate": request.annual_discount_rate,
-                    "currency": request.currency,
-                    "lease_liability": float(results['lease_liability']),
-                    "rou_asset": float(results['rou_asset']),
-                    "monthly_depreciation": float(results['monthly_depreciation']),
-                    "total_interest": float(results['total_interest']),
-                    "year_1_impact": results_json['year_1_impact']
-                }
-                
-                # Store in RAG engine
-                rag_result = engine.embed_and_store(
-                    company_id=request.company_id,
-                    document_type="lease",
-                    content=embed_content,
-                    document_id=request.lease_id
-                )
-                print(f"RAG embedding completed: {rag_result.get('status')}")
+        # RAG embedding is best-effort and can be slow on first load (lazily
+        # loads ChromaDB + a sentence-transformer model, ~400MB). Run it in
+        # the background so it can't block or time out the calculation
+        # response - the request no longer waits on it.
+        if request.company_id:
+            def _index_lease_rag(
+                _request=request,
+                _results=results,
+                _results_json=results_json,
+            ):
+                engine = get_rag_engine()
+                if not engine:
+                    return
                 try:
-                    from ifrs16_rag_leases import index_lease
-                    index_lease(
-                        engine,
-                        request.lease_id,
-                        "",
-                        {
-                            "property_name": request.asset_description,
-                            "start_date": request.commencement_date,
-                            "monthly_payment": request.monthly_payment,
-                            "currency": request.currency,
-                            "ibr": request.annual_discount_rate,
-                            "tenant_name": request.lessee_name,
-                            "lease_liability": float(results["lease_liability"]),
-                            "rou_asset": float(results["rou_asset"]),
-                        },
-                        company_id=request.company_id or "default",
+                    # Prepare content for embedding (use original results with DataFrames converted)
+                    embed_content = {
+                        "lease_id": _request.lease_id,
+                        "company_id": _request.company_id,
+                        "asset_description": _request.asset_description,
+                        "lessee_name": _request.lessee_name,
+                        "lessor_name": _request.lessor_name,
+                        "commencement_date": _request.commencement_date,
+                        "lease_term_months": _request.lease_term_months,
+                        "monthly_payment": _request.monthly_payment,
+                        "annual_discount_rate": _request.annual_discount_rate,
+                        "currency": _request.currency,
+                        "lease_liability": float(_results['lease_liability']),
+                        "rou_asset": float(_results['rou_asset']),
+                        "monthly_depreciation": float(_results['monthly_depreciation']),
+                        "total_interest": float(_results['total_interest']),
+                        "year_1_impact": _results_json['year_1_impact']
+                    }
+
+                    # Store in RAG engine
+                    rag_result = engine.embed_and_store(
+                        company_id=_request.company_id,
+                        document_type="lease",
+                        content=embed_content,
+                        document_id=_request.lease_id
                     )
-                except Exception as lease_idx_err:
-                    print(f"Lease RAG index (non-critical): {lease_idx_err}")
-                
-            except Exception as rag_error:
-                print(f"RAG embedding failed (non-critical): {rag_error}")
-                # Don't fail the request if RAG embedding fails
-        
+                    print(f"RAG embedding completed: {rag_result.get('status')}")
+                    try:
+                        from ifrs16_rag_leases import index_lease
+                        index_lease(
+                            engine,
+                            _request.lease_id,
+                            "",
+                            {
+                                "property_name": _request.asset_description,
+                                "start_date": _request.commencement_date,
+                                "monthly_payment": _request.monthly_payment,
+                                "currency": _request.currency,
+                                "ibr": _request.annual_discount_rate,
+                                "tenant_name": _request.lessee_name,
+                                "lease_liability": float(_results["lease_liability"]),
+                                "rou_asset": float(_results["rou_asset"]),
+                            },
+                            company_id=_request.company_id or "default",
+                        )
+                    except Exception as lease_idx_err:
+                        print(f"Lease RAG index (non-critical): {lease_idx_err}")
+
+                except Exception as rag_error:
+                    print(f"RAG embedding failed (non-critical): {rag_error}")
+                    # Don't fail the request if RAG embedding fails
+
+            background_tasks.add_task(_index_lease_rag)
+
         gc.collect()
         return CalculationResponse(
             status="success",
