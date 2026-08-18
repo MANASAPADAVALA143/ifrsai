@@ -89,7 +89,9 @@ import { IFRS16_INPUT_CLASS, IFRS16_LABEL_CLASS } from '@/lib/ifrs16-ui-styles';
 // ---------------------------------------------------------------------------
 // ERP push buttons (inline)
 // ---------------------------------------------------------------------------
-const _ERP_API = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:9000';
+// Same-origin by default so calls go through the Next.js /api proxy (see app/api/[...path]/route.ts),
+// consistent with API_URL in lib/api.ts. NEXT_PUBLIC_API_URL should stay unset in normal deployments.
+const _ERP_API = process.env.NEXT_PUBLIC_API_URL || '';
 
 function _ErpPushButton({
   label, color, statusUrl, pushUrl, buildPayload, successMsg,
