@@ -307,6 +307,8 @@ rag_engine = None
 
 def get_rag_engine():
     """Initialize RAG engine on first call. Loads ChromaDB + SentenceTransformer (~400MB)."""
+    if os.getenv("DISABLE_RAG", "").lower() in ("1", "true", "yes"):
+        return None
     global rag_engine
     if rag_engine is not None:
         return rag_engine
