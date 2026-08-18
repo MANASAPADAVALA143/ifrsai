@@ -42,9 +42,9 @@ aiofiles==24.1.0
 # Utilities
 python-multipart==0.0.12
 
-# RAG (Retrieval-Augmented Generation)
-chromadb==0.5.23
-sentence-transformers==3.3.1
-langchain==0.3.7
-langchain-community==0.3.7
-langchain-anthropic==0.3.0
+# RAG dependencies removed — install separately via requirements-rag.txt
+# chromadb==0.5.23
+# sentence-transformers==3.3.1  # pulls in torch (~500MB) + CUDA drivers (~2GB)
+# langchain==0.3.7
+# langchain-community==0.3.7
+# langchain-anthropic==0.3.0
