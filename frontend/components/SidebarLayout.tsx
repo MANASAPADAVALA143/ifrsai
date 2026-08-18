@@ -496,7 +496,12 @@ export function SidebarLayout({ children, pageTitle, pageSubtitle, hidePageHeade
             </div>
           ) : (
             <div className="flex items-center gap-2 text-sm text-text-secondary min-w-0">
-              <span>IFRS</span>
+              <Link
+                href={activeModule ? moduleSwitch.find((m) => m.module === activeModule)?.href ?? '/dashboard/ifrs16' : '/dashboard/ifrs16'}
+                className="hover:text-orange-primary hover:underline shrink-0"
+              >
+                IFRS
+              </Link>
               <ChevronRight className="w-4 h-4 shrink-0" />
               <span className="text-text-primary font-medium truncate">{pageTitle}</span>
             </div>
