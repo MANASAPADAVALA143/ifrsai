@@ -282,6 +282,36 @@ export const ifrs16Api = {
     return { blob: await response.blob(), exportedCount, requestedCount };
   },
 
+  /**
+   * Commercial lease-terms Excel from raw extraction JSON (no IFRS 16 calculation).
+   * Accepts leases[] or a single extracted_data object.
+   */
+  exportLeaseTermsExcel: async (body: {
+    leases?: Record<string, unknown>[];
+    extracted_data?: Record<string, unknown>;
+    lease_id?: string;
+  }) => {
+    const response = await fetch(`${API_URL}/api/export-lease-terms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      let msg = `Lease terms export failed (${response.status})`;
+      try {
+        const err = JSON.parse(text) as { detail?: unknown };
+        if (typeof err.detail === 'string') msg = err.detail;
+        else if (err.detail != null) msg = JSON.stringify(err.detail);
+      } catch {
+        const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 300);
+        if (snippet) msg = `${msg}. ${snippet}`;
+      }
+      throw new Error(msg);
+    }
+    return response.blob();
+  },
+
   bulkTemplateUrl: () => `${API_URL}/api/ifrs16/bulk-template`,
 
   bulkCalculate: async (leases: unknown[]) =>
@@ -504,6 +534,33 @@ export const alertsApi = {
     return apiCall<{ alerts: any[] }>('/api/ifrs16/alerts/check', {
       method: 'POST',
       body: JSON.stringify({ leases }),
+    });
+  },
+  /** n8n / cron: scan all ifrs16_leases for notice, escalation, break, expiry deadlines. */
+  scanDeadlines: async (opts?: {
+    firmId?: string;
+    horizonDays?: number;
+    status?: string;
+    limit?: number;
+  }) => {
+    const firmId = opts?.firmId || getCurrentFirmId() || '';
+    return apiCall<{
+      status: string;
+      firm_id: string;
+      leases_scanned: number;
+      horizon_days: number;
+      summary: Record<string, number>;
+      action_required_count: number;
+      alerts: Array<Record<string, unknown>>;
+    }>('/api/ifrs16/alerts/scan-deadlines', {
+      method: 'POST',
+      headers: firmId ? { 'X-Firm-Id': firmId } : undefined,
+      body: JSON.stringify({
+        firm_id: firmId || undefined,
+        horizon_days: opts?.horizonDays ?? 90,
+        status: opts?.status,
+        limit: opts?.limit ?? 2000,
+      }),
     });
   },
 };
@@ -1580,6 +1637,92 @@ export const ifrs15Api = {
         filename: match?.[1] || (kind === 'pdf' ? 'AEP.pdf' : 'AEP.xlsx'),
         error: null as string | null,
       };
+    } catch (error) {
+      return {
+        blob: null as Blob | null,
+        filename: null as string | null,
+        error: error instanceof Error ? error.message : 'Download failed',
+      };
+    }
+  },
+
+  paFullList: (params: { company_id?: string; status?: string; determination?: string }) => {
+    const qs = new URLSearchParams();
+    if (params.company_id) qs.set('company_id', params.company_id);
+    if (params.status) qs.set('status', params.status);
+    if (params.determination) qs.set('determination', params.determination);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return firmApiCall<{ success: boolean; assessments: Record<string, unknown>[]; count: number }>(
+      `/api/ifrs15/principal-agent-full${suffix}`
+    );
+  },
+
+  paFullSummary: (companyId?: string) => {
+    const qs = companyId ? `?company_id=${encodeURIComponent(companyId)}` : '';
+    return firmApiCall<{
+      success: boolean;
+      total_assessments: number;
+      principal_count: number;
+      agent_count: number;
+      judgment_required_count: number;
+      total_gross_at_risk: number;
+      pending_approval: number;
+    }>(`/api/ifrs15/principal-agent-full/portfolio-summary${qs}`);
+  },
+
+  paFullGet: (id: string) =>
+    firmApiCall<{
+      success: boolean;
+      assessment: Record<string, unknown>;
+      audit_trail: Record<string, unknown>[];
+    }>(`/api/ifrs15/principal-agent-full/${encodeURIComponent(id)}`),
+
+  paFullAssess: (body: Record<string, unknown>) =>
+    firmApiCall<{
+      success: boolean;
+      assessment: Record<string, unknown>;
+      classification: Record<string, unknown>;
+    }>('/api/ifrs15/principal-agent-full/assess', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  paFullOverride: (id: string, body: { human_determination: string; reason: string; actor: string }) =>
+    firmApiCall<{ success: boolean; assessment: Record<string, unknown> }>(
+      `/api/ifrs15/principal-agent-full/${encodeURIComponent(id)}/override`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+
+  paFullApprove: (id: string, approvedBy: string) =>
+    firmApiCall<{ success: boolean; assessment: Record<string, unknown> }>(
+      `/api/ifrs15/principal-agent-full/${encodeURIComponent(id)}/approve`,
+      { method: 'POST', body: JSON.stringify({ approved_by: approvedBy }) }
+    ),
+
+  paFullGenerateMemo: (id: string) =>
+    firmApiCall<{ success: boolean; memo: string; assessment: Record<string, unknown> }>(
+      `/api/ifrs15/principal-agent-full/generate-memo/${encodeURIComponent(id)}`,
+      { method: 'POST' }
+    ),
+
+  paFullMemoPdf: async (id: string) => {
+    try {
+      const response = await fetch(
+        `${API_URL}/api/ifrs15/principal-agent-full/${encodeURIComponent(id)}/memo-pdf`,
+        { headers: { 'X-Firm-Id': _firmId() } }
+      );
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        return {
+          blob: null as Blob | null,
+          filename: null as string | null,
+          error: (err as { detail?: string }).detail || response.statusText,
+        };
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      return { blob, filename: match?.[1] || 'pa_memo.pdf', error: null as string | null };
     } catch (error) {
       return {
         blob: null as Blob | null,

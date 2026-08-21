@@ -87,12 +87,21 @@ Extract the following in JSON format. For each field provide:
 
 CRITICAL IFRS 16 EXTRACTION RULES:
 - rent_free_months: count months with zero rent at commencement (e.g. "2 months rent-free" → 2).
+- fit_out_period_months: landlord/tenant fit-out or handover fit-out months SEPARATE from rent-free
+  (e.g. "3 months fit-out then rent starts" → 3). Do NOT double-count into rent_free_months unless
+  the contract explicitly calls the same period rent-free.
 - non_lease_component: monthly amount for service charges, facilities management, maintenance,
   CAM, or any payment explicitly excluded from IFRS 16 lease liability. Do NOT include in
   monthly_amount if stated separately; if only a combined total is given, subtract the
   non-lease portion to derive monthly_amount (lease component).
 - escalation_clause: include fixed % step-ups (e.g. "5% at month 12") even when not CPI-linked.
 - monthly_amount: the lease component used for IFRS 16 measurement (base rent only).
+- security_deposit_amount / security_deposit_refund_days: refundable deposit and days after
+  expiry/handover when deposit must be returned.
+- renewal_type: exactly one of "auto" | "manual" | "none".
+- renewal_notice_period_days: days of advance notice required to renew or not renew.
+- break_clause_penalty_amount / break_clause_eligible_after_months: early-exit penalty and
+  months from commencement before break may be exercised.
 
 REQUIRED FIELDS:
 
@@ -174,6 +183,12 @@ REQUIRED FIELDS:
       "source_text": "quote",
       "assumptions": "explanation"
     }},
+    "fit_out_period_months": {{
+      "value": integer (0 if none; separate from rent_free_months),
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
     "non_lease_component": {{
       "value": number or 0 (monthly service charge / CAM / maintenance excluded from IFRS 16),
       "confidence": 0-100,
@@ -194,6 +209,20 @@ REQUIRED FIELDS:
     }},
     "variable_payments": {{
       "value": "any usage-based or contingent payments",
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }}
+  }},
+  "deposits": {{
+    "security_deposit_amount": {{
+      "value": number or null (refundable deposit; no currency symbol),
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
+    "security_deposit_refund_days": {{
+      "value": integer or null (days after expiry/handover to refund deposit),
       "confidence": 0-100,
       "source_text": "quote",
       "assumptions": "explanation"
@@ -246,6 +275,18 @@ REQUIRED FIELDS:
       "source_text": "quote",
       "assumptions": "explanation"
     }},
+    "renewal_type": {{
+      "value": "auto" or "manual" or "none",
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
+    "renewal_notice_period_days": {{
+      "value": integer or null (days of notice to renew / not renew),
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
     "purchase_option": {{
       "value": "description or null",
       "confidence": 0-100,
@@ -254,6 +295,18 @@ REQUIRED FIELDS:
     }},
     "termination_clause": {{
       "value": "description",
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
+    "break_clause_penalty_amount": {{
+      "value": number or null (early-exit / break penalty amount),
+      "confidence": 0-100,
+      "source_text": "quote",
+      "assumptions": "explanation"
+    }},
+    "break_clause_eligible_after_months": {{
+      "value": integer or null (months from commencement before break may be exercised),
       "confidence": 0-100,
       "source_text": "quote",
       "assumptions": "explanation"

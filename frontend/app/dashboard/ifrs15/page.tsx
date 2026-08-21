@@ -3116,6 +3116,11 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
 
   const handleIfrs15NavSelect = (navId: string) => {
     const id = navId as Ifrs15NavId;
+    const navItem = IFRS15_NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === id);
+    if (navItem?.href) {
+      window.location.assign(navItem.href);
+      return;
+    }
     setActiveNavId(id);
     setIfrs15DashTab(navIdToDashTab(id));
     const step = navIdToCalculateStep(id);
@@ -4353,6 +4358,15 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
               <h3 className="text-lg font-bold text-text-primary">PRINCIPAL vs AGENT ASSESSMENT</h3>
               <p className="text-xs text-text-muted mt-1">IFRS 15.B34-B38</p>
             </div>
+            <Link
+              href="/dashboard/ifrs15/principal-agent"
+              className="block rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-900 hover:bg-teal-100"
+            >
+              <span className="font-semibold">UPGRADED — Full B34–B38 workflow →</span>
+              <span className="block text-xs mt-0.5 text-teal-800">
+                Indicator scoring (−6 to +6), AI memo, portfolio view, and approval trail. Quick boolean check below is unchanged.
+              </span>
+            </Link>
             {contractContextBar()}
             <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-4 text-sm text-text-secondary">
               Determines whether revenue is recognised GROSS (full contract value) or NET (margin only) when a third party is involved. The key question: does the entity CONTROL the good or service before transferring it to the customer? (IFRS 15.B35)
@@ -9236,6 +9250,9 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                   <div>
                     <h3 className="text-base font-bold text-text-primary">Principal vs Agent Assessment</h3>
                     <p className="text-xs text-text-muted mt-1">Gross vs net revenue presentation</p>
+                    <Link href="/dashboard/ifrs15/principal-agent" className="text-[11px] text-teal-700 font-semibold hover:underline">
+                      Open full IFRS 15.B34–B38 workflow →
+                    </Link>
                   </div>
                   <Button
                     variant="primary"
@@ -9246,6 +9263,18 @@ Report generated: ${results.calculation_metadata?.calculation_date || new Date()
                     {showPaSection ? 'Collapse' : 'Assess Principal/Agent'}
                   </Button>
                 </div>
+                <Link
+                  href="/dashboard/ifrs15/principal-agent"
+                  className="mb-4 flex items-start justify-between gap-3 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2.5 hover:bg-teal-100 transition-colors"
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-teal-900">Full Principal vs Agent workflow (upgraded)</p>
+                    <p className="text-xs text-teal-800 mt-0.5">
+                      Three-indicator scoring, AI determination, revenue-at-risk and audit memo.
+                    </p>
+                  </div>
+                  <span className="text-xs font-semibold text-teal-700 shrink-0 mt-0.5">Open →</span>
+                </Link>
                 {showPaSection && (
                   <div className="space-y-4">
                     <div className="p-4 rounded-lg bg-blue-50 border border-blue-200 text-sm text-blue-900">

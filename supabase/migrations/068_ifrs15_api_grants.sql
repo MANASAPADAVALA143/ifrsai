@@ -15,7 +15,9 @@ BEGIN
     'ifrs15_rpo_snapshots',
     'ifrs15_rpo_contract_detail',
     'ifrs15_evidence_packs',
-    'ifrs15_checklist_items'
+    'ifrs15_checklist_items',
+    'ifrs15_principal_agent',
+    'ifrs15_pa_audit'
   ]
   LOOP
     IF to_regclass('public.' || t) IS NOT NULL THEN
@@ -43,6 +45,8 @@ WHERE schemaname = 'public'
     'ifrs15_rpo_snapshots',
     'ifrs15_rpo_contract_detail',
     'ifrs15_evidence_packs',
-    'ifrs15_checklist_items'
+    'ifrs15_checklist_items',
+    'ifrs15_principal_agent',
+    'ifrs15_pa_audit'
   )
 ORDER BY 1;

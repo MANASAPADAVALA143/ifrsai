@@ -116,13 +116,20 @@ export function buildLeaseExtractionResult(raw: unknown): LeaseExtractionResult 
   const payTypeObj = dig(data, 'payments', 'payment_type');
   const escalationObj = dig(data, 'payments', 'escalation_clause');
   const rentFreeObj = dig(data, 'payments', 'rent_free_months');
+  const fitOutObj = dig(data, 'payments', 'fit_out_period_months');
   const nonLeaseObj = dig(data, 'payments', 'non_lease_component');
   const nonLeaseDescObj = dig(data, 'payments', 'non_lease_description');
+  const depositAmountObj = dig(data, 'deposits', 'security_deposit_amount');
+  const depositRefundObj = dig(data, 'deposits', 'security_deposit_refund_days');
   const discountObj = dig(data, 'discount_rate', 'stated_rate');
   const idcTotalObj = dig(data, 'initial_costs', 'total');
   const legalObj = dig(data, 'initial_costs', 'legal_fees');
   const brokerObj = dig(data, 'initial_costs', 'broker_fees');
   const renewalObj = dig(data, 'options', 'renewal_options');
+  const renewalTypeObj = dig(data, 'options', 'renewal_type');
+  const renewalNoticeObj = dig(data, 'options', 'renewal_notice_period_days');
+  const breakPenaltyObj = dig(data, 'options', 'break_clause_penalty_amount');
+  const breakEligibleObj = dig(data, 'options', 'break_clause_eligible_after_months');
   const terminationObj = dig(data, 'options', 'termination_clause');
   const indexLinkedObj = dig(data, 'remeasurement_triggers', 'index_linked');
 
@@ -181,6 +188,43 @@ export function buildLeaseExtractionResult(raw: unknown): LeaseExtractionResult 
   const nonLeaseDescription = String(
     getVal(nonLeaseDescObj) ?? top.non_lease_description ?? ''
   ).trim();
+  const fitOutFromField = Math.max(0, parseInt(String(getVal(fitOutObj) ?? '0'), 10) || 0);
+  const fitOutPeriodMonths =
+    fitOutFromField ||
+    (() => {
+      const texts = [
+        String(getVal(fitOutObj) ?? ''),
+        escalationText,
+        String(getVal(dig(data, 'payments', 'lease_incentives')) ?? ''),
+      ];
+      for (const text of texts) {
+        const t = text.toLowerCase();
+        const m = t.match(/(\d+)\s*month[s]?\s*(?:fit[- ]?out|fitout|fit out)/);
+        if (m) return parseInt(m[1], 10) || 0;
+        const m2 = t.match(/fit[- ]?out[^.]{0,40}?(\d+)\s*month/);
+        if (m2) return parseInt(m2[1], 10) || 0;
+      }
+      return 0;
+    })();
+  const securityDepositAmount =
+    getVal(depositAmountObj) ?? top.security_deposit_amount ?? '';
+  const securityDepositRefundDays =
+    getVal(depositRefundObj) ?? top.security_deposit_refund_days ?? '';
+  const renewalTypeRaw = String(
+    getVal(renewalTypeObj) ?? top.renewal_type ?? ''
+  )
+    .trim()
+    .toLowerCase();
+  const renewalType =
+    renewalTypeRaw === 'auto' || renewalTypeRaw === 'manual' || renewalTypeRaw === 'none'
+      ? renewalTypeRaw
+      : '';
+  const renewalNoticePeriodDays =
+    getVal(renewalNoticeObj) ?? top.renewal_notice_period_days ?? '';
+  const breakClausePenaltyAmount =
+    getVal(breakPenaltyObj) ?? top.break_clause_penalty_amount ?? '';
+  const breakClauseEligibleAfterMonths =
+    getVal(breakEligibleObj) ?? top.break_clause_eligible_after_months ?? '';
 
   const has = (v: unknown) => v != null && String(v).trim() !== '';
 
@@ -206,8 +250,20 @@ export function buildLeaseExtractionResult(raw: unknown): LeaseExtractionResult 
   if (escalationText) setConf(confidences, 'escalationType', escalationObj, true);
   if (cpiAdjustments) setConf(confidences, 'cpiAdjustments', indexLinkedObj, true);
   if (rentFreeMonths > 0) confidences.rentFreeMonths = getConf(rentFreeObj) ?? getConf(escalationObj) ?? 70;
+  if (fitOutPeriodMonths > 0) confidences.fitOutPeriodMonths = getConf(fitOutObj) ?? 70;
   setConf(confidences, 'nonLeaseComponent', nonLeaseObj, has(nonLeaseComponent));
   setConf(confidences, 'nonLeaseDescription', nonLeaseDescObj, has(nonLeaseDescription));
+  setConf(confidences, 'securityDepositAmount', depositAmountObj, has(securityDepositAmount));
+  setConf(confidences, 'securityDepositRefundDays', depositRefundObj, has(securityDepositRefundDays));
+  setConf(confidences, 'renewalType', renewalTypeObj, has(renewalType));
+  setConf(confidences, 'renewalNoticePeriodDays', renewalNoticeObj, has(renewalNoticePeriodDays));
+  setConf(confidences, 'breakClausePenaltyAmount', breakPenaltyObj, has(breakClausePenaltyAmount));
+  setConf(
+    confidences,
+    'breakClauseEligibleAfterMonths',
+    breakEligibleObj,
+    has(breakClauseEligibleAfterMonths)
+  );
 
   const formPatch: Record<string, unknown> = {
     leaseStatus: 'Active',
@@ -246,6 +302,17 @@ export function buildLeaseExtractionResult(raw: unknown): LeaseExtractionResult 
   }
   if (cpiAdjustments) formPatch.cpiAdjustments = true;
   if (rentFreeMonths > 0) formPatch.rentFreeMonths = rentFreeMonths;
+  if (fitOutPeriodMonths > 0) formPatch.fitOutPeriodMonths = fitOutPeriodMonths;
+  if (has(securityDepositAmount)) formPatch.securityDepositAmount = String(securityDepositAmount);
+  if (has(securityDepositRefundDays))
+    formPatch.securityDepositRefundDays = String(securityDepositRefundDays);
+  if (has(renewalType)) formPatch.renewalType = renewalType;
+  if (has(renewalNoticePeriodDays))
+    formPatch.renewalNoticePeriodDays = String(renewalNoticePeriodDays);
+  if (has(breakClausePenaltyAmount))
+    formPatch.breakClausePenaltyAmount = String(breakClausePenaltyAmount);
+  if (has(breakClauseEligibleAfterMonths))
+    formPatch.breakClauseEligibleAfterMonths = String(breakClauseEligibleAfterMonths);
   if (has(nonLeaseComponent)) formPatch.nonLeaseComponent = String(nonLeaseComponent);
   if (has(nonLeaseDescription)) formPatch.nonLeaseDescription = nonLeaseDescription;
   const nonLeaseText = `${nonLeaseDescription} ${escalationText}`.toLowerCase();
@@ -280,6 +347,8 @@ export function buildLeaseExtractionResult(raw: unknown): LeaseExtractionResult 
     initialDirectCosts ||
     escalationType !== 'None' ||
     rentFreeMonths > 0 ||
+    fitOutPeriodMonths > 0 ||
+    has(securityDepositAmount) ||
     has(nonLeaseComponent)
   ) {
     tabsWithData.add('financial');
@@ -287,7 +356,16 @@ export function buildLeaseExtractionResult(raw: unknown): LeaseExtractionResult 
   if (assetDescription || leaseType || country || city || location) {
     tabsWithData.add('assets');
   }
-  if (renewalOptions || terminationClauses) tabsWithData.add('contract');
+  if (
+    renewalOptions ||
+    terminationClauses ||
+    renewalType ||
+    has(renewalNoticePeriodDays) ||
+    has(breakClausePenaltyAmount) ||
+    has(breakClauseEligibleAfterMonths)
+  ) {
+    tabsWithData.add('contract');
+  }
 
   const scores = Object.values(confidences);
   const fieldCount = scores.length;

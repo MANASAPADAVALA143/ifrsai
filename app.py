@@ -518,6 +518,29 @@ class IFRS16ExportExcelRequest(BaseModel):
     calculation_results: Dict[str, Any] = Field(..., description="Full IFRS16Calculator output (JSON shape)")
 
 
+class ExportLeaseTermsRequest(BaseModel):
+    """Raw extraction JSON → commercial lease-terms Excel (no IFRS 16 calculation)."""
+
+    leases: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="One or more extractor payloads (or {lease_id, extracted_data})",
+    )
+    extracted_data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Single extraction object when not using leases[]",
+    )
+    lease_id: Optional[str] = Field(default=None, description="Optional id for single extracted_data")
+
+
+class AlertsScanDeadlinesRequest(BaseModel):
+    """n8n / cron: scan ifrs16_leases for notice, escalation, break, and expiry deadlines."""
+
+    firm_id: Optional[str] = Field(default=None, description="Override X-Firm-Id")
+    horizon_days: int = Field(default=90, ge=1, le=365, description="Include deadlines within N days")
+    status: Optional[str] = Field(default=None, description="Optional lease status filter")
+    limit: int = Field(default=2000, ge=1, le=5000)
+
+
 class IFRS16BulkExportExcelItem(BaseModel):
     lease_id: str = Field(default="lease")
     calculation_results: Dict[str, Any] = Field(default_factory=dict)
@@ -1827,6 +1850,52 @@ async def extract_contract(request: ExtractionRequest):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Extraction error: {str(e)}")
+
+
+@app.post("/api/export-lease-terms")
+async def export_lease_terms(request: ExportLeaseTermsRequest):
+    """
+    Export raw lease extraction JSON to Excel (one row per lease).
+
+    No IFRS 16 calculation required. Columns include commercial terms plus
+    computed days_until_next_deadline (expiry, notice deadline, next escalation).
+    """
+    from backend.app.services.ifrs16_lease_terms import (
+        build_export_row,
+        export_lease_terms_excel,
+    )
+
+    payloads: List[Dict[str, Any]] = []
+    if request.leases:
+        payloads.extend(request.leases)
+    elif request.extracted_data:
+        payloads.append(
+            {
+                "lease_id": request.lease_id or "lease",
+                "extracted_data": request.extracted_data,
+            }
+        )
+    if not payloads:
+        raise HTTPException(status_code=400, detail="Provide leases[] or extracted_data")
+
+    rows = []
+    for i, item in enumerate(payloads):
+        lid = None
+        if isinstance(item, dict):
+            lid = item.get("lease_id") or item.get("id")
+        rows.append(build_export_row(item, lease_id=str(lid) if lid else f"lease-{i + 1}"))
+
+    try:
+        content = export_lease_terms_excel(rows)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Excel export failed: {str(e)}")
+
+    filename = f"lease_terms_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/upload-contract")
@@ -5329,6 +5398,92 @@ async def check_alerts(request: AlertsCheckRequest):
     return {"alerts": alerts}
 
 
+@app.post("/api/ifrs16/alerts/scan-deadlines")
+@app.get("/api/ifrs16/alerts/scan-deadlines")
+async def scan_lease_deadline_alerts(
+    request: Request,
+    firm_id: Optional[str] = Query(None),
+    horizon_days: int = Query(90, ge=1, le=365),
+    status: Optional[str] = Query(None),
+    limit: int = Query(2000, ge=1, le=5000),
+):
+    """
+    Cron / n8n daily job: scan ALL ifrs16_leases for actionable deadlines.
+
+    Checks (not just end_date):
+      - lease expiry
+      - renewal notice deadline (end_date − renewal_notice_period_days)
+      - next rent-escalation anniversary
+      - break-clause window open date (commencement + eligible_after_months)
+
+    Returns leases requiring action within 30 / 60 / 90 days (and overdue).
+    Auth: X-Firm-Id header (or firm_id query / JSON body). Optional CRON_SECRET via
+    X-Cron-Secret or Authorization: Bearer <secret> when CRON_SECRET is set.
+    """
+    from backend.app.services.ifrs16_db import IFRS16DB
+    from backend.app.services.ifrs16_lease_terms import scan_lease_deadlines
+
+    cron_secret = (os.getenv("CRON_SECRET") or "").strip()
+    if cron_secret:
+        provided = (
+            request.headers.get("X-Cron-Secret")
+            or (request.headers.get("Authorization") or "").replace("Bearer ", "").strip()
+        )
+        if provided != cron_secret:
+            raise HTTPException(status_code=401, detail="Invalid or missing cron secret")
+
+    body: Dict[str, Any] = {}
+    if request.method == "POST":
+        try:
+            raw = await request.json()
+            if isinstance(raw, dict):
+                body = raw
+        except Exception:
+            body = {}
+
+    resolved_firm = (
+        str(body.get("firm_id") or firm_id or request.headers.get("X-Firm-Id") or "").strip()
+    )
+    if not resolved_firm:
+        raise HTTPException(status_code=400, detail="firm_id or X-Firm-Id required")
+
+    try:
+        hz = int(body.get("horizon_days") if body.get("horizon_days") is not None else horizon_days)
+    except (TypeError, ValueError):
+        hz = horizon_days
+    hz = max(1, min(365, hz))
+    st = body.get("status") if body.get("status") is not None else status
+    try:
+        lim = int(body.get("limit") if body.get("limit") is not None else limit)
+    except (TypeError, ValueError):
+        lim = limit
+    lim = max(1, min(5000, lim))
+
+    try:
+        db = IFRS16DB()
+        leases = db.get_portfolio(resolved_firm, status=st, limit=lim, offset=0)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {str(e)}")
+
+    alerts = scan_lease_deadlines(leases, horizon_days=hz)
+    buckets = {"overdue": 0, "within_30": 0, "within_60": 0, "within_90": 0}
+    for a in alerts:
+        b = a.get("bucket")
+        if b in buckets:
+            buckets[b] += 1
+
+    return {
+        "status": "ok",
+        "firm_id": resolved_firm,
+        "scanned_at": datetime.utcnow().isoformat() + "Z",
+        "leases_scanned": len(leases),
+        "horizon_days": hz,
+        "summary": buckets,
+        "action_required_count": len(alerts),
+        "alerts": alerts,
+    }
+
+
 @app.post("/api/ifrs16/suggest-ibr")
 async def suggest_ibr(payload: IbrSuggestRequest):
     fallback_by_currency = {
@@ -5601,6 +5756,13 @@ try:
     app.include_router(_ifrs15_evidence_pack_router)
 except ImportError as _ifrs15_aep_err:
     print(f"WARNING: IFRS 15 evidence pack router not loaded: {_ifrs15_aep_err}")
+
+try:
+    from backend.app.routers.ifrs15_principal_agent_full import router as _ifrs15_pa_full_router
+
+    app.include_router(_ifrs15_pa_full_router)
+except ImportError as _ifrs15_pa_err:
+    print(f"WARNING: IFRS 15 principal-agent-full router not loaded: {_ifrs15_pa_err}")
 
 try:
     from backend.app.routers.ifrs16_comparative import router as _ifrs16_comparative_router

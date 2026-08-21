@@ -6,10 +6,10 @@ import {
   FolderOpen,
   BarChart3,
   Scale,
-  Shield,
   Upload,
   Wallet,
   GitCompare,
+  GitFork,
   GitMerge,
   ShieldCheck,
 } from 'lucide-react';
@@ -82,7 +82,14 @@ export const IFRS15_NAV_GROUPS: ModuleNavGroup[] = [
     title: 'COMPLIANCE',
     items: [
       { id: 'variable-consideration', label: 'Variable Consideration', icon: Scale },
-      { id: 'principal-agent', label: 'Principal vs Agent', icon: Shield },
+      {
+        id: 'principal-agent',
+        label: 'Principal vs Agent',
+        icon: GitFork,
+        href: '/dashboard/ifrs15/principal-agent',
+        description: 'IFRS 15.B34-B38 · Gross vs net revenue',
+        badge: 'UPGRADED',
+      },
       {
         id: 'contract-modifications',
         label: 'Contract Modifications',
