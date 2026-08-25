@@ -104,6 +104,12 @@ type PortfolioLease = {
     rou_asset: number;
     monthly_depreciation: number;
     total_interest: number;
+    /** Carrying value as of the analysis "today", read from the lease's own
+     * amortization schedule (already computed by the calculation engine).
+     * Falls back to the initial-measurement value when no schedule row applies. */
+    current_lease_liability: number;
+    current_rou_asset: number;
+    current_as_of_date: string | null;
   };
 };
 
@@ -117,12 +123,45 @@ type AiInsight = {
   lease_id: string | null;
 };
 
+type AiCfoSummary = {
+  total_annual_commitment?: number;
+  total_liability?: number;
+  total_rou_assets?: number;
+  monthly_outflow?: number;
+  active_leases?: number;
+  expired_leases?: number;
+  expiring_90_days?: number;
+  expiring_12_months?: number;
+  biggest_risk?: string;
+  most_urgent_decision?: string;
+  data_quality_note?: string;
+};
+
+type AiCashFlowForecast = {
+  year_1?: number;
+  year_2?: number;
+  year_3?: number;
+  year_4?: number;
+  year_5?: number;
+  total_5_year?: number;
+  note?: string;
+};
+
+type AiHealthScoreFactor = {
+  name: string;
+  deduction: number;
+  detail: string;
+};
+
 type AiAnalysis = {
   health_score: number;
   health_label: string;
   summary: string;
   insights: AiInsight[];
   top_recommendation: string;
+  health_score_factors?: AiHealthScoreFactor[];
+  cfo_summary?: AiCfoSummary;
+  cash_flow_forecast?: AiCashFlowForecast;
 };
 
 type HistoryEntry = {
@@ -666,6 +705,48 @@ function getAmortizationSchedule(calc: Record<string, unknown> | null | undefine
   return Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
 }
 
+/**
+ * Reads the row of an already-computed amortization schedule nearest to `asOfIso`
+ * (does not recompute anything — pure read of engine output) and returns the
+ * lease's CURRENT carrying values as of that date. Falls back to initial values
+ * when no schedule is available or the lease hasn't started yet.
+ */
+function currentCarryingValuesAsOf(
+  calc: Record<string, unknown> | null | undefined,
+  initialLiability: number,
+  initialRou: number,
+  asOfIso: string
+): { current_liability: number; current_rou_asset: number; as_of_row_date: string | null } {
+  const schedule = getAmortizationSchedule(calc);
+  if (schedule.length === 0) {
+    return { current_liability: initialLiability, current_rou_asset: initialRou, as_of_row_date: null };
+  }
+  const asOfMs = new Date(asOfIso).getTime();
+  let best: Record<string, unknown> | null = null;
+  let bestMs = -Infinity;
+  for (const row of schedule) {
+    const rowDateStr = String(row.Date ?? row.date ?? '');
+    const rowMs = new Date(rowDateStr).getTime();
+    if (Number.isNaN(rowMs)) continue;
+    // Latest row whose date is <= today (most recently closed period).
+    if (rowMs <= asOfMs && rowMs > bestMs) {
+      best = row;
+      bestMs = rowMs;
+    }
+  }
+  if (!best) {
+    // Lease hasn't started yet (today is before the first schedule row) — use initial values.
+    return { current_liability: initialLiability, current_rou_asset: initialRou, as_of_row_date: null };
+  }
+  const currentLiability = Number(best['Lease Liability'] ?? best.lease_liability_balance ?? best.Closing_Balance ?? best.closing_balance ?? initialLiability) || initialLiability;
+  const currentRou = Number(best['ROU Asset'] ?? best.rou_asset_balance ?? best.rou_nbv ?? initialRou) || initialRou;
+  return {
+    current_liability: currentLiability,
+    current_rou_asset: currentRou,
+    as_of_row_date: String(best.Date ?? best.date ?? null),
+  };
+}
+
 type JournalFlatRow = {
   date: string;
   section: string;
@@ -917,8 +998,41 @@ function readHistory(): HistoryEntry[] {
   }
 }
 
+function stripLargeFields(entry: HistoryEntry): HistoryEntry {
+  return {
+    ...entry,
+    bulk: {
+      ...entry.bulk,
+      results: entry.bulk.results.map((r) => {
+        const { calculation_results, ...rest } = r as Record<string, unknown>;
+        if (calculation_results && typeof calculation_results === 'object') {
+          const { amortization_schedule, ...calcRest } = calculation_results as Record<string, unknown>;
+          void amortization_schedule;
+          return { ...rest, calculation_results: calcRest };
+        }
+        void calculation_results;
+        return rest;
+      }) as typeof entry.bulk.results,
+    },
+    parsed: entry.parsed.map((p) => {
+      const { ...pRest } = p;
+      return pRest;
+    }),
+  };
+}
+
 function writeHistory(entries: HistoryEntry[]) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, 5)));
+  const slim = entries.slice(0, 5).map(stripLargeFields);
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(slim));
+  } catch {
+    // Quota exceeded — clear old entries and retry with only the latest
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(slim.slice(0, 1)));
+    } catch {
+      localStorage.removeItem(HISTORY_KEY);
+    }
+  }
 }
 
 function parseClaudeJson(text: string): AiAnalysis {
@@ -929,16 +1043,42 @@ function parseClaudeJson(text: string): AiAnalysis {
   const raw = JSON.parse(s) as Record<string, unknown>;
   const score = Math.min(100, Math.max(0, Math.round(Number(raw.health_score) || 0)));
   const insights = Array.isArray(raw.insights) ? (raw.insights as AiInsight[]) : [];
+  const rawCfo = (raw.cfo_summary ?? {}) as Record<string, unknown>;
+  const rawFcst = (raw.cash_flow_forecast ?? {}) as Record<string, unknown>;
+  const rawFactors = Array.isArray(raw.health_score_factors) ? (raw.health_score_factors as AiHealthScoreFactor[]) : undefined;
   return {
     health_score: score,
     health_label: String(raw.health_label ?? ''),
     summary: String(raw.summary ?? ''),
     top_recommendation: String(raw.top_recommendation ?? ''),
     insights,
+    health_score_factors: rawFactors,
+    cfo_summary: {
+      total_annual_commitment: rawCfo.total_annual_commitment != null ? Number(rawCfo.total_annual_commitment) : undefined,
+      total_liability: rawCfo.total_liability != null ? Number(rawCfo.total_liability) : undefined,
+      total_rou_assets: rawCfo.total_rou_assets != null ? Number(rawCfo.total_rou_assets) : undefined,
+      monthly_outflow: rawCfo.monthly_outflow != null ? Number(rawCfo.monthly_outflow) : undefined,
+      active_leases: rawCfo.active_leases != null ? Number(rawCfo.active_leases) : undefined,
+      expired_leases: rawCfo.expired_leases != null ? Number(rawCfo.expired_leases) : undefined,
+      expiring_90_days: rawCfo.expiring_90_days != null ? Number(rawCfo.expiring_90_days) : undefined,
+      expiring_12_months: rawCfo.expiring_12_months != null ? Number(rawCfo.expiring_12_months) : undefined,
+      biggest_risk: rawCfo.biggest_risk != null ? String(rawCfo.biggest_risk) : undefined,
+      most_urgent_decision: rawCfo.most_urgent_decision != null ? String(rawCfo.most_urgent_decision) : undefined,
+      data_quality_note: rawCfo.data_quality_note != null ? String(rawCfo.data_quality_note) : undefined,
+    },
+    cash_flow_forecast: {
+      year_1: rawFcst.year_1 != null ? Number(rawFcst.year_1) : undefined,
+      year_2: rawFcst.year_2 != null ? Number(rawFcst.year_2) : undefined,
+      year_3: rawFcst.year_3 != null ? Number(rawFcst.year_3) : undefined,
+      year_4: rawFcst.year_4 != null ? Number(rawFcst.year_4) : undefined,
+      year_5: rawFcst.year_5 != null ? Number(rawFcst.year_5) : undefined,
+      total_5_year: rawFcst.total_5_year != null ? Number(rawFcst.total_5_year) : undefined,
+      note: rawFcst.note != null ? String(rawFcst.note) : undefined,
+    },
   };
 }
 
-function toPortfolioLeases(parsed: ParsedLeaseRow[], bulk: MergedBulkResponse): PortfolioLease[] {
+function toPortfolioLeases(parsed: ParsedLeaseRow[], bulk: MergedBulkResponse, todayIso: string): PortfolioLease[] {
   const ok = new Set(bulk.results.filter((r) => r.status === 'success').map((r) => r.lease_id));
   return parsed
     .filter((p) => p.status !== 'error' && ok.has(p.lease_id))
@@ -947,6 +1087,7 @@ function toPortfolioLeases(parsed: ParsedLeaseRow[], bulk: MergedBulkResponse): 
       const ll = br?.lease_liability ?? 0;
       const rou = br?.rou_asset ?? 0;
       const end = leaseEndDate(p.commencement_date, p.lease_term_months);
+      const current = currentCarryingValuesAsOf(br?.calculation_results ?? null, ll, rou, todayIso);
       return {
         id: p.lease_id,
         asset_description: p.asset_description,
@@ -965,6 +1106,9 @@ function toPortfolioLeases(parsed: ParsedLeaseRow[], bulk: MergedBulkResponse): 
           rou_asset: rou,
           monthly_depreciation: br?.monthly_depreciation ?? 0,
           total_interest: br?.total_interest ?? 0,
+          current_lease_liability: current.current_liability,
+          current_rou_asset: current.current_rou_asset,
+          current_as_of_date: current.as_of_row_date,
         },
       };
     });
@@ -1275,7 +1419,8 @@ export default function QuickAnalysisPage() {
 
   useEffect(() => {
     if (phase !== 'results' || !bulkResult) return;
-    const leases = toPortfolioLeases(parsedRows, bulkResult);
+    const todayIso = new Date().toISOString().split('T')[0];
+    const leases = toPortfolioLeases(parsedRows, bulkResult, todayIso);
     if (leases.length === 0) {
       setAiAnalysis(null);
       setAiError('No successful leases for Portfolio Insights.');
@@ -1291,6 +1436,8 @@ export default function QuickAnalysisPage() {
       monthly_payment: l.monthly_payment ?? 0,
       lease_liability: l.results?.lease_liability ?? 0,
       rou_asset: l.results?.rou_asset ?? 0,
+      current_lease_liability: l.results?.current_lease_liability ?? l.results?.lease_liability ?? 0,
+      current_rou_asset: l.results?.current_rou_asset ?? l.results?.rou_asset ?? 0,
       ibr: l.discount_rate,
       term_months: l.lease_term_months,
       end_date: l.end_date,
@@ -1298,7 +1445,6 @@ export default function QuickAnalysisPage() {
       city: l.city,
       currency: l.currency,
     }));
-    const todayIso = new Date().toISOString().split('T')[0];
     void (async () => {
       try {
         const response = await fetch('/api/cfo-strategic-insights', {
@@ -2622,8 +2768,76 @@ Do not use bullet points.`;
                           );
                         })()}
                         <div className="flex-1 min-w-0">
-                          <h4 className="text-base font-bold text-gray-900 mb-2">Portfolio Health Score</h4>
+                          <h4 className="text-base font-bold text-gray-900 mb-2">
+                            Portfolio Health Score <span className="text-xs font-normal text-gray-500">(indicative — see data quality note below)</span>
+                          </h4>
                           <p className="text-sm text-gray-600 leading-relaxed">{aiAnalysis.summary}</p>
+
+                          {(aiAnalysis.cfo_summary?.active_leases != null ||
+                            aiAnalysis.cfo_summary?.expiring_90_days != null ||
+                            aiAnalysis.cfo_summary?.expiring_12_months != null) && (
+                            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                              {aiAnalysis.cfo_summary?.active_leases != null && (
+                                <div className="rounded-lg bg-white border border-gray-200 px-3 py-2">
+                                  <p className="text-[10px] uppercase tracking-wide text-gray-500">Active leases</p>
+                                  <p className="text-lg font-bold text-gray-900">
+                                    {aiAnalysis.cfo_summary.active_leases}
+                                    {aiAnalysis.cfo_summary.expired_leases != null && (
+                                      <span className="text-xs font-normal text-gray-400"> / {aiAnalysis.cfo_summary.active_leases + aiAnalysis.cfo_summary.expired_leases}</span>
+                                    )}
+                                  </p>
+                                </div>
+                              )}
+                              {aiAnalysis.cfo_summary?.expired_leases != null && aiAnalysis.cfo_summary.expired_leases > 0 && (
+                                <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2">
+                                  <p className="text-[10px] uppercase tracking-wide text-red-600">Expired</p>
+                                  <p className="text-lg font-bold text-red-700">{aiAnalysis.cfo_summary.expired_leases}</p>
+                                </div>
+                              )}
+                              {aiAnalysis.cfo_summary?.expiring_90_days != null && (
+                                <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+                                  <p className="text-[10px] uppercase tracking-wide text-amber-700">Expiring ≤90 days</p>
+                                  <p className="text-lg font-bold text-amber-800">{aiAnalysis.cfo_summary.expiring_90_days}</p>
+                                </div>
+                              )}
+                              {aiAnalysis.cfo_summary?.expiring_12_months != null && (
+                                <div className="rounded-lg bg-blue-50 border border-blue-200 px-3 py-2">
+                                  <p className="text-[10px] uppercase tracking-wide text-blue-700">Expiring ≤12 months</p>
+                                  <p className="text-lg font-bold text-blue-800">{aiAnalysis.cfo_summary.expiring_12_months}</p>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {aiAnalysis.cfo_summary?.data_quality_note && (
+                            <p className="mt-3 text-xs text-gray-500 italic">
+                              ⓘ {aiAnalysis.cfo_summary.data_quality_note}
+                            </p>
+                          )}
+
+                          {aiAnalysis.health_score_factors && aiAnalysis.health_score_factors.length > 0 && (
+                            <details className="mt-3 group">
+                              <summary className="text-xs font-semibold text-gray-500 cursor-pointer select-none hover:text-gray-700">
+                                Health score methodology ({aiAnalysis.health_score_factors.length} factor{aiAnalysis.health_score_factors.length !== 1 ? 's' : ''} applied — starts at 100)
+                              </summary>
+                              <ul className="mt-2 space-y-1">
+                                {aiAnalysis.health_score_factors.map((f, idx) => (
+                                  <li key={idx} className="text-xs text-gray-600 flex gap-2">
+                                    <span className="font-semibold text-red-600 shrink-0">-{f.deduction}</span>
+                                    <span>
+                                      <span className="font-medium text-gray-800">{f.name}:</span> {f.detail}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                          {aiAnalysis.health_score_factors && aiAnalysis.health_score_factors.length === 0 && (
+                            <p className="mt-3 text-xs text-gray-400">
+                              Health score methodology: no deductions — all factors within healthy range.
+                            </p>
+                          )}
+
                           <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex gap-2 items-start">
                             <Zap className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
                             <div>
@@ -2638,6 +2852,34 @@ Do not use bullet points.`;
                         </div>
                       </div>
                     </div>
+
+                    {aiAnalysis.cash_flow_forecast?.total_5_year != null && (
+                      <div className="rounded-xl border border-gray-200 bg-white p-5 sm:p-6">
+                        <h4 className="text-base font-bold text-gray-900 mb-1">5-Year Cash Flow Forecast</h4>
+                        <p className="text-xs text-gray-500 mb-4">
+                          {aiAnalysis.cash_flow_forecast.note ?? 'Built from each lease\'s actual contractual term and escalation.'}
+                        </p>
+                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                          {([
+                            ['Year 1', aiAnalysis.cash_flow_forecast.year_1],
+                            ['Year 2', aiAnalysis.cash_flow_forecast.year_2],
+                            ['Year 3', aiAnalysis.cash_flow_forecast.year_3],
+                            ['Year 4', aiAnalysis.cash_flow_forecast.year_4],
+                            ['Year 5', aiAnalysis.cash_flow_forecast.year_5],
+                          ] as const).map(([label, val]) => (
+                            <div key={label} className="rounded-lg bg-gray-50 px-3 py-2">
+                              <p className="text-[10px] uppercase tracking-wide text-gray-500">{label}</p>
+                              <p className="text-sm font-bold text-gray-900">
+                                {val != null ? formatAmount(val, portfolioCurrency) : '—'}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="mt-3 text-sm font-semibold text-gray-700">
+                          Total 5-year: {formatAmount(aiAnalysis.cash_flow_forecast.total_5_year, portfolioCurrency)}
+                        </p>
+                      </div>
+                    )}
 
                     <div>
                       <h4 className="text-base font-bold text-gray-900 mb-4">Strategic insights</h4>

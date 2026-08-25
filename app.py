@@ -2474,6 +2474,27 @@ def _ifrs16_rou_asset(lease: Dict[str, Any]) -> float:
     return float(lease.get("rou_asset") or lease.get("rou") or (res or {}).get("rou_asset") or 0)
 
 
+def _ifrs16_current_liability(lease: Dict[str, Any]):
+    """CURRENT carrying value of the lease liability as of the analysis date, if the
+    frontend supplied one (read from the lease's amortization schedule — never
+    recomputed here). Falls back to the initial-measurement value; the boolean
+    return flags whether a fallback occurred."""
+    res = lease.get("results") if isinstance(lease.get("results"), dict) else {}
+    current = float(lease.get("current_lease_liability") or (res or {}).get("current_lease_liability") or 0)
+    if current > 0:
+        return current, False
+    return _ifrs16_lease_liability(lease), True
+
+
+def _ifrs16_current_rou(lease: Dict[str, Any]):
+    """CURRENT carrying value of the ROU asset. See _ifrs16_current_liability."""
+    res = lease.get("results") if isinstance(lease.get("results"), dict) else {}
+    current = float(lease.get("current_rou_asset") or (res or {}).get("current_rou_asset") or 0)
+    if current > 0:
+        return current, False
+    return _ifrs16_rou_asset(lease), True
+
+
 def _ifrs16_monthly_payment(lease: Dict[str, Any]) -> float:
     payments = lease.get("payments") if isinstance(lease.get("payments"), dict) else {}
     return float(lease.get("monthly_payment") or payments.get("monthly") or 0)
@@ -2484,9 +2505,40 @@ def _ifrs16_end_date(lease: Dict[str, Any]) -> str:
     return str(lease.get("end_date") or dates.get("end") or "")
 
 
-def _ifrs16_lease_active(lease: Dict[str, Any]) -> bool:
-    status = str(lease.get("status", "active")).lower()
-    return status not in ("expired", "draft", "terminated", "churned")
+def _ifrs16_parse_date(date_str: str):
+    """Parse a date string trying multiple common formats. Returns date or None."""
+    if not date_str:
+        return None
+    s = str(date_str).strip()[:10]
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _ifrs16_days_to_expiry(lease: Dict[str, Any], today) -> Optional[int]:
+    """Days from today to lease end_date. Negative if already expired. None if unparseable."""
+    end = _ifrs16_parse_date(_ifrs16_end_date(lease))
+    if end is None:
+        return None
+    return (end - today).days
+
+
+def _ifrs16_lease_active(lease: Dict[str, Any], today) -> bool:
+    """A lease is active only if its end_date is on/after today. Explicit
+    status flags (expired/terminated/etc.) still override to inactive even
+    if the end_date hasn't passed (e.g. early termination)."""
+    status = str(lease.get("status", "")).lower()
+    if status in ("expired", "draft", "terminated", "churned"):
+        return False
+    days = _ifrs16_days_to_expiry(lease, today)
+    if days is None:
+        # No parseable end_date — cannot confirm active; treat as active only if
+        # status was explicitly marked active/blank (conservative fallback).
+        return status in ("", "active")
+    return days >= 0
 
 
 def _ifrs16_lease_currency(lease: Dict[str, Any]) -> str:
@@ -2521,11 +2573,100 @@ def _ifrs16_fmt_money(amount: float, currency: str) -> str:
     return f"{ccy} {amount:,.0f}"
 
 
+def _ifrs16_compute_health_score(
+    active_lease_count: int,
+    total_lease_count: int,
+    total_active_liability: float,
+    top5_liability: float,
+    expiring_90_count: int,
+    expiring_12mo_count: int,
+    data_quality_issue_count: int,
+    total_assets: float = 0.0,
+) -> Dict[str, Any]:
+    """Deterministic, documented portfolio health score — computed in code, NOT by
+    the AI model. Mirrors frontend/lib/ifrs16-cfo-insights-calc.ts::computeHealthScore
+    exactly so both code paths (Python-preferred and Claude-direct-fallback) produce
+    the same score for the same input data.
+
+    METHODOLOGY (starts at 100, deducts per factor, floors at 0):
+      1. Concentration risk — top-5 leases' share of total ACTIVE liability.
+           >50%: -20   >35%: -10   >25%: -5   else: 0
+      2. Near-term expiry risk — leases expiring within 90 days as % of active leases.
+           >20%: -15   >10%: -8    >0%:  -4   else: 0
+      3. 12-month expiry risk — leases expiring within 12 months as % of active leases.
+           >40%: -15   >25%: -8    >10%: -4   else: 0
+      4. Leverage — total liability / total assets (only if total_assets > 0).
+           >60%: -15   >40%: -8    >25%: -3   else: 0
+      5. Data quality — leases missing end_date or with liability but no ROU, as % of total.
+           >10%: -10   >0%:  -5    else: 0
+    Label thresholds: >=80 Excellent, >=65 Good, >=45 Fair, else At Risk.
+    """
+    factors: List[Dict[str, Any]] = []
+    score = 100
+
+    concentration_pct = (top5_liability / total_active_liability * 100) if total_active_liability > 0 else 0
+    conc_deduction = 20 if concentration_pct > 50 else 10 if concentration_pct > 35 else 5 if concentration_pct > 25 else 0
+    if conc_deduction:
+        factors.append({
+            "name": "Concentration risk",
+            "deduction": conc_deduction,
+            "detail": f"Top-5 leases = {concentration_pct:.1f}% of active liability",
+        })
+        score -= conc_deduction
+
+    active_count = active_lease_count or 1
+    exp90_pct = expiring_90_count / active_count * 100
+    exp90_deduction = 15 if exp90_pct > 20 else 8 if exp90_pct > 10 else 4 if exp90_pct > 0 else 0
+    if exp90_deduction:
+        factors.append({
+            "name": "Near-term expiry risk (<=90 days)",
+            "deduction": exp90_deduction,
+            "detail": f"{expiring_90_count} of {active_lease_count} active leases ({exp90_pct:.1f}%) expire within 90 days",
+        })
+        score -= exp90_deduction
+
+    exp12_pct = expiring_12mo_count / active_count * 100
+    exp12_deduction = 15 if exp12_pct > 40 else 8 if exp12_pct > 25 else 4 if exp12_pct > 10 else 0
+    if exp12_deduction:
+        factors.append({
+            "name": "12-month expiry risk",
+            "deduction": exp12_deduction,
+            "detail": f"{expiring_12mo_count} of {active_lease_count} active leases ({exp12_pct:.1f}%) expire within 12 months",
+        })
+        score -= exp12_deduction
+
+    if total_assets > 0:
+        leverage_pct = total_active_liability / total_assets * 100
+        lev_deduction = 15 if leverage_pct > 60 else 8 if leverage_pct > 40 else 3 if leverage_pct > 25 else 0
+        if lev_deduction:
+            factors.append({
+                "name": "Leverage (liability/assets)",
+                "deduction": lev_deduction,
+                "detail": f"Liability is {leverage_pct:.1f}% of total assets",
+            })
+            score -= lev_deduction
+
+    dq_pct = (data_quality_issue_count / total_lease_count * 100) if total_lease_count > 0 else 0
+    dq_deduction = 10 if dq_pct > 10 else 5 if dq_pct > 0 else 0
+    if dq_deduction:
+        factors.append({
+            "name": "Data quality",
+            "deduction": dq_deduction,
+            "detail": f"{data_quality_issue_count} of {total_lease_count} leases have missing end_date or ROU/liability data",
+        })
+        score -= dq_deduction
+
+    score = max(0, min(100, score))
+    label = "Excellent" if score >= 80 else "Good" if score >= 65 else "Fair" if score >= 45 else "At Risk"
+
+    return {"score": score, "label": label, "factors": factors}
+
+
 @app.post("/api/ifrs16/cfo-insights")
 async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
     """IFRS 16 CFO strategic insights — portfolio metrics + Claude analysis."""
     try:
-        from datetime import date
+        from datetime import date, timedelta
 
         leases = req.leases
         today = date.today()
@@ -2544,10 +2685,35 @@ async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
                 detail="Claude API not configured. Set ANTHROPIC_API_KEY in .env",
             )
 
+        # Data-consistency safeguard (mirrors the Next.js route's check): block rather than
+        # let Claude narrate a false "ROU = 0" figure when liability data is present.
         total_liability = sum(_ifrs16_lease_liability(l) for l in leases)
         total_rou = sum(_ifrs16_rou_asset(l) for l in leases)
-        total_annual_payments = sum(_ifrs16_monthly_payment(l) * 12 for l in leases)
-        active_leases = [l for l in leases if _ifrs16_lease_active(l)]
+        if total_liability > 0 and total_rou == 0:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Analysis temporarily unavailable — data validation failed: "
+                    "ROU asset values missing. Please recalculate leases and retry."
+                ),
+            )
+
+        # Active/expired split is date-driven: a lease is active only if today falls
+        # within its contractual term (end_date >= today), not by an assumed status flag.
+        active_leases = [l for l in leases if _ifrs16_lease_active(l, today)]
+        expired_leases = [l for l in leases if l not in active_leases]
+
+        total_annual_payments = sum(_ifrs16_monthly_payment(l) * 12 for l in active_leases)
+
+        # CURRENT carrying values — read from each active lease's own amortization
+        # schedule (via current_lease_liability / current_rou_asset supplied by the
+        # frontend), summed across active leases only. Distinct from the initial-
+        # measurement totals above; used for amortisation-phase / health-score commentary.
+        current_liability_pairs = [_ifrs16_current_liability(l) for l in active_leases]
+        current_rou_pairs = [_ifrs16_current_rou(l) for l in active_leases]
+        total_current_liability = sum(v for v, _ in current_liability_pairs)
+        total_current_rou = sum(v for v, _ in current_rou_pairs)
+        any_current_values_estimated = any(is_fallback for _, is_fallback in current_liability_pairs + current_rou_pairs)
 
         leverage_ratio = (
             total_liability / req.total_assets * 100 if req.total_assets > 0 else 0
@@ -2559,21 +2725,18 @@ async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
             total_annual_payments - req.budget_lease_cost if req.budget_lease_cost > 0 else 0
         )
 
+        # Expiry buckets computed once from active leases, using robust multi-format
+        # date parsing so a non-ISO date doesn't silently drop a lease from the count.
         expiring_90: List[Dict[str, Any]] = []
         expiring_365: List[Dict[str, Any]] = []
         for l in active_leases:
-            end_str = _ifrs16_end_date(l)
-            if not end_str:
+            days_left = _ifrs16_days_to_expiry(l, today)
+            if days_left is None:
                 continue
-            try:
-                end = datetime.strptime(end_str[:10], "%Y-%m-%d").date()
-                days_left = (end - today).days
-                if 0 < days_left <= 90:
-                    expiring_90.append(l)
-                elif 90 < days_left <= 365:
-                    expiring_365.append(l)
-            except Exception:
-                continue
+            if 0 <= days_left <= 90:
+                expiring_90.append(l)
+            elif 90 < days_left <= 365:
+                expiring_365.append(l)
 
         top_leases = sorted(
             active_leases,
@@ -2584,21 +2747,99 @@ async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
         portfolio_currency = _ifrs16_dominant_currency(leases)
         fmt = lambda amt: _ifrs16_fmt_money(amt, portfolio_currency)
 
+        # Real year-by-year 5-year cash flow forecast — replaces flat annual x5 estimate.
+        # Excludes months where a lease is expired; applies escalation_rate if present.
+        forecast = [0.0, 0.0, 0.0, 0.0, 0.0]
+        for l in active_leases:
+            end = _ifrs16_parse_date(_ifrs16_end_date(l))
+            if end is None:
+                continue
+            base_monthly = _ifrs16_monthly_payment(l)
+            if base_monthly <= 0:
+                continue
+            escalation = float(l.get("escalation_rate") or l.get("escalation") or 0)
+            for yr in range(5):
+                year_start = today + timedelta(days=365 * yr)
+                year_end = today + timedelta(days=365 * (yr + 1))
+                active_start = max(year_start, today)
+                active_end = min(year_end, end)
+                if active_end <= active_start:
+                    continue
+                active_days = (active_end - active_start).days
+                active_months = active_days / 30.44
+                escalated = base_monthly * ((1 + escalation / 100) ** yr)
+                forecast[yr] += escalated * active_months
+        forecast_rounded = [round(v, 2) for v in forecast]
+        forecast_total_5yr = round(sum(forecast_rounded), 2)
+
+        # Data quality issues: missing end_date, or liability present with no ROU.
+        data_quality_issue_count = sum(
+            1 for l in leases
+            if not _ifrs16_end_date(l) or (_ifrs16_lease_liability(l) > 0 and _ifrs16_rou_asset(l) == 0)
+        )
+
+        # Top-5 by CURRENT liability (not initial) — used for the concentration-risk factor.
+        top5_current_liability = sum(
+            sorted((v for v, _ in current_liability_pairs), reverse=True)[:5]
+        )
+
+        # Deterministic, documented health score — computed here, not by Claude.
+        health = _ifrs16_compute_health_score(
+            active_lease_count=len(active_leases),
+            total_lease_count=len(leases),
+            total_active_liability=total_current_liability,
+            top5_liability=top5_current_liability,
+            expiring_90_count=len(expiring_90),
+            expiring_12mo_count=len(expiring_365),
+            data_quality_issue_count=data_quality_issue_count,
+            total_assets=req.total_assets,
+        )
+        health_factor_lines = "\n".join(
+            f"  - {f['name']}: -{f['deduction']} ({f['detail']})" for f in health["factors"]
+        ) or "  (no deductions — all factors within healthy range)"
+
         import anthropic
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+        expiring_90_lines = "\n".join(
+            f"  - {l.get('title', l.get('asset', 'Unknown'))} ({l.get('id', l.get('lease_id', ''))}): "
+            f"expires {_ifrs16_end_date(l)} — {_ifrs16_days_to_expiry(l, today)} days remaining"
+            for l in expiring_90
+        ) or "  None"
+
         portfolio_summary = f"""
 Lease Portfolio for CFO Analysis (all amounts in {portfolio_currency}):
-- Total Leases: {len(leases)} ({len(active_leases)} active)
-- Total Lease Liability: {fmt(total_liability)}
-- Total ROU Assets: {fmt(total_rou)}
-- Annual Lease Payments: {fmt(total_annual_payments)}
-- Leases Expiring in 90 days: {len(expiring_90)}
-- Leases Expiring in 12 months: {len(expiring_365)}
+- Total Leases: {len(leases)}
+- Contractually ACTIVE as of {today.isoformat()}: {len(active_leases)}
+- Already expired / outside term: {len(expired_leases)}
+- Total Lease Liability (INITIAL measurement, all {len(leases)} leases): {fmt(total_liability)}
+- Total ROU Assets (INITIAL measurement, all {len(leases)} leases): {fmt(total_rou)}
+- Total Lease Liability (CURRENT carrying value as of {today.isoformat()}, {len(active_leases)} active leases): {fmt(total_current_liability)}
+- Total ROU Assets (CURRENT carrying value as of {today.isoformat()}, {len(active_leases)} active leases): {fmt(total_current_rou)}{' (some leases lack a schedule and fall back to initial value)' if any_current_values_estimated else ''}
+- Annual Lease Payments (active leases only, current run-rate): {fmt(total_annual_payments)}
+- Leases Expiring within 90 days (exact day counts below): {len(expiring_90)}
+- Leases Expiring within 12 months (90-day + 91-365-day buckets): {len(expiring_90) + len(expiring_365)}
 - Leverage Ratio (liability/assets): {leverage_ratio:.1f}%
 - Lease Intensity (payments/revenue): {lease_intensity:.1f}%
 - Budget Variance: {fmt(budget_variance)}
+
+IMPORTANT: When discussing "amortisation phase" or portfolio maturity, use the CURRENT carrying
+values above, never the INITIAL-measurement values.
+
+Pre-built 5-year cash flow forecast (year-by-year, real lease terms + escalation — use these exact figures):
+  Year 1: {fmt(forecast_rounded[0])}
+  Year 2: {fmt(forecast_rounded[1])}
+  Year 3: {fmt(forecast_rounded[2])}
+  Year 4: {fmt(forecast_rounded[3])}
+  Year 5: {fmt(forecast_rounded[4])}
+  Total 5-year: {fmt(forecast_total_5yr)}
+
+PRE-COMPUTED HEALTH SCORE (deterministic — you must echo this exact number and label;
+you only write the narrative around it, you do not set the score yourself):
+  Score: {health['score']}/100 — {health['label']}
+  Methodology (starts at 100, deducts per factor):
+{health_factor_lines}
 
 Top 5 Leases by Liability:
 {chr(10).join([
@@ -2608,12 +2849,16 @@ Top 5 Leases by Liability:
     for l in top_leases
 ])}
 
-Expiring in 90 days:
-{chr(10).join([
-    f"  - {l.get('title', l.get('asset', 'Unknown'))}: "
-    f"{fmt(_ifrs16_monthly_payment(l))}/month"
-    for l in expiring_90
-]) or "  None"}
+Leases expiring within 90 days (exact days remaining — use these numbers verbatim, do not recalculate):
+{expiring_90_lines}
+
+IMPORTANT NOTES FOR YOUR ANALYSIS:
+- ROU Asset and Lease Liability figures above are INITIAL-MEASUREMENT sums at each lease's
+  commencement date, not current carrying values. Do NOT describe them as "current carrying
+  value" or infer an amortisation phase from them.
+- Report the active lease count as {len(active_leases)} (not the total {len(leases)}).
+- Do NOT generate a "cost optimisation" or "sublease opportunity" insight — this portfolio
+  data contains no utilisation %, market rent, or sublease income fields to support one.
 """
 
         ai_response = client.messages.create(
@@ -2632,24 +2877,28 @@ unless the portfolio currency is USD.
 
 Generate exactly 4 strategic insights for the CFO.
 Each insight must be specific, actionable, and reference actual numbers.
+Do NOT use the COST_OPTIMISATION category — this portfolio has no utilisation, market rent,
+or sublease data to support a cost-optimisation estimate. Use only the categories listed below.
 
 Format your response as JSON only — no other text:
 {{
   "insights": [
     {{
       "id": "1",
-      "category": "LEVERAGE" | "RENEWAL_RISK" | "COST_OPTIMISATION" | "BUDGET" | "CONCENTRATION_RISK",
+      "category": "LEVERAGE" | "RENEWAL_RISK" | "BUDGET" | "CONCENTRATION_RISK",
       "severity": "HIGH" | "MEDIUM" | "LOW",
       "title": "Short title (max 8 words)",
-      "finding": "One sentence with specific numbers",
+      "finding": "One sentence with specific numbers (use exact days-remaining figures given above for expiry)",
       "recommendation": "One specific actionable recommendation",
       "impact": "Estimated financial impact or risk amount"
     }}
   ],
   "overall_health": "STRONG" | "ADEQUATE" | "AT_RISK" | "CRITICAL",
-  "health_score": 0-100,
-  "one_line_summary": "One sentence CFO-level portfolio summary"
-}}""",
+  "one_line_summary": "One sentence CFO-level portfolio summary — must reference the ACTIVE lease count ({len(active_leases)}), not the total ({len(leases)})"
+}}
+
+Do NOT include a "health_score" field — the health score is computed deterministically by the
+server (see PRE-COMPUTED HEALTH SCORE above) and is not part of your response.""",
                 }
             ],
         )
@@ -2664,15 +2913,38 @@ Format your response as JSON only — no other text:
         ai_data = json.loads(ai_text.strip())
 
         metrics = {
-            "total_liability": round(total_liability, 2),
-            "total_rou_assets": round(total_rou, 2),
+            "total_liability": round(total_current_liability, 2),
+            "total_rou_assets": round(total_current_rou, 2),
+            "total_liability_initial": round(total_liability, 2),
+            "total_rou_assets_initial": round(total_rou, 2),
             "total_annual_payments": round(total_annual_payments, 2),
+            "total_lease_count": len(leases),
             "active_lease_count": len(active_leases),
+            "expired_lease_count": len(expired_leases),
             "expiring_90_days": len(expiring_90),
-            "expiring_12_months": len(expiring_365),
+            "expiring_12_months": len(expiring_90) + len(expiring_365),
             "leverage_ratio_pct": round(leverage_ratio, 2),
             "lease_intensity_pct": round(lease_intensity, 2),
             "budget_variance": round(budget_variance, 2),
+            "cash_flow_forecast": {
+                "year_1": forecast_rounded[0],
+                "year_2": forecast_rounded[1],
+                "year_3": forecast_rounded[2],
+                "year_4": forecast_rounded[3],
+                "year_5": forecast_rounded[4],
+                "total_5_year": forecast_total_5yr,
+                "note": (
+                    "Year-by-year forecast built from each active lease's actual contractual "
+                    "term, monthly payment, and escalation rate. Excludes months where the "
+                    "lease has expired."
+                ),
+            },
+            "health_score_factors": health["factors"],
+            "data_quality_note": (
+                f"Total Lease Liability and Total ROU Assets above are CURRENT carrying values as of "
+                f"{today.isoformat()}, read from each active lease's amortization schedule "
+                f"(initial-measurement sums were {fmt(total_liability)} liability / {fmt(total_rou)} ROU)."
+            ),
             "top_leases_by_liability": [
                 {
                     "title": l.get("title", l.get("asset", "Unknown")),
@@ -2687,17 +2959,28 @@ Format your response as JSON only — no other text:
                     "title": l.get("title", l.get("asset", "Unknown")),
                     "end_date": _ifrs16_end_date(l) or "N/A",
                     "monthly_payment": _ifrs16_monthly_payment(l),
+                    "days_to_expiry": _ifrs16_days_to_expiry(l, today),
                 }
                 for l in expiring_90
             ],
         }
 
+        # Defensive filter: drop any COST_OPTIMISATION insight Claude generates despite
+        # the prompt instruction, since there's no supporting data for that category.
+        insights = [
+            i for i in ai_data.get("insights", [])
+            if str(i.get("category", "")).upper() != "COST_OPTIMISATION"
+        ]
+
         gc.collect()
         return {
             "success": True,
-            "insights": ai_data.get("insights", []),
+            "insights": insights,
             "overall_health": ai_data.get("overall_health", "ADEQUATE"),
-            "health_score": ai_data.get("health_score", 50),
+            # Health score is deterministic and server-computed — never taken from Claude's
+            # response, even if it ignored the instruction and included one.
+            "health_score": health["score"],
+            "health_label_suffix": f"({health['label']}, indicative)",
             "one_line_summary": ai_data.get("one_line_summary", ""),
             "metrics": metrics,
         }
