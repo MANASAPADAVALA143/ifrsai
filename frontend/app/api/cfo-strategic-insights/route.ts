@@ -49,7 +49,7 @@ function mapLeaseForPrompt(l: Record<string, unknown>) {
     monthly_payment: monthly,
     annual_payment: monthly * 12,
     lease_liability: ll,
-    rou_asset: num(l.rou_asset ?? res?.rou_asset),
+    rou_asset: rouAssetFromRow(l),
     ibr: ibrPct,
     term_months: num(l.lease_term_months ?? l.term_months),
     end_date: l.end_date ?? l.endDate,
@@ -74,8 +74,16 @@ function dominantPortfolioCurrency(rows: Record<string, unknown>[]): string {
   return best;
 }
 
+function rouAssetFromRow(l: Record<string, unknown>): number {
+  const top = num(l.rou_asset);
+  if (top > 0) return top;
+  const res = l.results as Record<string, unknown> | undefined;
+  return num(res?.rou_asset);
+}
+
 function buildCfoAdvisorPrompt(rows: Record<string, unknown>[], today: string): string {
   const totalLiability = rows.reduce((sum, l) => sum + leaseLiabilityFromRow(l), 0);
+  const totalRou = rows.reduce((sum, l) => sum + rouAssetFromRow(l), 0);
   const totalMonthly = rows.reduce((sum, l) => sum + monthlyPaymentFromRow(l), 0);
   const totalAnnual = totalMonthly * 12;
   const in12mo = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -92,6 +100,7 @@ PORTFOLIO DATA (${rows.length} leases):
 ${leaseJson}
 
 PORTFOLIO SUMMARY (amounts in ${reportCcy}):
+Total Right-of-Use (ROU) Assets: ${reportCcy} ${totalRou.toLocaleString('en-US', { maximumFractionDigits: 0 })}
 Total Lease Liability: ${reportCcy} ${totalLiability.toLocaleString('en-US', { maximumFractionDigits: 0 })}
 Total Monthly Outflow: ${reportCcy} ${totalMonthly.toLocaleString('en-US', { maximumFractionDigits: 0 })}
 Total Annual Commitment: ${reportCcy} ${totalAnnual.toLocaleString('en-US', { maximumFractionDigits: 0 })}
@@ -312,6 +321,26 @@ export async function POST(req: Request) {
 
   if (!prompt.trim() && rows.length === 0) {
     return NextResponse.json({ error: 'Missing prompt or leases' }, { status: 400 });
+  }
+
+  // Safeguard: if leases are present but total ROU is 0 while total liability > 0,
+  // the caller passed incomplete data (rou_asset missing). Log and block to prevent
+  // Claude from generating a false "ROU = 0" insight.
+  if (rows.length > 0) {
+    const totalRouCheck = rows.reduce((s, l) => s + rouAssetFromRow(l), 0);
+    const totalLiabilityCheck = rows.reduce((s, l) => s + leaseLiabilityFromRow(l), 0);
+    if (totalLiabilityCheck > 0 && totalRouCheck === 0) {
+      console.error(
+        `[cfo-strategic-insights] Data integrity check failed: ${rows.length} leases have ` +
+        `total_liability=${totalLiabilityCheck} but total_rou_asset=0. ` +
+        'Blocking analysis to prevent false "ROU = 0" insight. ' +
+        'Ensure rou_asset is included in each lease row sent to this endpoint.'
+      );
+      return NextResponse.json(
+        { error: 'Portfolio data unavailable: ROU asset values missing. Please recalculate leases and retry.' },
+        { status: 422 }
+      );
+    }
   }
 
   const key = process.env.ANTHROPIC_API_KEY?.trim();

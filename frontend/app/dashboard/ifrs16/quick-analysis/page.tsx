@@ -1290,6 +1290,7 @@ export default function QuickAnalysisPage() {
       asset: l.asset_description,
       monthly_payment: l.monthly_payment ?? 0,
       lease_liability: l.results?.lease_liability ?? 0,
+      rou_asset: l.results?.rou_asset ?? 0,
       ibr: l.discount_rate,
       term_months: l.lease_term_months,
       end_date: l.end_date,
