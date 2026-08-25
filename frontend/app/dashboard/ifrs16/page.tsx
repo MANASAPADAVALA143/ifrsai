@@ -16,6 +16,7 @@ import {
   type Ifrs16MarketMode,
 } from '@/lib/ifrs16-currency';
 import { ifrs16Api } from '@/lib/api';
+import { splitPortfolioPopulations } from '@/lib/ifrs16-cfo-insights-calc';
 import { IFRS16OverviewTools } from '@/components/ifrs16/IFRS16OverviewTools';
 import { useAuth } from '@/hooks/useAuth';
 import { formatDate, formatCrores, formatIndianCurrency, getGreeting } from '@/lib/utils';
@@ -205,63 +206,90 @@ export default function IFRS16DashboardPage() {
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+  const todayIso = today.toISOString().slice(0, 10);
 
-  const totalActive = leases.filter((l) => {
-    if (l.status === 'Active') return true;
-    const end = new Date(l.end_date || l.dates?.end || '9999-12-31');
-    return end >= today && l.status !== 'Expired' && l.status !== 'Draft';
-  }).length;
+  // Explicit populations — main dashboard uses portfolio_active only.
+  const { portfolioAll, portfolioActive, portfolioExpired } = splitPortfolioPopulations(
+    leases as Record<string, unknown>[],
+    todayIso,
+    (l) => (l as { end_date?: string; dates?: { end?: string } }).end_date
+      || (l as { dates?: { end?: string } }).dates?.end
+  );
 
-  const expiring30 = leases.filter((l) => {
-    const end = new Date(l.end_date || l.dates?.end || '9999-12-31');
+  const leaseLiabilityOf = (l: Record<string, unknown>) => {
+    const res = (l.results || {}) as Record<string, unknown>;
+    const current = Number(l.current_lease_liability ?? res.current_lease_liability ?? 0);
+    if (Number.isFinite(current) && current > 0) return current;
+    const direct = Number(l.liability);
+    const fromResults = Number(res.lease_liability);
+    return Number.isFinite(direct) && direct !== 0
+      ? direct
+      : Number.isFinite(fromResults)
+        ? fromResults
+        : 0;
+  };
+  const leaseRouOf = (l: Record<string, unknown>) => {
+    const res = (l.results || {}) as Record<string, unknown>;
+    const current = Number(l.current_rou_asset ?? res.current_rou_asset ?? 0);
+    if (Number.isFinite(current) && current > 0) return current;
+    const direct = Number(l.rou);
+    const fromResults = Number(res.rou_asset);
+    return Number.isFinite(direct) && direct !== 0
+      ? direct
+      : Number.isFinite(fromResults)
+        ? fromResults
+        : 0;
+  };
+
+  const totalActive = portfolioActive.length;
+  const totalPortfolioCount = portfolioAll.length;
+
+  const expiring30 = portfolioActive.filter((l) => {
+    const end = new Date(String((l as { end_date?: string; dates?: { end?: string } }).end_date || (l as { dates?: { end?: string } }).dates?.end || '9999-12-31'));
     const diff = Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
     return diff >= 0 && diff <= 30;
   });
 
-  const expiring90 = leases.filter((l) => {
-    const end = new Date(l.end_date || l.dates?.end || '9999-12-31');
+  const expiring90 = portfolioActive.filter((l) => {
+    const end = new Date(String((l as { end_date?: string; dates?: { end?: string } }).end_date || (l as { dates?: { end?: string } }).dates?.end || '9999-12-31'));
     const diff = Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
     return diff >= 0 && diff <= 90;
   });
 
-  const expiring365 = leases.filter((l) => {
-    const end = new Date(l.end_date || l.dates?.end || '9999-12-31');
+  const expiring365 = portfolioActive.filter((l) => {
+    const end = new Date(String((l as { end_date?: string; dates?: { end?: string } }).end_date || (l as { dates?: { end?: string } }).dates?.end || '9999-12-31'));
     const diff = Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
     return diff >= 0 && diff <= 365;
   });
 
-  const totalContractedValue = leases.reduce((s, l) => {
-    const m = l.monthly_payment ?? l.payments?.monthly ?? 0;
-    const t = l.dates?.term_months || 12;
+  const totalContractedValue = portfolioActive.reduce((s, l) => {
+    const row = l as { monthly_payment?: number; payments?: { monthly?: number }; dates?: { term_months?: number } };
+    const m = row.monthly_payment ?? row.payments?.monthly ?? 0;
+    const t = row.dates?.term_months || 12;
     return s + m * t;
   }, 0);
 
-  const totalLeaseLiability = leases.reduce((s, l) => {
-    const direct = Number(l.liability);
-    const fromResults = Number((l.results as any)?.lease_liability);
-    const safe = Number.isFinite(direct) ? direct : Number.isFinite(fromResults) ? fromResults : 0;
-    return s + safe;
-  }, 0);
-  const totalRou = leases.reduce((s, l) => {
-    const direct = Number(l.rou);
-    const fromResults = Number((l.results as any)?.rou_asset);
-    const safe = Number.isFinite(direct) ? direct : Number.isFinite(fromResults) ? fromResults : 0;
-    return s + safe;
-  }, 0);
-  const pendingCalc = leases.filter((l) => l.results == null || (l.liability == null && (l.results as any)?.lease_liability == null)).length;
+  const totalLeaseLiability = portfolioActive.reduce((s, l) => s + leaseLiabilityOf(l), 0);
+  const totalRou = portfolioActive.reduce((s, l) => s + leaseRouOf(l), 0);
+  const allPortfolioLiability = portfolioAll.reduce((s, l) => s + leaseLiabilityOf(l), 0);
+  const pendingCalc = portfolioActive.filter((l) => {
+    const row = l as { results?: unknown; liability?: unknown };
+    return row.results == null || (row.liability == null && (row.results as { lease_liability?: unknown } | null)?.lease_liability == null);
+  }).length;
 
   const averageLeaseValue = totalActive > 0 ? totalContractedValue / totalActive : 0;
 
   const typeCounts: Record<string, number> = {};
-  leases.forEach((l) => {
-    const t = (l.lease_type || inferAssetType(l.asset || '') || 'Other').trim() || 'Other';
+  portfolioActive.forEach((l) => {
+    const row = l as { lease_type?: string; asset?: string };
+    const t = (row.lease_type || inferAssetType(row.asset || '') || 'Other').trim() || 'Other';
     typeCounts[t] = (typeCounts[t] || 0) + 1;
   });
   const pieData = Object.entries(typeCounts).map(([name, value]) => ({ name, value }));
 
   const scheduleByMonth: Record<string, number> = {};
-  leases.forEach((l) => {
-    const schedule = (l.results?.amortization_schedule || []) as any[];
+  portfolioActive.forEach((l) => {
+    const schedule = ((l as { results?: { amortization_schedule?: unknown[] } }).results?.amortization_schedule || []) as any[];
     schedule.forEach((row: any) => {
       const dateStr = row.payment_date ?? row.Date;
       if (!dateStr) return;
@@ -287,11 +315,17 @@ export default function IFRS16DashboardPage() {
     d.setMonth(d.getMonth() + i);
     const monthStart = new Date(d.getFullYear(), d.getMonth(), 1);
     let total = 0;
-    leases.forEach((l) => {
-      const end = new Date(l.dates?.end || '9999-12-31');
-      const start = new Date(l.dates?.commencement || '2020-01-01');
+    portfolioActive.forEach((l) => {
+      const row = l as {
+        dates?: { end?: string; commencement?: string };
+        end_date?: string;
+        payments?: { monthly?: number };
+        monthly_payment?: number;
+      };
+      const end = new Date(row.end_date || row.dates?.end || '9999-12-31');
+      const start = new Date(row.dates?.commencement || '2020-01-01');
       if (monthStart >= start && monthStart <= end) {
-        total += l.payments?.monthly || 0;
+        total += row.monthly_payment ?? row.payments?.monthly ?? 0;
       }
     });
     return {
@@ -377,7 +411,7 @@ export default function IFRS16DashboardPage() {
     URL.revokeObjectURL(url);
   };
 
-  const recentLeases = [...leases].slice(0, 10);
+  const recentLeases = ([...portfolioActive] as any[]).slice(0, 10);
   const cfoMetrics = cfoInsightsResult?.metrics || {};
   const cfoHealthScore = Number(cfoInsightsResult?.health_score) || 0;
   const cfoHealthColors = healthScoreColor(cfoHealthScore);
@@ -385,10 +419,15 @@ export default function IFRS16DashboardPage() {
   const topLeaseRows = (cfoMetrics.top_leases_by_liability as Array<Record<string, unknown>>) || [];
   const totalLiabilityForInsights = Number(cfoMetrics.total_liability) || totalLeaseLiability || 0;
   const weightedIbrAcrossPortfolio = (() => {
-    if (leases.length === 0) return 0;
-    const weighted = leases.reduce((sum, lease) => {
-      const liability = Number(lease.liability ?? lease.results?.lease_liability ?? 0);
-      const rawRate = Number(lease.discount_rate ?? lease.results?.annual_discount_rate ?? 0);
+    if (portfolioActive.length === 0) return 0;
+    const weighted = portfolioActive.reduce((sum, lease) => {
+      const row = lease as {
+        liability?: number;
+        results?: { lease_liability?: number; annual_discount_rate?: number };
+        discount_rate?: number;
+      };
+      const liability = Number(row.liability ?? row.results?.lease_liability ?? 0);
+      const rawRate = Number(row.discount_rate ?? row.results?.annual_discount_rate ?? 0);
       const pctRate = rawRate <= 1 ? rawRate * 100 : rawRate;
       return sum + liability * pctRate;
     }, 0);
@@ -399,11 +438,18 @@ export default function IFRS16DashboardPage() {
   const largestLeasePortfolioPct =
     totalLiabilityForInsights > 0 ? (largestLeaseLiability / totalLiabilityForInsights) * 100 : 0;
   const expiringNext12MonthsCount = Number(cfoMetrics.expiring_12_months) || expiring365.length;
-  const highestCostLease = [...leases].sort(
+  const highestCostLease = [...portfolioActive].sort(
     (a, b) =>
-      Number(b.monthly_payment ?? b.payments?.monthly ?? 0) -
-      Number(a.monthly_payment ?? a.payments?.monthly ?? 0)
-  )[0];
+      Number((b as { monthly_payment?: number; payments?: { monthly?: number } }).monthly_payment ?? (b as { payments?: { monthly?: number } }).payments?.monthly ?? 0) -
+      Number((a as { monthly_payment?: number; payments?: { monthly?: number } }).monthly_payment ?? (a as { payments?: { monthly?: number } }).payments?.monthly ?? 0)
+  )[0] as {
+    monthly_payment?: number;
+    payments?: { monthly?: number };
+    dates?: { term_months?: number };
+    title?: string;
+    asset?: string;
+    id?: string;
+  } | undefined;
   const leaseVsBuyRecommendation = highestCostLease
     ? (() => {
         const monthly = Number(highestCostLease.monthly_payment ?? highestCostLease.payments?.monthly ?? 0);
@@ -420,7 +466,7 @@ export default function IFRS16DashboardPage() {
       ? `Lease liability is ${Number(cfoMetrics.leverage_ratio_pct).toFixed(1)}% of total assets, which may pressure leverage covenants depending on lender thresholds.`
       : `Current leverage impact is moderate at ${Number(cfoMetrics.leverage_ratio_pct || 0).toFixed(1)}% of assets; monitor covenant headroom as new leases are added.`;
 
-  const hasLivePortfolio = leases.length > 0;
+  const hasLivePortfolio = portfolioActive.length > 0 || portfolioAll.length > 0;
   const formatKpiAmount = (amount: number) =>
     marketMode === 'IN' ? formatCrores(amount) : fmtPortfolio(amount);
 
@@ -439,25 +485,46 @@ export default function IFRS16DashboardPage() {
 
   const pieChartData = pieData.map((d, i) => ({ ...d, color: PIE_COLORS[i % PIE_COLORS.length] }));
 
-  const recentCalculations = [...leases]
+  const recentCalculations = [...portfolioActive]
     .sort((a, b) => {
-      const da = new Date(a.updated_at || a.start_date || a.dates?.commencement || 0).getTime();
-      const db = new Date(b.updated_at || b.start_date || b.dates?.commencement || 0).getTime();
+      const da = new Date(
+        String(
+          (a as { updated_at?: string; start_date?: string; dates?: { commencement?: string } }).updated_at ||
+            (a as { start_date?: string }).start_date ||
+            (a as { dates?: { commencement?: string } }).dates?.commencement ||
+            0
+        )
+      ).getTime();
+      const db = new Date(
+        String(
+          (b as { updated_at?: string; start_date?: string; dates?: { commencement?: string } }).updated_at ||
+            (b as { start_date?: string }).start_date ||
+            (b as { dates?: { commencement?: string } }).dates?.commencement ||
+            0
+        )
+      ).getTime();
       return db - da;
     })
     .slice(0, 5)
     .map((l) => {
-      const liability = Number(l.liability ?? (l.results as any)?.lease_liability ?? 0);
-      const hasResults = l.results != null || liability > 0;
+      const liability = leaseLiabilityOf(l);
+      const hasResults = (l as { results?: unknown }).results != null || liability > 0;
       return {
-        id: String(l.id || l.lease_id),
-        date: l.updated_at || l.start_date || l.dates?.commencement || new Date().toISOString().slice(0, 10),
-        leaseName: l.title || l.asset || 'Untitled lease',
+        id: String((l as { id?: string; lease_id?: string }).id || (l as { lease_id?: string }).lease_id),
+        date:
+          (l as { updated_at?: string; start_date?: string; dates?: { commencement?: string } }).updated_at ||
+          (l as { start_date?: string }).start_date ||
+          (l as { dates?: { commencement?: string } }).dates?.commencement ||
+          new Date().toISOString().slice(0, 10),
+        leaseName:
+          (l as { title?: string; asset?: string }).title ||
+          (l as { asset?: string }).asset ||
+          'Untitled lease',
         standard: 'IFRS 16',
         liability,
         status: hasResults ? 'Completed' : 'Pending',
-        fileId: l.excel_file_id as string | undefined,
-        leaseId: String(l.id || l.lease_id),
+        fileId: (l as { excel_file_id?: string }).excel_file_id,
+        leaseId: String((l as { id?: string; lease_id?: string }).id || (l as { lease_id?: string }).lease_id),
       };
     });
 
@@ -478,27 +545,41 @@ export default function IFRS16DashboardPage() {
             title="Total Lease Liability"
             value={kpiLiability}
             icon={FileText}
-            subtitle={hasLivePortfolio ? 'Portfolio total' : 'No leases in repository'}
+            subtitle={
+              hasLivePortfolio
+                ? `Active leases · ${totalPortfolioCount} total in repository`
+                : 'No leases in repository'
+            }
           />
           <KPICard
             title="Total ROU Assets"
             value={kpiRou}
             icon={TrendingUp}
-            subtitle={hasLivePortfolio ? 'Portfolio total' : 'No leases in repository'}
+            subtitle={hasLivePortfolio ? 'Active leases only' : 'No leases in repository'}
           />
           <KPICard
             title="Active Leases"
             value={kpiActive}
             icon={Calendar}
-            subtitle="Across all locations"
+            subtitle={`Active: ${totalActive} | Total portfolio: ${totalPortfolioCount}`}
           />
           <KPICard
             title="Expiring Soon"
             value={kpiExpiring}
             icon={AlertCircle}
-            subtitle="Next 90 days"
+            subtitle="Next 90 days (active only)"
           />
         </div>
+        {portfolioExpired.length > 0 && (
+          <p className="text-xs text-[#64748b]">
+            {portfolioExpired.length} expired lease{portfolioExpired.length === 1 ? '' : 's'} excluded from KPIs
+            above
+            {allPortfolioLiability > 0 && allPortfolioLiability !== totalLeaseLiability
+              ? ` · All-portfolio liability (context): ${fmtPortfolio(allPortfolioLiability)}`
+              : ''}
+            .
+          </p>
+        )}
 
         {/* Quick Actions */}
         <div className="flex flex-wrap gap-2">

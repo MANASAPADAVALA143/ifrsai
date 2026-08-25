@@ -190,6 +190,32 @@ export type ExpiryClassification<T> = {
 };
 
 /**
+ * Split a lease list into explicit populations for dashboard consistency.
+ * Active = end_date >= today (days_to_expiry >= 0). Leases with unparseable
+ * end_date are excluded from active (they must not silently inflate counts).
+ */
+export function splitPortfolioPopulations<T extends Record<string, unknown>>(
+  rows: T[],
+  today: string,
+  endDateOf: (row: T) => unknown = (row) => row.end_date ?? row.endDate
+): { portfolioAll: T[]; portfolioActive: T[]; portfolioExpired: T[] } {
+  const portfolioAll = [...rows];
+  const portfolioActive: T[] = [];
+  const portfolioExpired: T[] = [];
+  for (const row of rows) {
+    const days = daysToExpiry(endDateOf(row), today);
+    if (days == null) {
+      // No reliable end_date — do not count as active on the active dashboard.
+      portfolioExpired.push(row);
+      continue;
+    }
+    if (days >= 0) portfolioActive.push(row);
+    else portfolioExpired.push(row);
+  }
+  return { portfolioAll, portfolioActive, portfolioExpired };
+}
+
+/**
  * Classifies leases into active/expired and expiry buckets from a single pass,
  * using ONLY days_to_expiry (computed once) — never a re-derived boolean flag.
  * `rows` must already carry a `days_to_expiry` field (see mapLeaseForPrompt equivalents).
@@ -198,7 +224,9 @@ export function classifyExpiry<T extends { days_to_expiry: number | null }>(
   mappedLeases: T[]
 ): ExpiryClassification<T> {
   const active = mappedLeases.filter((l) => l.days_to_expiry !== null && (l.days_to_expiry as number) >= 0);
-  const expired = mappedLeases.filter((l) => l.days_to_expiry !== null && (l.days_to_expiry as number) < 0);
+  const expired = mappedLeases.filter(
+    (l) => l.days_to_expiry === null || (l.days_to_expiry as number) < 0
+  );
   const expiring90 = active.filter((l) => (l.days_to_expiry as number) <= 90);
   const expiring12mo = active.filter(
     (l) => (l.days_to_expiry as number) > 90 && (l.days_to_expiry as number) <= 365

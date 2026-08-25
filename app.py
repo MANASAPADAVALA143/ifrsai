@@ -2938,8 +2938,10 @@ Lease Portfolio for CFO Analysis (all amounts in {portfolio_currency}):
 - Lease Intensity (payments/revenue): {lease_intensity:.1f}%
 - Budget Variance: {fmt(budget_variance)}
 
-IMPORTANT: When discussing "amortisation phase" or portfolio maturity, use the CURRENT carrying
-values above, never the INITIAL-measurement values.
+IMPORTANT: When discussing portfolio maturity or cash-flow decline, use the CURRENT carrying
+values and ACTIVE lease counts above. Do NOT claim an "accelerating amortisation phase" or any
+amortisation-rate comparison — those rates are not in the supplied data. You may say cash
+outflows decline as leases expire when that follows from the forecast figures.
 
 Pre-built 5-year cash flow forecast (year-by-year, real lease terms + escalation — use these exact figures):
   Year 1: {fmt(forecast_rounded[0])}
@@ -2976,11 +2978,15 @@ IMPORTANT NOTES FOR YOUR ANALYSIS:
 - The portfolio totals above include BOTH an INITIAL-measurement figure (at each lease's
   commencement date) and a CURRENT carrying-value figure (as of {today.isoformat()}). The
   Top-5 concentration figures above are CURRENT values — use current values consistently
-  whenever discussing concentration, amortisation phase, or current portfolio maturity.
+  whenever discussing concentration or current portfolio maturity.
   Only use the INITIAL figures when explicitly discussing initial recognition.
+- Always state counts with their population: e.g. "9 of {len(active_leases)} active leases
+  expire within 12 months" — never "9 leases" without saying active vs total ({len(leases)}).
 - Report the active lease count as {len(active_leases)} (not the total {len(leases)}).
 - Do NOT generate a "cost optimisation" or "sublease opportunity" insight — this portfolio
   data contains no utilisation %, market rent, or sublease income fields to support one.
+- Do NOT invent findings that require fields not present in the lease records (utilisation,
+  market rent, amortisation-rate vs peers). If unsure, omit the claim.
 """
 
         ai_response = client.messages.create(

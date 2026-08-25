@@ -201,9 +201,14 @@ CRITICAL RULES — MANDATORY COMPLIANCE:
 3. Report active lease count as ${activeLeasesAll.length} (NOT ${rows.length}); the remaining ${alreadyExpired.length} are past their contractual end date.
 4. Report "expiring within 12 months" as ${expiringTotal12mo} (= ${expiring90.length} within 90 days + ${expiring12mo.length} in 91–365 days).
 5. Use the pre-built 5-year forecast numbers above. Do NOT substitute flat annual × 5 arithmetic.
-6. Use the CURRENT carrying values (figure B) for any amortisation-phase or portfolio-maturity commentary. Use the INITIAL-measurement values (figure A) only when explicitly discussing initial recognition.
-7. Do NOT generate a "cost optimisation" or "sublease opportunity" insight unless the portfolio data includes utilisation_pct, market_rent, or sublease_income fields. None of those fields are present in this dataset — omit this insight category entirely.
-8. You MUST echo health_score=${health.score} and health_label="${health.label} (indicative)" exactly as given — do not compute your own score.
+6. Use the CURRENT carrying values (figure B) for portfolio-maturity commentary. Use INITIAL
+   values (figure A) only when discussing initial recognition. Do NOT claim an "accelerating
+   amortisation phase" or any amortisation-rate comparison — those rates are not in the data.
+   You may say cash outflows decline as leases expire when the forecast supports it.
+7. Always state counts with population: "9 of N active leases", never bare "9 leases" when
+   total portfolio size differs from active count.
+8. Do NOT generate a "cost optimisation" or "sublease opportunity" insight unless the portfolio data includes utilisation_pct, market_rent, or sublease_income fields. None of those fields are present in this dataset — omit this insight category entirely.
+9. You MUST echo health_score=${health.score} and health_label="${health.label} (indicative)" exactly as given — do not compute your own score.
 
 Return ONLY valid JSON (no markdown):
 {

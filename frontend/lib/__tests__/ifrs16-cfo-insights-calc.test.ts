@@ -9,6 +9,7 @@ import {
   daysToExpiry,
   buildCashFlowForecast,
   classifyExpiry,
+  splitPortfolioPopulations,
   computeHealthScore,
   leaseLiabilityFromRow,
   rouAssetFromRow,
@@ -43,6 +44,23 @@ describe('daysToExpiry', () => {
   it('returns null for missing or unparseable end_date, never a false 0', () => {
     expect(daysToExpiry(undefined, TODAY)).toBeNull();
     expect(daysToExpiry('not-a-date', TODAY)).toBeNull();
+  });
+});
+
+describe('splitPortfolioPopulations — active dashboard consistency', () => {
+  it('keeps end_date >= today in active and expired otherwise', () => {
+    const rows = [
+      { id: 'A', end_date: '2027-01-01', liability: 100 },
+      { id: 'B', end_date: '2025-01-01', liability: 50 },
+      { id: 'C', end_date: '', liability: 25 },
+    ];
+    const { portfolioAll, portfolioActive, portfolioExpired } = splitPortfolioPopulations(
+      rows,
+      TODAY
+    );
+    expect(portfolioAll).toHaveLength(3);
+    expect(portfolioActive.map((r) => r.id)).toEqual(['A']);
+    expect(portfolioExpired.map((r) => r.id).sort()).toEqual(['B', 'C']);
   });
 });
 

@@ -10,6 +10,7 @@ import { Button } from '@/components/Button';
 import { ifrs16Api } from '@/lib/api';
 import { saveToLeaseRepository, saveManyToLeaseRepository, buildLeaseEntry } from '@/lib/lease-repository';
 import { formatLeaseMoney } from '@/lib/ifrs16-currency';
+import { splitPortfolioPopulations } from '@/lib/ifrs16-cfo-insights-calc';
 
 const cardClass =
   'bg-white rounded-[14px] border border-[#e2e8f0] shadow-[0_2px_8px_rgba(0,0,0,0.06)]';
@@ -1114,6 +1115,21 @@ function toPortfolioLeases(parsed: ParsedLeaseRow[], bulk: MergedBulkResponse, t
     });
 }
 
+/** Filter to end_date >= today FIRST — every KPI / % / narrative must use this set. */
+function filterActivePortfolioLeases(leases: PortfolioLease[], todayIso: string): {
+  portfolioAll: PortfolioLease[];
+  portfolioActive: PortfolioLease[];
+  portfolioExpired: PortfolioLease[];
+} {
+  return splitPortfolioPopulations(leases as unknown as Record<string, unknown>[], todayIso, (l) =>
+    (l as unknown as PortfolioLease).end_date
+  ) as unknown as {
+    portfolioAll: PortfolioLease[];
+    portfolioActive: PortfolioLease[];
+    portfolioExpired: PortfolioLease[];
+  };
+}
+
 export default function QuickAnalysisPage() {
   const router = useRouter();
   const excelIdCacheRef = useRef<Map<string, string>>(new Map());
@@ -1420,17 +1436,23 @@ export default function QuickAnalysisPage() {
   useEffect(() => {
     if (phase !== 'results' || !bulkResult) return;
     const todayIso = new Date().toISOString().split('T')[0];
-    const leases = toPortfolioLeases(parsedRows, bulkResult, todayIso);
-    if (leases.length === 0) {
+    // Filter to end_date >= today FIRST, then analyse — never mix expired into AI population.
+    const allLeases = toPortfolioLeases(parsedRows, bulkResult, todayIso);
+    const { portfolioActive } = filterActivePortfolioLeases(allLeases, todayIso);
+    if (portfolioActive.length === 0) {
       setAiAnalysis(null);
-      setAiError('No successful leases for Portfolio Insights.');
+      setAiError(
+        allLeases.length > 0
+          ? `No active leases (end_date ≥ today). ${allLeases.length} calculated lease(s) are expired.`
+          : 'No successful leases for Portfolio Insights.'
+      );
       return;
     }
     let cancelled = false;
     setAiLoading(true);
     setAiError(null);
     setAiAnalysis(null);
-    const leasePayload = leases.map((l) => ({
+    const leasePayload = portfolioActive.map((l) => ({
       id: l.id,
       asset: l.asset_description,
       monthly_payment: l.monthly_payment ?? 0,
@@ -1476,18 +1498,89 @@ export default function QuickAnalysisPage() {
   const rowByLeaseId = useMemo(() => new Map(parsedRows.map((r) => [r.lease_id, r])), [parsedRows]);
 
   const breakdownRows = useMemo(() => {
-    if (!bulkResult) return [];
-    const totalL = bulkResult.portfolio_summary.total_lease_liability || 0;
-    return bulkResult.results
-      .filter((r) => r.status === 'success')
-      .map((r) => {
-        const pr = rowByLeaseId.get(r.lease_id);
-        const ll = r.lease_liability || 0;
-        const pct = totalL > 0 ? (ll / totalL) * 100 : 0;
-        return { r, pr, ll, pct };
-      })
-      .sort((a, b) => b.ll - a.ll);
-  }, [bulkResult, rowByLeaseId]);
+    if (!bulkResult) {
+      return {
+        active: [] as Array<{
+          r: BulkResultRow;
+          pr: ParsedLeaseRow | undefined;
+          ll: number;
+          pct: number;
+          endDate: string;
+        }>,
+        expired: [] as Array<{
+          r: BulkResultRow;
+          pr: ParsedLeaseRow | undefined;
+          ll: number;
+          pct: number;
+          endDate: string;
+        }>,
+        activeLiabilityTotal: 0,
+        allLiabilityTotal: 0,
+        todayIso: new Date().toISOString().slice(0, 10),
+      };
+    }
+    // 1) Filter to end_date >= today FIRST
+    // 2) Then compute every total / % from that filtered set only
+    const todayIso = new Date().toISOString().split('T')[0];
+    const allLeases = toPortfolioLeases(parsedRows, bulkResult, todayIso);
+    const { portfolioAll, portfolioActive, portfolioExpired } = filterActivePortfolioLeases(
+      allLeases,
+      todayIso
+    );
+
+    const rowLiability = (l: PortfolioLease) =>
+      Number(l.results?.current_lease_liability ?? l.results?.lease_liability ?? 0) || 0;
+    const rowRou = (l: PortfolioLease) =>
+      Number(l.results?.current_rou_asset ?? l.results?.rou_asset ?? 0) || 0;
+
+    const toBreakdown = (leases: PortfolioLease[], denominator: number) =>
+      leases
+        .map((l) => {
+          const r =
+            bulkResult.results.find((x) => x.lease_id === l.id && x.status === 'success') ||
+            ({
+              lease_id: l.id,
+              status: 'success' as const,
+              lease_liability: l.results?.lease_liability ?? 0,
+              rou_asset: l.results?.rou_asset ?? 0,
+              monthly_depreciation: l.results?.monthly_depreciation ?? 0,
+              total_interest: l.results?.total_interest ?? 0,
+            } as BulkResultRow);
+          const pr = rowByLeaseId.get(l.id);
+          const ll = rowLiability(l);
+          return {
+            r: {
+              ...r,
+              // Surface current carrying on the row so cards/table match AI population totals.
+              lease_liability: ll,
+              rou_asset: rowRou(l),
+            },
+            pr,
+            ll,
+            endDate: l.end_date,
+            end_date: l.end_date,
+            pct: denominator > 0 ? (ll / denominator) * 100 : 0,
+          };
+        })
+        .sort((a, b) => b.ll - a.ll);
+
+    const activeLiabilityTotal = portfolioActive.reduce((s, l) => s + rowLiability(l), 0);
+    const allLiabilityTotal = portfolioAll.reduce((s, l) => s + rowLiability(l), 0);
+
+    return {
+      active: toBreakdown(portfolioActive, activeLiabilityTotal),
+      expired: toBreakdown(portfolioExpired, allLiabilityTotal),
+      activeLiabilityTotal,
+      allLiabilityTotal,
+      todayIso,
+    };
+  }, [bulkResult, parsedRows, rowByLeaseId]);
+
+  const activeCashOutflow = useMemo(
+    () =>
+      breakdownRows.active.reduce((s, row) => s + (row.pr?.monthly_payment || 0), 0),
+    [breakdownRows.active]
+  );
 
   /** Distinct backend error strings when status === 'error' (explains 0 / N processed). */
   const bulkFailureMessages = useMemo(() => {
@@ -1539,11 +1632,18 @@ export default function QuickAnalysisPage() {
 
   const onExplainPortfolio = async () => {
     if (!bulkResult) return;
-    const totalL = bulkResult.portfolio_summary.total_lease_liability || 0;
-    const types = [...new Set(readyRows.map((r) => inferAssetType(r.asset_description)))];
-    const prompt = `In exactly 3 short sentences, plain English, no accounting jargon, explain this lease portfolio for an executive: 
-${readyRows.length} leases, total liability about ${formatAmount(totalL)}, asset types: ${types.join(', ')}. 
-Do not use bullet points.`;
+    const totalL = breakdownRows.activeLiabilityTotal;
+    const activeCount = breakdownRows.active.length;
+    const types = [
+      ...new Set(
+        breakdownRows.active
+          .map((row) => inferAssetType(row.pr?.asset_description || ''))
+          .filter(Boolean)
+      ),
+    ];
+    const prompt = `In exactly 3 short sentences, plain English, no accounting jargon, explain this ACTIVE lease portfolio for an executive (end_date ≥ today only; expired leases excluded): 
+${activeCount} active leases, total liability about ${formatAmount(totalL)}, asset types: ${types.join(', ') || '—'}. 
+Do not use bullet points. Do not mention expired leases or invent amortisation-phase claims.`;
     setExplainLoading(true);
     setExplainOpen(true);
     setExplainText('');
@@ -1567,11 +1667,6 @@ Do not use bullet points.`;
       setExplainLoading(false);
     }
   };
-
-  const totalCashOutflow = useMemo(
-    () => readyRows.reduce((s, r) => s + (r.monthly_payment || 0), 0),
-    [readyRows]
-  );
 
   const resolveExcelFileId = async (br: BulkResultRow): Promise<string | null> => {
     const fromApi = br.excel_file_id?.trim();
@@ -1958,62 +2053,76 @@ Do not use bullet points.`;
             )}
 
             <div className="w-full rounded-2xl border border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50 p-6 sm:p-8 shadow-sm">
-              <div className="flex flex-wrap items-center gap-2 mb-4">
+              <div className="flex flex-wrap items-center gap-2 mb-2">
                 <h3 className="text-lg font-bold text-gray-900">Portfolio Summary</h3>
                 <span className="ml-2 text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded font-medium">
-                  {portfolioCurrency} Portfolio
+                  {portfolioCurrency} · Active leases
                 </span>
               </div>
+              <p className="text-xs text-gray-600 mb-4">
+                Active: {breakdownRows.active.length} · Total portfolio: {breakdownRows.active.length + breakdownRows.expired.length}
+                {breakdownRows.expired.length > 0
+                  ? ` (${breakdownRows.expired.length} expired — excluded from KPIs below)`
+                  : ''}
+                {breakdownRows.allLiabilityTotal > 0 &&
+                  breakdownRows.allLiabilityTotal !== breakdownRows.activeLiabilityTotal && (
+                    <span className="block mt-1 text-gray-500">
+                      All-portfolio liability (context): {formatAmount(breakdownRows.allLiabilityTotal)} · Active
+                      liability: {formatAmount(breakdownRows.activeLiabilityTotal)}
+                    </span>
+                  )}
+              </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="p-6 rounded-xl bg-white shadow-sm flex flex-col gap-2">
                   <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
                     Total Lease Liability
                   </p>
                   <p className="text-3xl font-bold text-blue-700">
-                    {formatAmount(bulkResult.portfolio_summary.total_lease_liability || 0)}
+                    {formatAmount(breakdownRows.activeLiabilityTotal)}
                   </p>
-                  <span className="text-2xl" aria-hidden>
-                    📊
-                  </span>
+                  <p className="text-xs text-gray-500">Sum of active leases only</p>
                 </div>
                 <div className="p-6 rounded-xl bg-white shadow-sm flex flex-col gap-2">
                   <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Total ROU Asset</p>
                   <p className="text-3xl font-bold text-green-700">
-                    {formatAmount(bulkResult.portfolio_summary.total_rou_asset || 0)}
+                    {formatAmount(
+                      breakdownRows.active.reduce((s, row) => s + (row.r.rou_asset || 0), 0)
+                    )}
                   </p>
-                  <span className="text-2xl" aria-hidden>
-                    📈
-                  </span>
+                  <p className="text-xs text-gray-500">Sum of active leases only</p>
                 </div>
                 <div className="p-6 rounded-xl bg-white shadow-sm flex flex-col gap-2">
                   <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
                     Monthly Cash Outflow
                   </p>
-                  <p className="text-3xl font-bold text-orange-600">{formatAmount(totalCashOutflow)}</p>
-                  <span className="text-2xl" aria-hidden>
-                    💸
-                  </span>
+                  <p className="text-3xl font-bold text-orange-600">{formatAmount(activeCashOutflow)}</p>
+                  <p className="text-xs text-gray-500">Active leases only</p>
                 </div>
                 <div className="p-6 rounded-xl bg-white shadow-sm flex flex-col gap-2">
-                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Leases Processed</p>
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Active Leases</p>
                   <p className="text-3xl font-bold text-purple-700">
-                    {bulkResult.successful} / {bulkResult.total} <span aria-hidden>✅</span>
+                    {breakdownRows.active.length}
+                    <span className="text-base font-normal text-gray-400">
+                      {' '}
+                      / {breakdownRows.active.length + breakdownRows.expired.length}
+                    </span>
                   </p>
-                  <span className="text-2xl" aria-hidden>
-                    ✓
-                  </span>
+                  <p className="text-xs text-gray-500">
+                    Active: {breakdownRows.active.length} | Total portfolio:{' '}
+                    {breakdownRows.active.length + breakdownRows.expired.length}
+                  </p>
                 </div>
               </div>
             </div>
 
-            {breakdownRows.length >= 2 && (
+            {breakdownRows.active.length >= 2 && (
               <div className="w-full">
                 <div className="flex flex-wrap items-center gap-2 mb-3">
                   <h3 className="text-lg font-bold text-[#0f172a]">
                     Lease Liability Movement — Portfolio Reconciliation
                   </h3>
                   <span className="text-[10px] sm:text-xs font-semibold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">
-                    IFRS 16 §28
+                    IFRS 16 §28 · Active only
                   </span>
                 </div>
                 <div className="rounded-xl bg-white shadow-sm border border-gray-200 overflow-hidden">
@@ -2037,12 +2146,10 @@ Do not use bullet points.`;
                       <tr className="border-b border-gray-100 font-bold border-t-2 border-blue-200 bg-white">
                         <td className="px-4 py-2.5 text-gray-900">+ New leases</td>
                         <td className="px-4 py-2.5 text-right font-medium text-gray-900">
-                          {formatAmount(
-                            breakdownRows.reduce((s, row) => s + (row.ll || 0), 0)
-                          )}
+                          {formatAmount(breakdownRows.activeLiabilityTotal)}
                         </td>
                       </tr>
-                      {breakdownRows.map(({ r, ll }) => (
+                      {breakdownRows.active.map(({ r, ll }) => (
                         <tr key={`rec-${r.lease_id}`} className="border-b border-gray-100 bg-gray-50">
                           <td className="pl-8 pr-4 py-2 text-sm text-gray-600">{r.lease_id}</td>
                           <td className="px-4 py-2 text-right text-sm font-medium text-gray-700 tabular-nums">
@@ -2060,7 +2167,7 @@ Do not use bullet points.`;
                       <tr className="font-bold border-t-2 border-blue-200 bg-white">
                         <td className="px-4 py-2.5 text-gray-900">Closing balance</td>
                         <td className="px-4 py-2.5 text-right font-medium text-gray-900">
-                          {formatAmount(breakdownRows.reduce((s, row) => s + (row.ll || 0), 0))}
+                          {formatAmount(breakdownRows.activeLiabilityTotal)}
                         </td>
                       </tr>
                     </tbody>
@@ -2068,13 +2175,20 @@ Do not use bullet points.`;
                 </div>
                 <p className="text-xs text-gray-500 mt-2 leading-relaxed">
                   Opening balance is {symbol}0 as these are newly calculated leases. In production, import your
-                  prior period closing balance for full movement analysis.
+                  prior period closing balance for full movement analysis. Expired leases are excluded from this
+                  reconciliation.
                 </p>
               </div>
             )}
 
             <div className="flex flex-col gap-6">
-              {breakdownRows.map(({ r, pr, ll, pct }) => {
+              <h3 className="text-lg font-bold text-gray-900">
+                Active leases
+                <span className="ml-2 text-sm font-normal text-gray-500">
+                  ({breakdownRows.active.length}) · % of active portfolio liability
+                </span>
+              </h3>
+              {breakdownRows.active.map(({ r, pr, ll, pct }) => {
                 const calc = (r.calculation_results ?? null) as Record<string, unknown> | null;
                 const sched = getAmortizationSchedule(calc);
                 const tab = leaseDetailTab[r.lease_id] || 'amort';
@@ -2379,7 +2493,7 @@ Do not use bullet points.`;
 
                       <div>
                         <div className="flex justify-between text-xs text-gray-500 uppercase tracking-wide mb-1.5">
-                          <span>% of Portfolio</span>
+                          <span>% of Active Portfolio</span>
                           <span className="tabular-nums">{pct.toFixed(1)}%</span>
                         </div>
                         <div className="h-2.5 rounded-full bg-gray-200 overflow-hidden">
@@ -2692,6 +2806,30 @@ Do not use bullet points.`;
               })}
             </div>
 
+            {breakdownRows.expired.length > 0 && (
+              <details className="w-full rounded-xl border border-red-200 bg-red-50/40 open:bg-white open:shadow-sm">
+                <summary className="cursor-pointer select-none px-4 py-3 text-sm font-semibold text-red-900">
+                  Expired leases ({breakdownRows.expired.length}) — excluded from active KPIs and % of portfolio
+                </summary>
+                <div className="px-4 pb-4 space-y-2 border-t border-red-100">
+                  {breakdownRows.expired.map(({ r, pr, ll, endDate }) => (
+                    <div
+                      key={`expired-${r.lease_id}`}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-white border border-red-100 px-3 py-2 text-sm"
+                    >
+                      <div className="min-w-0">
+                        <p className="font-medium text-gray-900 truncate">
+                          {pr?.asset_description ?? r.lease_id}
+                        </p>
+                        <p className="text-xs text-red-700">Ended {endDate || '—'}</p>
+                      </div>
+                      <p className="tabular-nums font-semibold text-gray-700">{formatAmount(ll)}</p>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+
             <div className="w-full rounded-2xl border border-indigo-100 bg-white shadow-md overflow-hidden">
               <div className="px-5 py-4 border-b border-gray-100 flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -2994,7 +3132,12 @@ Do not use bullet points.`;
             </div>
 
             <div className="w-full">
-              <h3 className="text-lg font-bold text-[#0f172a] mb-3">Lease-by-Lease Breakdown</h3>
+              <h3 className="text-lg font-bold text-[#0f172a] mb-3">
+                Active Lease-by-Lease Breakdown
+                <span className="ml-2 text-sm font-normal text-gray-500">
+                  % of active portfolio liability ({formatAmount(breakdownRows.activeLiabilityTotal)})
+                </span>
+              </h3>
               <div className={`${cardClass} overflow-hidden`}>
                 <table className="w-full table-fixed text-xs sm:text-sm">
                   <thead>
@@ -3004,11 +3147,12 @@ Do not use bullet points.`;
                       <th className="px-2 py-2 text-right w-[16%]">Liability</th>
                       <th className="px-2 py-2 text-right w-[14%]">ROU</th>
                       <th className="px-2 py-2 text-right w-[10%]">IBR</th>
-                      <th className="px-2 py-2 text-right w-[18%]">% Port.</th>
+                      <th className="px-2 py-2 text-right w-[18%]">% Active</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(tableExpanded ? breakdownRows : breakdownRows.slice(0, 10)).map(({ r, pr, ll, pct }) => (
+                    {(tableExpanded ? breakdownRows.active : breakdownRows.active.slice(0, 10)).map(
+                      ({ r, pr, ll, pct }) => (
                       <tr key={r.lease_id} className="border-b border-[#f8fafc]">
                         <td className="px-2 py-2 truncate" title={String(pr?.asset_description ?? r.lease_id)}>
                           {pr?.asset_description ?? r.lease_id}
@@ -3033,17 +3177,20 @@ Do not use bullet points.`;
                           {pct.toFixed(1)}%
                         </td>
                       </tr>
-                    ))}
+                    )
+                    )}
                   </tbody>
                 </table>
-                {breakdownRows.length > 10 && (
+                {breakdownRows.active.length > 10 && (
                   <div className="p-3 border-t border-[#f1f5f9]">
                     <button
                       type="button"
                       className="text-sm font-semibold text-[#f97316] hover:underline"
                       onClick={() => setTableExpanded((v) => !v)}
                     >
-                      {tableExpanded ? 'Show less' : `Show all ${breakdownRows.length} leases`}
+                      {tableExpanded
+                        ? 'Show less'
+                        : `Show all ${breakdownRows.active.length} active leases`}
                     </button>
                   </div>
                 )}
