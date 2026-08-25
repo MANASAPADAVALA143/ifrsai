@@ -36,9 +36,8 @@ export function rouAssetFromRow(l: LeaseRow): number {
 
 /**
  * CURRENT carrying value of the lease liability as of the analysis date.
- * Falls back to the initial-measurement value (with the fallback flagged)
- * when no current value was supplied by the caller — e.g. no amortization
- * schedule was available for that lease.
+ * Lookup: explicit current_lease_liability → amortization schedule Closing_Balance
+ * → fallback to initial measurement (flagged).
  */
 export function currentLiabilityFromRow(l: LeaseRow): { value: number; isFallback: boolean } {
   const current = num(l.current_lease_liability);
@@ -46,6 +45,8 @@ export function currentLiabilityFromRow(l: LeaseRow): { value: number; isFallbac
   const res = l.results as LeaseRow | undefined;
   const nested = num(res?.current_lease_liability);
   if (nested > 0) return { value: nested, isFallback: false };
+  const fromSched = liabilityFromSchedule(l);
+  if (fromSched != null && fromSched >= 0) return { value: fromSched, isFallback: false };
   return { value: leaseLiabilityFromRow(l), isFallback: true };
 }
 
@@ -56,7 +57,47 @@ export function currentRouFromRow(l: LeaseRow): { value: number; isFallback: boo
   const res = l.results as LeaseRow | undefined;
   const nested = num(res?.current_rou_asset);
   if (nested > 0) return { value: nested, isFallback: false };
+  const fromSched = rouFromSchedule(l);
+  if (fromSched != null && fromSched >= 0) return { value: fromSched, isFallback: false };
   return { value: rouAssetFromRow(l), isFallback: true };
+}
+
+function scheduleRows(l: LeaseRow): LeaseRow[] {
+  const top = l.amortization_schedule;
+  if (Array.isArray(top)) return top as LeaseRow[];
+  const res = l.results as LeaseRow | undefined;
+  const nested = res?.amortization_schedule;
+  if (Array.isArray(nested)) return nested as LeaseRow[];
+  return [];
+}
+
+function latestScheduleRowOnOrBeforeToday(l: LeaseRow): LeaseRow | null {
+  const todayMs = Date.now();
+  let best: LeaseRow | null = null;
+  let bestMs = -Infinity;
+  for (const row of scheduleRows(l)) {
+    const rowMs = new Date(String(row.Date ?? row.date ?? '')).getTime();
+    if (Number.isNaN(rowMs) || rowMs > todayMs || rowMs <= bestMs) continue;
+    best = row;
+    bestMs = rowMs;
+  }
+  return best;
+}
+
+function liabilityFromSchedule(l: LeaseRow): number | null {
+  const row = latestScheduleRowOnOrBeforeToday(l);
+  if (!row) return null;
+  const v = num(
+    row['Lease Liability'] ?? row.lease_liability_balance ?? row.Closing_Balance ?? row.closing_balance
+  );
+  return v > 0 || row.Closing_Balance === 0 || row.closing_balance === 0 ? v : null;
+}
+
+function rouFromSchedule(l: LeaseRow): number | null {
+  const row = latestScheduleRowOnOrBeforeToday(l);
+  if (!row) return null;
+  const v = num(row['ROU Asset'] ?? row.rou_asset_balance ?? row.rou_nbv ?? row.rou_asset);
+  return v > 0 || row['ROU Asset'] === 0 ? v : null;
 }
 
 export function monthlyPaymentFromRow(l: LeaseRow): number {

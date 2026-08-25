@@ -90,14 +90,54 @@ type CfoInsightsResult = {
 };
 
 function leasesForCfoApi(raw: any[]) {
+  const todayIso = new Date().toISOString().slice(0, 10);
   return raw.map((l) => {
     const res = (l.results || {}) as Record<string, unknown>;
+    const initialLl = Number(l.liability ?? res.lease_liability ?? 0);
+    const initialRou = Number(l.rou ?? res.rou_asset ?? 0);
+    // Prefer explicit current fields; else read Closing_Balance from schedule as of today.
+    let currentLl = Number(l.current_lease_liability ?? res.current_lease_liability ?? 0);
+    let currentRou = Number(l.current_rou_asset ?? res.current_rou_asset ?? 0);
+    const schedule = Array.isArray(res.amortization_schedule)
+      ? (res.amortization_schedule as Record<string, unknown>[])
+      : Array.isArray(l.amortization_schedule)
+        ? (l.amortization_schedule as Record<string, unknown>[])
+        : [];
+    if ((currentLl <= 0 || currentRou <= 0) && schedule.length > 0) {
+      const asOfMs = new Date(todayIso).getTime();
+      let best: Record<string, unknown> | null = null;
+      let bestMs = -Infinity;
+      for (const row of schedule) {
+        const rowMs = new Date(String(row.Date ?? row.date ?? '')).getTime();
+        if (Number.isNaN(rowMs) || rowMs > asOfMs || rowMs <= bestMs) continue;
+        best = row;
+        bestMs = rowMs;
+      }
+      if (best) {
+        if (currentLl <= 0) {
+          currentLl =
+            Number(
+              best['Lease Liability'] ??
+                best.lease_liability_balance ??
+                best.Closing_Balance ??
+                best.closing_balance ??
+                0
+            ) || 0;
+        }
+        if (currentRou <= 0) {
+          currentRou =
+            Number(best['ROU Asset'] ?? best.rou_asset_balance ?? best.rou_nbv ?? 0) || 0;
+        }
+      }
+    }
     return {
       ...l,
       title: l.title || l.asset,
       contract_id: l.id || l.lease_id,
-      lease_liability: Number(l.liability ?? res.lease_liability ?? 0),
-      rou_asset: Number(l.rou ?? res.rou_asset ?? 0),
+      lease_liability: initialLl,
+      rou_asset: initialRou,
+      current_lease_liability: currentLl > 0 ? currentLl : initialLl,
+      current_rou_asset: currentRou > 0 ? currentRou : initialRou,
       monthly_payment: Number(l.monthly_payment ?? l.payments?.monthly ?? 0),
       end_date: l.end_date || l.dates?.end || '',
       status: String(l.status || 'active'),

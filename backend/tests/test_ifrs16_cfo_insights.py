@@ -15,7 +15,7 @@ methodology issues" report:
   5. The health score is deterministic and reproducible for the same inputs.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -459,3 +459,95 @@ class TestPercentageClaimReconciliation:
     def test_ignores_text_with_no_percentage_claim(self):
         text = "Total lease liability is AED 204,336,895 across 36 active leases."
         assert app_module._reconcile_percentage_claims(text) == []
+
+
+class TestCurrentLiabilityFromAmortizationSchedule:
+    """When current_lease_liability is absent, Closing_Balance from the schedule
+    as of today must be used — not the initial measurement. This is what kept
+    the body AED figure stuck at 187M (initial) after the first partial fix."""
+
+    def test_reads_closing_balance_not_initial(self):
+        lease = {
+            "id": "L1",
+            "lease_liability": 50_000_000.0,  # initial
+            "results": {
+                "amortization_schedule": [
+                    {"Date": "2024-01-01", "Closing_Balance": 50_000_000.0},
+                    {"Date": "2025-01-01", "Closing_Balance": 30_000_000.0},
+                    {"Date": "2026-01-01", "Closing_Balance": 18_000_000.0},
+                    {"Date": "2027-01-01", "Closing_Balance": 8_000_000.0},
+                ]
+            },
+        }
+        as_of = datetime.strptime("2026-08-25", "%Y-%m-%d").date()
+        value, is_fallback = app_module._ifrs16_current_liability(lease, as_of=as_of)
+        assert is_fallback is False
+        assert value == 18_000_000.0  # not 50M initial
+
+    def test_title_and_body_use_same_current_pct(self):
+        """Regression: title said 47% while body said 91.5% — both must come from
+        the same current top-5 sum / current total after override."""
+        total_current = 204_336_895.0
+        top5_current = round(total_current * 0.474)  # 96,855,688
+        currents = [40_000_000.0, 25_000_000.0, 15_000_000.0, 10_000_000.0, top5_current - 90_000_000.0]
+        initials = [70_000_000.0, 50_000_000.0, 35_000_000.0, 20_000_000.0, 12_050_648.0]
+        remainder = total_current - top5_current
+        max_rest = min(currents) - 1.0
+        n_rest = int(remainder // max_rest) + 1
+        rest_each = remainder / n_rest
+
+        leases = []
+        for i in range(5):
+            leases.append({
+                "id": f"L-top-{i}",
+                "title": f"Top Lease {i + 1}",
+                "lease_liability": initials[i],
+                "status": "active",
+                "end_date": "2030-12-31",
+                "results": {
+                    "amortization_schedule": [
+                        {"Date": "2020-01-01", "Closing_Balance": initials[i]},
+                        {"Date": "2026-01-01", "Closing_Balance": currents[i]},
+                    ]
+                },
+            })
+        for i in range(n_rest):
+            leases.append({
+                "id": f"L-rest-{i}",
+                "lease_liability": 500_000.0,
+                "status": "active",
+                "end_date": "2030-12-31",
+                "results": {
+                    "amortization_schedule": [
+                        {"Date": "2026-01-01", "Closing_Balance": rest_each},
+                    ]
+                },
+            })
+
+        as_of = datetime.strptime("2026-08-25", "%Y-%m-%d").date()
+        top_leases = sorted(
+            leases,
+            key=lambda x: app_module._ifrs16_current_liability(x, as_of=as_of)[0],
+            reverse=True,
+        )[:5]
+        top5_sum = sum(app_module._ifrs16_current_liability(l, as_of=as_of)[0] for l in top_leases)
+        total = sum(app_module._ifrs16_current_liability(l, as_of=as_of)[0] for l in leases)
+        pct = top5_sum / total * 100
+
+        # Must use schedule current (~96.9M / 47.4%), NOT initial 187M / 91.5%
+        assert round(top5_sum, 0) == 96_855_688
+        assert abs(pct - 47.4) < 0.1
+        assert round(top5_sum, 0) != 187_050_648
+
+        title = f"Top 5 Leases Hold {pct:.1f}% of Liability"
+        body = (
+            f"collectively represent AED {top5_sum:,.0f}, or approximately "
+            f"{pct:.1f}% of the total current lease liability of AED {total:,.0f}."
+        )
+        assert "47.4%" in title
+        assert "47.4%" in body
+        assert "91.5%" not in title
+        assert "91.5%" not in body
+        assert "187,050,648" not in body
+        mismatches = app_module._reconcile_percentage_claims(body)
+        assert mismatches == []

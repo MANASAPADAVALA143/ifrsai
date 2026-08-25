@@ -2475,24 +2475,93 @@ def _ifrs16_rou_asset(lease: Dict[str, Any]) -> float:
     return float(lease.get("rou_asset") or lease.get("rou") or (res or {}).get("rou_asset") or 0)
 
 
-def _ifrs16_current_liability(lease: Dict[str, Any]):
-    """CURRENT carrying value of the lease liability as of the analysis date, if the
-    frontend supplied one (read from the lease's amortization schedule — never
-    recomputed here). Falls back to the initial-measurement value; the boolean
-    return flags whether a fallback occurred."""
+def _ifrs16_amortization_rows(lease: Dict[str, Any]) -> List[Dict[str, Any]]:
+    res = lease.get("results") if isinstance(lease.get("results"), dict) else {}
+    sched = lease.get("amortization_schedule") or (res or {}).get("amortization_schedule") or []
+    if not isinstance(sched, list):
+        return []
+    return [r for r in sched if isinstance(r, dict)]
+
+
+def _ifrs16_schedule_as_of_row(lease: Dict[str, Any], as_of=None) -> Optional[Dict[str, Any]]:
+    """Latest amortization row with Date <= as_of (defaults to today)."""
+    from datetime import date as _date
+
+    as_of = as_of or _date.today()
+    best = None
+    best_d = None
+    for row in _ifrs16_amortization_rows(lease):
+        raw = row.get("Date") or row.get("date")
+        d = _ifrs16_parse_date(str(raw) if raw is not None else "")
+        if d is None or d > as_of:
+            continue
+        if best_d is None or d > best_d:
+            best = row
+            best_d = d
+    return best
+
+
+def _ifrs16_liability_from_schedule_row(row: Dict[str, Any]) -> Optional[float]:
+    for key in (
+        "Lease Liability",
+        "lease_liability_balance",
+        "Closing_Balance",
+        "closing_balance",
+        "lease_liability",
+    ):
+        if row.get(key) is not None and row.get(key) != "":
+            try:
+                return float(row[key])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _ifrs16_rou_from_schedule_row(row: Dict[str, Any]) -> Optional[float]:
+    for key in ("ROU Asset", "rou_asset_balance", "rou_nbv", "rou_asset"):
+        if row.get(key) is not None and row.get(key) != "":
+            try:
+                return float(row[key])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _ifrs16_current_liability(lease: Dict[str, Any], as_of=None):
+    """CURRENT carrying value of the lease liability as of the analysis date.
+
+    Lookup order:
+      1. Explicit current_lease_liability (top-level or results)
+      2. Amortization schedule row nearest to (and not after) as_of — Closing_Balance
+      3. Fallback to initial-measurement liability (flagged)
+
+    Never use initial measurement when a schedule balance is available — that was the
+    root cause of the top-5 concentration AED figure staying at commencement values
+    while the portfolio total used true current carrying amounts.
+    """
     res = lease.get("results") if isinstance(lease.get("results"), dict) else {}
     current = float(lease.get("current_lease_liability") or (res or {}).get("current_lease_liability") or 0)
     if current > 0:
         return current, False
+    row = _ifrs16_schedule_as_of_row(lease, as_of=as_of)
+    if row is not None:
+        from_sched = _ifrs16_liability_from_schedule_row(row)
+        if from_sched is not None and from_sched >= 0:
+            return from_sched, False
     return _ifrs16_lease_liability(lease), True
 
 
-def _ifrs16_current_rou(lease: Dict[str, Any]):
+def _ifrs16_current_rou(lease: Dict[str, Any], as_of=None):
     """CURRENT carrying value of the ROU asset. See _ifrs16_current_liability."""
     res = lease.get("results") if isinstance(lease.get("results"), dict) else {}
     current = float(lease.get("current_rou_asset") or (res or {}).get("current_rou_asset") or 0)
     if current > 0:
         return current, False
+    row = _ifrs16_schedule_as_of_row(lease, as_of=as_of)
+    if row is not None:
+        from_sched = _ifrs16_rou_from_schedule_row(row)
+        if from_sched is not None and from_sched >= 0:
+            return from_sched, False
     return _ifrs16_rou_asset(lease), True
 
 
@@ -2747,12 +2816,10 @@ async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
 
         total_annual_payments = sum(_ifrs16_monthly_payment(l) * 12 for l in active_leases)
 
-        # CURRENT carrying values — read from each active lease's own amortization
-        # schedule (via current_lease_liability / current_rou_asset supplied by the
-        # frontend), summed across active leases only. Distinct from the initial-
-        # measurement totals above; used for amortisation-phase / health-score commentary.
-        current_liability_pairs = [_ifrs16_current_liability(l) for l in active_leases]
-        current_rou_pairs = [_ifrs16_current_rou(l) for l in active_leases]
+        # CURRENT carrying values — prefer explicit current_lease_liability, else read
+        # Closing_Balance from amortization schedule as of today, else fall back to initial.
+        current_liability_pairs = [_ifrs16_current_liability(l, as_of=today) for l in active_leases]
+        current_rou_pairs = [_ifrs16_current_rou(l, as_of=today) for l in active_leases]
         total_current_liability = sum(v for v, _ in current_liability_pairs)
         total_current_rou = sum(v for v, _ in current_rou_pairs)
         any_current_values_estimated = any(is_fallback for _, is_fallback in current_liability_pairs + current_rou_pairs)
@@ -2785,7 +2852,7 @@ async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
         # amortise at different rates depending on commencement date, term, and rate.
         top_leases = sorted(
             active_leases,
-            key=lambda x: _ifrs16_current_liability(x)[0],
+            key=lambda x: _ifrs16_current_liability(x, as_of=today)[0],
             reverse=True,
         )[:5]
 
@@ -2828,7 +2895,7 @@ async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
         # always reconcile (this was the root cause of the reported 47.4%-vs-91.5% mismatch:
         # top_leases used to be ranked/summed by INITIAL liability while the percentage was
         # computed against the CURRENT total).
-        top5_current_liability = sum(_ifrs16_current_liability(l)[0] for l in top_leases)
+        top5_current_liability = sum(_ifrs16_current_liability(l, as_of=today)[0] for l in top_leases)
 
         # Deterministic, documented health score — computed here, not by Claude.
         health = _ifrs16_compute_health_score(
@@ -2891,7 +2958,7 @@ you only write the narrative around it, you do not set the score yourself):
 Top 5 Leases by CURRENT Liability (ranked and summed by current carrying value, NOT initial measurement):
 {chr(10).join([
     f"  - {l.get('title', l.get('contract_id', l.get('id', 'Unknown')))}: "
-    f"{fmt(_ifrs16_current_liability(l)[0])} current liability, "
+    f"{fmt(_ifrs16_current_liability(l, as_of=today)[0])} current liability, "
     f"ends {_ifrs16_end_date(l) or 'N/A'}"
     for l in top_leases
 ])}
@@ -2984,30 +3051,52 @@ server (see PRE-COMPUTED HEALTH SCORE above) and is not part of your response.""
                     f"= {mm['actual_pct']}%. Snippet: {mm['snippet']!r}"
                 )
 
-        # Deterministic override, not just a warning: Claude is instructed to echo the
-        # pre-computed top-5 concentration figures verbatim, but nothing stops it from
-        # ignoring that instruction and stating its own (self-inconsistent) numbers —
-        # exactly the reported "AED 187,050,648, or 47.4% of AED 204,336,895" bug,
-        # where 187,050,648/204,336,895 actually = 91.5%, not 47.4%. Any insight whose
-        # text references "top 5" is rewritten in code with the guaranteed-reconciling
-        # sentence, so the display never depends on the model's compliance.
+        # Deterministic override for BOTH title and body: prior partial fix rewrote
+        # finding to use (sometimes still-initial) figures → body said 91.5% while
+        # Claude's title still said 47%. Always rewrite title + finding + impact from
+        # the same current-value top-5 sum / current portfolio total.
         top5_concentration_pct_final = (
             top5_current_liability / total_current_liability * 100
         ) if total_current_liability > 0 else 0
+        # Self-consistency guard — must hold before we publish either field.
+        if total_current_liability > 0:
+            recomputed = top5_current_liability / total_current_liability * 100
+            if abs(recomputed - top5_concentration_pct_final) > 0.1:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Concentration self-consistency failed: "
+                        f"{top5_current_liability} / {total_current_liability} = {recomputed:.2f}% "
+                        f"but displayed pct is {top5_concentration_pct_final:.2f}%"
+                    ),
+                )
+        top5_title = f"Top 5 Leases Hold {top5_concentration_pct_final:.1f}% of Liability"
         top5_sentence = (
             f"Your top 5 leases ({', '.join(str(l.get('title', l.get('asset', l.get('id', '?')))) for l in top_leases)}) "
             f"collectively represent {fmt(top5_current_liability)}, or approximately "
             f"{top5_concentration_pct_final:.1f}% of the total current lease liability of {fmt(total_current_liability)}."
         )
+        top5_calc = (
+            f"{fmt(top5_current_liability)} ÷ {fmt(total_current_liability)} "
+            f"= {top5_concentration_pct_final:.1f}%"
+        )
         for insight in ai_data.get("insights", []):
             finding_text = str(insight.get("finding", ""))
+            title_text = str(insight.get("title", ""))
             category = str(insight.get("category", "")).upper()
-            if category == "CONCENTRATION_RISK" or "top 5" in finding_text.lower() or "top-5" in finding_text.lower():
+            is_concentration = (
+                category == "CONCENTRATION_RISK"
+                or "top 5" in finding_text.lower()
+                or "top-5" in finding_text.lower()
+                or "top 5" in title_text.lower()
+                or "top-5" in title_text.lower()
+                or "concentration" in title_text.lower()
+            )
+            if is_concentration:
+                insight["title"] = top5_title
                 insight["finding"] = top5_sentence
-                insight["calculation"] = (
-                    f"{fmt(top5_current_liability)} ÷ {fmt(total_current_liability)} "
-                    f"= {top5_concentration_pct_final:.1f}%"
-                )
+                insight["calculation"] = top5_calc
+                insight["impact"] = top5_calc
 
         metrics = {
             "total_liability": round(total_current_liability, 2),
@@ -3049,7 +3138,7 @@ server (see PRE-COMPUTED HEALTH SCORE above) and is not part of your response.""
             "top_leases_by_liability": [
                 {
                     "title": l.get("title", l.get("asset", "Unknown")),
-                    "liability": _ifrs16_current_liability(l)[0],
+                    "liability": _ifrs16_current_liability(l, as_of=today)[0],
                     "liability_initial": _ifrs16_lease_liability(l),
                     "monthly_payment": _ifrs16_monthly_payment(l),
                     "end_date": _ifrs16_end_date(l) or "N/A",
