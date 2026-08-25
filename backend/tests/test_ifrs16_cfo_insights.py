@@ -35,6 +35,7 @@ def _lease(
     current_lease_liability=None,
     current_rou_asset=None,
     escalation_rate=0.0,
+    title=None,
 ):
     lease = {
         "id": lease_id,
@@ -44,6 +45,8 @@ def _lease(
         "end_date": end_date,
         "escalation_rate": escalation_rate,
     }
+    if title is not None:
+        lease["title"] = title
     if status is not None:
         lease["status"] = status
     if current_lease_liability is not None:
@@ -325,3 +328,134 @@ class TestRouSafeguardLogic:
         total_rou = sum(app_module._ifrs16_rou_asset(l) for l in leases)
         assert total_liability > 0
         assert total_rou == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression — "Top 5 Leases Hold 47% of Liability" self-inconsistency bug.
+#
+# ROOT CAUSE (confirmed on pre-fix HEAD of generate_cfo_insights):
+#   top_leases = sorted(..., key=_ifrs16_lease_liability)   # INITIAL rank
+#   prompt listed fmt(_ifrs16_lease_liability(l)) for those leases  # INITIAL AED
+#   while health/concentration % used sum of CURRENT top-5 values / CURRENT total.
+# Claude then paired the INITIAL AED sum with the CURRENT %.
+#
+# FIX: rank + sum + display all from _ifrs16_current_liability on the same list.
+# ---------------------------------------------------------------------------
+
+class TestTop5ConcentrationUsesCurrentValues:
+    def test_top5_ranking_can_differ_between_initial_and_current_liability(self):
+        """A lease with a large initial liability that has heavily amortised can
+        rank below a smaller-initial-liability lease that has barely amortised —
+        the top-5-by-current selection must NOT assume the same 5 leases as
+        top-5-by-initial."""
+        leases = [
+            _lease(lease_id="L-big-initial", lease_liability=10_000_000.0, current_lease_liability=500_000.0),
+            _lease(lease_id="L-small-initial", lease_liability=2_000_000.0, current_lease_liability=1_900_000.0),
+        ] + [
+            _lease(lease_id=f"L-filler-{i}", lease_liability=3_000_000.0, current_lease_liability=1_000_000.0)
+            for i in range(6)
+        ]
+
+        top5_by_initial = sorted(leases, key=lambda x: app_module._ifrs16_lease_liability(x), reverse=True)[:5]
+        top5_by_current = sorted(leases, key=lambda x: app_module._ifrs16_current_liability(x)[0], reverse=True)[:5]
+
+        ids_by_initial = {l["id"] for l in top5_by_initial}
+        ids_by_current = {l["id"] for l in top5_by_current}
+
+        assert "L-big-initial" in ids_by_initial
+        assert "L-big-initial" not in ids_by_current
+        assert "L-small-initial" in ids_by_current
+
+    def test_reported_bug_dollar_figure_must_use_current_not_initial(self):
+        """Mirrors the confirmed bug numbers:
+        - INITIAL sum of top-5-by-initial = AED 187,050,648 (wrong display source)
+        - CURRENT total portfolio = AED 204,336,895
+        - CURRENT % = 47.4% (correct)
+        - CURRENT sum of top-5-by-current must be ≈ 47.4% of total, NOT 187M.
+        """
+        total_current = 204_336_895.0
+        top5_current_target = round(total_current * 0.474)  # 96,855,688
+        currents = [40_000_000.0, 25_000_000.0, 15_000_000.0, 10_000_000.0, top5_current_target - 90_000_000.0]
+        assert abs(sum(currents) - top5_current_target) < 1.0
+        initials = [70_000_000.0, 50_000_000.0, 35_000_000.0, 20_000_000.0, 12_050_648.0]
+        assert round(sum(initials), 0) == 187_050_648
+
+        # Remainder of the portfolio as many small leases, each below the 5th current
+        remainder = total_current - top5_current_target
+        max_rest = min(currents) - 1.0
+        n_rest = int(remainder // max_rest) + 1
+        rest_each = remainder / n_rest
+
+        leases = [
+            _lease(
+                lease_id=f"L-top-{i}",
+                title=f"Top Lease {i + 1}",
+                lease_liability=initials[i],
+                current_lease_liability=currents[i],
+            )
+            for i in range(5)
+        ] + [
+            _lease(
+                lease_id=f"L-rest-{i}",
+                lease_liability=500_000.0,
+                current_lease_liability=rest_each,
+            )
+            for i in range(n_rest)
+        ]
+
+        # OLD bug path: rank + display from INITIAL
+        top_by_initial = sorted(leases, key=lambda x: app_module._ifrs16_lease_liability(x), reverse=True)[:5]
+        stale_displayed_aed = sum(app_module._ifrs16_lease_liability(l) for l in top_by_initial)
+        assert round(stale_displayed_aed, 0) == 187_050_648
+
+        # FIXED path: rank + sum from CURRENT (same source as %)
+        top_leases = sorted(leases, key=lambda x: app_module._ifrs16_current_liability(x)[0], reverse=True)[:5]
+        top5_current_liability = sum(app_module._ifrs16_current_liability(l)[0] for l in top_leases)
+        total_current_liability = sum(app_module._ifrs16_current_liability(l)[0] for l in leases)
+        concentration_pct = top5_current_liability / total_current_liability * 100
+
+        assert [l["id"] for l in top_leases] == [f"L-top-{i}" for i in range(5)]
+        assert round(total_current_liability, 0) == 204_336_895
+        assert round(top5_current_liability, 0) == 96_855_688  # corrected AED sum
+        assert abs(concentration_pct - 47.4) < 0.1  # corrected % (unchanged)
+        assert abs((top5_current_liability / total_current_liability * 100) - concentration_pct) < 0.1
+        assert round(top5_current_liability, 0) != 187_050_648
+
+
+class TestPercentageClaimReconciliation:
+    """Unit tests for the automated narrative-consistency guard: for any
+    "X, or approximately Y% of Z" phrasing, Y must equal (X/Z)*100 within
+    0.1 percentage points. Catches this class of bug going forward."""
+
+    def test_detects_the_reported_mismatch(self):
+        text = (
+            "Your top 5 leases represent AED 187,050,648, or approximately 47.4% "
+            "of the total current lease liability of AED 204,336,895."
+        )
+        mismatches = app_module._reconcile_percentage_claims(text)
+        assert len(mismatches) == 1
+        assert abs(mismatches[0]["actual_pct"] - 91.5) < 0.1
+        assert mismatches[0]["claimed_pct"] == 47.4
+
+    def test_passes_corrected_claim(self):
+        text = (
+            "Your top 5 leases collectively represent AED 96,855,688, or approximately "
+            "47.4% of the total current lease liability of AED 204,336,895."
+        )
+        mismatches = app_module._reconcile_percentage_claims(text)
+        assert mismatches == []
+
+    def test_tolerance_allows_rounding_within_0_1_pp(self):
+        # 100000/200100*100 = 49.975… → 50.0 is within 0.1 pp
+        text = "AED 100,000, or approximately 50.0% of AED 200,100."
+        mismatches = app_module._reconcile_percentage_claims(text)
+        assert mismatches == []
+
+    def test_default_0_1_pp_catches_small_drift(self):
+        text = "AED 100,000, or approximately 50.2% of AED 200,000."
+        mismatches = app_module._reconcile_percentage_claims(text)
+        assert len(mismatches) == 1
+
+    def test_ignores_text_with_no_percentage_claim(self):
+        text = "Total lease liability is AED 204,336,895 across 36 active leases."
+        assert app_module._reconcile_percentage_claims(text) == []

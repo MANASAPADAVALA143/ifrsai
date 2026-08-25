@@ -14,6 +14,7 @@ import io
 import hashlib
 import os
 import json
+import re
 import uuid
 from pathlib import Path
 import shutil
@@ -2662,6 +2663,47 @@ def _ifrs16_compute_health_score(
     return {"score": score, "label": label, "factors": factors}
 
 
+_PCT_CLAIM_RE = re.compile(
+    r"([\d,]+(?:\.\d+)?)\D{0,60}?(\d+(?:\.\d+)?)\s*%\s+of\D{0,80}?([\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _reconcile_percentage_claims(text: str, tolerance_pp: float = 0.1) -> List[Dict[str, Any]]:
+    """Scans narrative text for "X, or approximately Y% of Z" style claims and checks
+    that Y matches (X/Z)*100 within `tolerance_pp` percentage points (default 0.1).
+    Returns a list of mismatches found (empty if the text is clean). Regression guard
+    for the reported "AED 187,050,648, or approximately 47.4% of ... AED 204,336,895"
+    bug, where the numerator and the total were computed from two different bases
+    (initial vs current measurement) and no longer reconciled against the stated percentage.
+
+    This is advisory (logs a warning), not a hard block — narrative text can legitimately
+    reference percentages unrelated to two nearby dollar figures, so false positives are
+    possible. It is a safety net to catch this specific failure class early, not a
+    guarantee of narrative correctness.
+    """
+    mismatches = []
+    for m in _PCT_CLAIM_RE.finditer(text or ""):
+        try:
+            numerator = float(m.group(1).replace(",", ""))
+            claimed_pct = float(m.group(2))
+            denominator = float(m.group(3).replace(",", ""))
+        except ValueError:
+            continue
+        if denominator <= 0 or numerator <= 0:
+            continue
+        actual_pct = numerator / denominator * 100
+        if abs(actual_pct - claimed_pct) > tolerance_pp:
+            mismatches.append({
+                "numerator": numerator,
+                "denominator": denominator,
+                "claimed_pct": claimed_pct,
+                "actual_pct": round(actual_pct, 2),
+                "snippet": m.group(0),
+            })
+    return mismatches
+
+
 @app.post("/api/ifrs16/cfo-insights")
 async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
     """IFRS 16 CFO strategic insights — portfolio metrics + Claude analysis."""
@@ -2738,9 +2780,12 @@ async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
             elif 90 < days_left <= 365:
                 expiring_365.append(l)
 
+        # Ranked by CURRENT carrying value, not initial measurement — the identity of
+        # the "top 5" can differ from a ranking by initial liability since leases
+        # amortise at different rates depending on commencement date, term, and rate.
         top_leases = sorted(
             active_leases,
-            key=lambda x: _ifrs16_lease_liability(x),
+            key=lambda x: _ifrs16_current_liability(x)[0],
             reverse=True,
         )[:5]
 
@@ -2778,10 +2823,12 @@ async def generate_cfo_insights(req: IFRS16CFOInsightsRequest):
             if not _ifrs16_end_date(l) or (_ifrs16_lease_liability(l) > 0 and _ifrs16_rou_asset(l) == 0)
         )
 
-        # Top-5 by CURRENT liability (not initial) — used for the concentration-risk factor.
-        top5_current_liability = sum(
-            sorted((v for v, _ in current_liability_pairs), reverse=True)[:5]
-        )
+        # Top-5 CURRENT liability sum, derived from the SAME `top_leases` list used in the
+        # prompt text below — guarantees the insight narrative and the underlying number
+        # always reconcile (this was the root cause of the reported 47.4%-vs-91.5% mismatch:
+        # top_leases used to be ranked/summed by INITIAL liability while the percentage was
+        # computed against the CURRENT total).
+        top5_current_liability = sum(_ifrs16_current_liability(l)[0] for l in top_leases)
 
         # Deterministic, documented health score — computed here, not by Claude.
         health = _ifrs16_compute_health_score(
@@ -2841,21 +2888,29 @@ you only write the narrative around it, you do not set the score yourself):
   Methodology (starts at 100, deducts per factor):
 {health_factor_lines}
 
-Top 5 Leases by Liability:
+Top 5 Leases by CURRENT Liability (ranked and summed by current carrying value, NOT initial measurement):
 {chr(10).join([
     f"  - {l.get('title', l.get('contract_id', l.get('id', 'Unknown')))}: "
-    f"{fmt(_ifrs16_lease_liability(l))} liability, "
+    f"{fmt(_ifrs16_current_liability(l)[0])} current liability, "
     f"ends {_ifrs16_end_date(l) or 'N/A'}"
     for l in top_leases
 ])}
+Top-5 current liability sum: {fmt(top5_current_liability)}
+Top-5 concentration = top-5 current liability sum ÷ total CURRENT liability = {fmt(top5_current_liability)} ÷ {fmt(total_current_liability)} = {(top5_current_liability / total_current_liability * 100) if total_current_liability > 0 else 0:.1f}%
+CRITICAL: If you state this concentration percentage in your narrative, it MUST equal
+(top-5 sum ÷ total current liability) × 100 as computed above — the two numbers you quote in
+the same sentence must be arithmetically consistent with each other. Use the percentage given
+here verbatim; do not compute your own.
 
 Leases expiring within 90 days (exact days remaining — use these numbers verbatim, do not recalculate):
 {expiring_90_lines}
 
 IMPORTANT NOTES FOR YOUR ANALYSIS:
-- ROU Asset and Lease Liability figures above are INITIAL-MEASUREMENT sums at each lease's
-  commencement date, not current carrying values. Do NOT describe them as "current carrying
-  value" or infer an amortisation phase from them.
+- The portfolio totals above include BOTH an INITIAL-measurement figure (at each lease's
+  commencement date) and a CURRENT carrying-value figure (as of {today.isoformat()}). The
+  Top-5 concentration figures above are CURRENT values — use current values consistently
+  whenever discussing concentration, amortisation phase, or current portfolio maturity.
+  Only use the INITIAL figures when explicitly discussing initial recognition.
 - Report the active lease count as {len(active_leases)} (not the total {len(leases)}).
 - Do NOT generate a "cost optimisation" or "sublease opportunity" insight — this portfolio
   data contains no utilisation %, market rent, or sublease income fields to support one.
@@ -2912,6 +2967,48 @@ server (see PRE-COMPUTED HEALTH SCORE above) and is not part of your response.""
                 ai_text = ai_text[4:]
         ai_data = json.loads(ai_text.strip())
 
+        # Regression guard for the reported "AED X, or Y% of AED Z" self-inconsistency
+        # bug — scan every narrative field Claude returned and log a warning (does not
+        # block the response) if any percentage claim doesn't reconcile against the two
+        # dollar figures quoted alongside it.
+        narrative_fields = [str(ai_data.get("one_line_summary", ""))]
+        for insight in ai_data.get("insights", []):
+            narrative_fields.append(str(insight.get("finding", "")))
+            narrative_fields.append(str(insight.get("recommendation", "")))
+        for field_text in narrative_fields:
+            mismatches = _reconcile_percentage_claims(field_text)
+            for mm in mismatches:
+                print(
+                    f"[cfo-insights] WARNING: narrative percentage mismatch — "
+                    f"claimed {mm['claimed_pct']}% but {mm['numerator']:,.0f}/{mm['denominator']:,.0f} "
+                    f"= {mm['actual_pct']}%. Snippet: {mm['snippet']!r}"
+                )
+
+        # Deterministic override, not just a warning: Claude is instructed to echo the
+        # pre-computed top-5 concentration figures verbatim, but nothing stops it from
+        # ignoring that instruction and stating its own (self-inconsistent) numbers —
+        # exactly the reported "AED 187,050,648, or 47.4% of AED 204,336,895" bug,
+        # where 187,050,648/204,336,895 actually = 91.5%, not 47.4%. Any insight whose
+        # text references "top 5" is rewritten in code with the guaranteed-reconciling
+        # sentence, so the display never depends on the model's compliance.
+        top5_concentration_pct_final = (
+            top5_current_liability / total_current_liability * 100
+        ) if total_current_liability > 0 else 0
+        top5_sentence = (
+            f"Your top 5 leases ({', '.join(str(l.get('title', l.get('asset', l.get('id', '?')))) for l in top_leases)}) "
+            f"collectively represent {fmt(top5_current_liability)}, or approximately "
+            f"{top5_concentration_pct_final:.1f}% of the total current lease liability of {fmt(total_current_liability)}."
+        )
+        for insight in ai_data.get("insights", []):
+            finding_text = str(insight.get("finding", ""))
+            category = str(insight.get("category", "")).upper()
+            if category == "CONCENTRATION_RISK" or "top 5" in finding_text.lower() or "top-5" in finding_text.lower():
+                insight["finding"] = top5_sentence
+                insight["calculation"] = (
+                    f"{fmt(top5_current_liability)} ÷ {fmt(total_current_liability)} "
+                    f"= {top5_concentration_pct_final:.1f}%"
+                )
+
         metrics = {
             "total_liability": round(total_current_liability, 2),
             "total_rou_assets": round(total_current_rou, 2),
@@ -2945,10 +3042,15 @@ server (see PRE-COMPUTED HEALTH SCORE above) and is not part of your response.""
                 f"{today.isoformat()}, read from each active lease's amortization schedule "
                 f"(initial-measurement sums were {fmt(total_liability)} liability / {fmt(total_rou)} ROU)."
             ),
+            "top5_current_liability_sum": round(top5_current_liability, 2),
+            "top5_concentration_pct": round(
+                (top5_current_liability / total_current_liability * 100) if total_current_liability > 0 else 0, 2
+            ),
             "top_leases_by_liability": [
                 {
                     "title": l.get("title", l.get("asset", "Unknown")),
-                    "liability": _ifrs16_lease_liability(l),
+                    "liability": _ifrs16_current_liability(l)[0],
+                    "liability_initial": _ifrs16_lease_liability(l),
                     "monthly_payment": _ifrs16_monthly_payment(l),
                     "end_date": _ifrs16_end_date(l) or "N/A",
                 }
