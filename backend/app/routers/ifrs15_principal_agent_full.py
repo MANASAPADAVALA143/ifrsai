@@ -13,14 +13,19 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from backend.app.dependencies.auth import get_verified_firm_id
 from backend.app.services.ifrs15_principal_agent_db import pa_db
 from backend.app.services.supabase_client import is_supabase_configured
 
-router = APIRouter(prefix="/api/ifrs15/principal-agent-full", tags=["ifrs15-principal-agent-full"])
+router = APIRouter(
+    prefix="/api/ifrs15/principal-agent-full",
+    tags=["ifrs15-principal-agent-full"],
+    dependencies=[Depends(get_verified_firm_id)],
+)
 
 MONEY_Q = Decimal("0.0001")
 INDICATOR_VALUES = {

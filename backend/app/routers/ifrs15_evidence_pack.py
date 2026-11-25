@@ -10,15 +10,20 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.app.data.ifrs15_checklist_master import CHECKLIST
+from backend.app.dependencies.auth import get_verified_firm_id
 from backend.app.services.ifrs15_evidence_pack_db import evidence_pack_db
 from backend.app.services.supabase_client import is_supabase_configured
 
-router = APIRouter(prefix="/api/ifrs15/evidence-pack", tags=["ifrs15-evidence-pack"])
+router = APIRouter(
+    prefix="/api/ifrs15/evidence-pack",
+    tags=["ifrs15-evidence-pack"],
+    dependencies=[Depends(get_verified_firm_id)],
+)
 
 TEAL = "#0D9488"
 RED = "#DC2626"

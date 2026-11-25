@@ -7,13 +7,18 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from backend.app.dependencies.auth import get_verified_firm_id
 from backend.app.services.ifrs15_billing_recon_db import billing_recon_db
 from backend.app.services.supabase_client import is_supabase_configured
 
-router = APIRouter(prefix="/api/ifrs15/billing-recon", tags=["ifrs15-billing-recon"])
+router = APIRouter(
+    prefix="/api/ifrs15/billing-recon",
+    tags=["ifrs15-billing-recon"],
+    dependencies=[Depends(get_verified_firm_id)],
+)
 
 MONEY_Q = Decimal("0.0001")
 VALID_TX_TYPES = {"invoice", "credit_note", "payment", "refund"}

@@ -10,15 +10,20 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from backend.app.dependencies.auth import get_verified_firm_id
 from backend.app.services.ifrs15_db import ifrs15_db
 from backend.app.services.ifrs15_rpo_dashboard_db import rpo_dash_db
 from backend.app.services.supabase_client import is_supabase_configured
 
-router = APIRouter(prefix="/api/ifrs15/rpo-dashboard", tags=["ifrs15-rpo-dashboard"])
+router = APIRouter(
+    prefix="/api/ifrs15/rpo-dashboard",
+    tags=["ifrs15-rpo-dashboard"],
+    dependencies=[Depends(get_verified_firm_id)],
+)
 
 MONEY_Q = Decimal("0.0001")
 PCT_Q = Decimal("0.0001")
