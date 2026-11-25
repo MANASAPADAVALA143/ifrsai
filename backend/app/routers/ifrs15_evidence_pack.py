@@ -753,6 +753,12 @@ async def approve_pack(pack_id: str, body: ApproveRequest):
     pack = evidence_pack_db.get(pack_id)
     if not pack:
         raise HTTPException(status_code=404, detail="Pack not found")
+    # Segregation of duties: approver cannot be the preparer (BUG-004)
+    if body.approved_by and pack.get("prepared_by") and body.approved_by == pack["prepared_by"]:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "SELF_APPROVAL_FORBIDDEN", "message": "Approver cannot be the preparer"},
+        )
     patch: dict[str, Any] = {
         "approved_by": body.approved_by,
         "approved_at": _now(),

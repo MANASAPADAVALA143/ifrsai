@@ -6245,6 +6245,27 @@ except ImportError as _ifrs15_pa_err:
     print(f"WARNING: IFRS 15 principal-agent-full router not loaded: {_ifrs15_pa_err}")
 
 try:
+    from backend.app.routers.ifrs15_contract_qualification import router as _ifrs15_qual_router
+
+    app.include_router(_ifrs15_qual_router)
+except ImportError as _ifrs15_qual_err:
+    print(f"WARNING: IFRS 15 contract qualification router not loaded: {_ifrs15_qual_err}")
+
+try:
+    from backend.app.routers.ifrs15_vc_assessment import router as _ifrs15_vc_router
+
+    app.include_router(_ifrs15_vc_router)
+except ImportError as _ifrs15_vc_err:
+    print(f"WARNING: IFRS 15 VC assessment router not loaded: {_ifrs15_vc_err}")
+
+try:
+    from backend.app.routers.ifrs15_staged_journals import router as _ifrs15_journals_router
+
+    app.include_router(_ifrs15_journals_router)
+except ImportError as _ifrs15_jnl_err:
+    print(f"WARNING: IFRS 15 staged journals router not loaded: {_ifrs15_jnl_err}")
+
+try:
     from backend.app.routers.ifrs16_comparative import router as _ifrs16_comparative_router
 
     app.include_router(_ifrs16_comparative_router)

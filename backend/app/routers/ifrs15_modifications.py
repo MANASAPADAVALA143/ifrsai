@@ -535,6 +535,12 @@ async def approve(modification_id: str, body: ApproveRequest):
     row = mods_db.get_mod(modification_id)
     if not row:
         raise HTTPException(status_code=404, detail="Modification not found")
+    # Segregation of duties: reviewer cannot be the preparer (BUG-003 / BUG-004)
+    if body.approved_by and row.get("prepared_by") and body.approved_by == row["prepared_by"]:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "SELF_APPROVAL_FORBIDDEN", "message": "Reviewer cannot be the preparer"},
+        )
     updated = mods_db.update_mod(
         modification_id,
         {
